@@ -10,6 +10,12 @@ class CotMode(str, Enum):
     OFF = "off"
 
 
+class OutFormat(str, Enum):
+    PCM16 = "pcm16"
+    PCM24 = "pcm24"
+    FLOAT32 = "float32"
+
+
 @dataclass
 class SamplingParams:
     """Sampling parameters for ABC or semantic generation."""
@@ -45,6 +51,7 @@ class GenerationParams:
     
     model_gguf: str = "yue2-3b-q8_0.gguf"
     vae_gguf: str = "yue2-vae-f16.gguf"
+    out_format: OutFormat = OutFormat.PCM16
 
 
 def validate_params(params: GenerationParams) -> Optional[str]:

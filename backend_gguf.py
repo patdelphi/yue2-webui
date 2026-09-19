@@ -2,12 +2,11 @@
 import subprocess
 import threading
 import time
-import wave
 from pathlib import Path
 from typing import Optional, Callable
 from dataclasses import dataclass
 
-from config import GenerationParams, CotMode
+from config import GenerationParams, CotMode, OutFormat
 
 
 @dataclass
@@ -18,6 +17,8 @@ class GenerationResult:
     audio_duration_seconds: Optional[float] = None
     generation_time_seconds: Optional[float] = None
     error_message: Optional[str] = None
+    abc_score: Optional[str] = None
+    flac_path: Optional[str] = None
 
 
 class LogParser:
@@ -64,7 +65,7 @@ class GGUFBackend:
         self.model_dir = self.project_root / "models"
         self._current_process: Optional[subprocess.Popen] = None
     
-    def build_command(self, params: GenerationParams, output_path: Path) -> list[str]:
+    def build_command(self, params: GenerationParams, output_dir: Path) -> list[str]:
         """Build CLI command from parameters."""
         cmd = [
             str(self.cli_path),
@@ -106,8 +107,13 @@ class GGUFBackend:
         
         cmd.extend(["--session-option", f"yue2.model_gguf={params.model_gguf}"])
         cmd.extend(["--session-option", f"yue2.vae_gguf={params.vae_gguf}"])
-        
+
+        if params.out_format != OutFormat.PCM16:
+            cmd.extend(["--out-format", params.out_format.value])
+
+        output_path = output_dir / "audio.wav"
         cmd.extend(["--out", str(output_path)])
+        cmd.extend(["--out-dir", str(output_dir)])
         cmd.append("--log")
         
         return cmd
@@ -116,8 +122,9 @@ class GGUFBackend:
                  on_progress: Optional[Callable[[dict], None]] = None,
                  cancel_event: Optional[threading.Event] = None) -> GenerationResult:
         """Execute generation."""
+        output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / "audio.wav"
-        cmd = self.build_command(params, output_path)
+        cmd = self.build_command(params, output_dir)
         
         start_time = time.time()
         
@@ -163,11 +170,20 @@ class GGUFBackend:
             
             audio_duration = self._get_audio_duration(output_path)
             
+            abc_score = None
+            abc_path = output_dir / "score.abc"
+            if abc_path.exists():
+                abc_score = abc_path.read_text(encoding="utf-8")
+            
+            flac_path = self.export_flac(output_path)
+            
             return GenerationResult(
                 success=True,
                 audio_path=str(output_path),
                 audio_duration_seconds=audio_duration,
                 generation_time_seconds=elapsed,
+                abc_score=abc_score,
+                flac_path=str(flac_path) if flac_path else None,
             )
             
         except Exception as e:
@@ -182,10 +198,27 @@ class GGUFBackend:
     
     def _get_audio_duration(self, path: Path) -> float:
         """Get WAV file duration in seconds."""
-        with wave.open(str(path), 'rb') as f:
-            frames = f.getnframes()
-            rate = f.getframerate()
-            return frames / rate
+        import soundfile
+        info = soundfile.info(str(path))
+        return info.frames / info.samplerate
+
+    def export_flac(self, wav_path: Path) -> Optional[Path]:
+        """Convert WAV to FLAC using ffmpeg. Returns FLAC path or None on failure."""
+        import shutil
+        flac_path = wav_path.with_suffix(".flac")
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            return None
+        try:
+            subprocess.run(
+                [ffmpeg, "-y", "-i", str(wav_path), "-c", "flac", str(flac_path)],
+                capture_output=True, timeout=60,
+            )
+            if flac_path.exists():
+                return flac_path
+            return None
+        except Exception:
+            return None
     
     def check_models(self) -> dict:
         """Check if model files exist."""
