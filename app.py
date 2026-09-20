@@ -13,6 +13,7 @@ from starlette.routing import Route
 from config import GenerationParams, CotMode, SamplingParams, OutFormat, validate_params
 from backend_gguf import GGUFBackend
 from style_presets import STYLE_PRESETS
+from vocal_presets import VOCAL_PRESETS, INSTRUMENT_PRESETS, MOOD_PRESETS
 from lyrics_templates import LYRICS_TEMPLATES
 from history import HistoryManager, HistoryRecord
 from postprocess import postprocess_audio
@@ -373,6 +374,33 @@ def on_style_preset(name):
     return STYLE_PRESETS.get(name, "")
 
 
+def append_to_style(current_style, preset_value):
+    """Append preset value to current style."""
+    if not current_style or not current_style.strip():
+        return preset_value
+    if preset_value in current_style:
+        return current_style
+    return f"{current_style}, {preset_value}"
+
+
+def on_vocal_preset(current_style, name):
+    """Append vocal preset to style."""
+    preset = VOCAL_PRESETS.get(name, "")
+    return append_to_style(current_style, preset)
+
+
+def on_instrument_preset(current_style, name):
+    """Append instrument preset to style."""
+    preset = INSTRUMENT_PRESETS.get(name, "")
+    return append_to_style(current_style, preset)
+
+
+def on_mood_preset(current_style, name):
+    """Append mood preset to style."""
+    preset = MOOD_PRESETS.get(name, "")
+    return append_to_style(current_style, preset)
+
+
 def on_lyrics_template(name):
     """Fill lyrics from template."""
     return LYRICS_TEMPLATES.get(name, "")
@@ -582,67 +610,105 @@ def build_ui():
             with gr.Tab("创作"):
                 with gr.Row():
                     with gr.Column(scale=1):
-                        gr.Markdown("### 风格描述")
-                        style_input = gr.Textbox(
-                            label="Style",
-                            placeholder="English, warm piano pop, expressive female voice, acoustic piano, 88 BPM",
-                            lines=2,
-                            info="语言 + 流派 + 乐器 + 人声 + 速度",
-                        )
+                        with gr.Accordion("风格描述", open=False):
+                            gr.Markdown("### 风格描述")
+                            style_input = gr.Textbox(
+                                label="Style",
+                                placeholder="English, warm piano pop, expressive female voice, acoustic piano, 88 BPM",
+                                lines=2,
+                                info="语言 + 流派 + 乐器 + 人声 + 速度",
+                            )
 
-                        gr.Markdown("#### 风格快捷标签")
-                        preset_names = list(STYLE_PRESETS.keys())
-                        half = len(preset_names) // 2
-                        with gr.Row():
-                            for name in preset_names[:half]:
-                                btn = gr.Button(name, size="sm")
-                                btn.click(fn=lambda n=name: on_style_preset(n), outputs=style_input)
-                        with gr.Row():
-                            for name in preset_names[half:]:
-                                btn = gr.Button(name, size="sm")
-                                btn.click(fn=lambda n=name: on_style_preset(n), outputs=style_input)
+                            gr.Markdown("#### 风格快捷标签")
+                            preset_names = list(STYLE_PRESETS.keys())
+                            half = len(preset_names) // 2
+                            with gr.Row():
+                                for name in preset_names[:half]:
+                                    btn = gr.Button(name, size="sm")
+                                    btn.click(fn=lambda n=name: on_style_preset(n), outputs=style_input)
+                            with gr.Row():
+                                for name in preset_names[half:]:
+                                    btn = gr.Button(name, size="sm")
+                                    btn.click(fn=lambda n=name: on_style_preset(n), outputs=style_input)
 
-                        gr.Markdown("### 歌词")
+                            with gr.Accordion("人声标签", open=False):
+                                vocal_names = list(VOCAL_PRESETS.keys())
+                                half_vocal = len(vocal_names) // 2
+                                with gr.Row():
+                                    for name in vocal_names[:half_vocal]:
+                                        btn = gr.Button(name, size="sm")
+                                        btn.click(fn=lambda current, n=name: on_vocal_preset(current, n), inputs=style_input, outputs=style_input)
+                                with gr.Row():
+                                    for name in vocal_names[half_vocal:]:
+                                        btn = gr.Button(name, size="sm")
+                                        btn.click(fn=lambda current, n=name: on_vocal_preset(current, n), inputs=style_input, outputs=style_input)
 
-                        with gr.Row():
-                            gr.Button("+ Verse", size="sm")
-                            gr.Button("+ Chorus", size="sm")
-                            gr.Button("+ Bridge", size="sm")
-                            gr.Button("+ Intro", size="sm")
-                            gr.Button("+ Outro", size="sm")
-                            gr.Button("+ Pre-Chorus", size="sm")
+                            with gr.Accordion("乐器标签", open=False):
+                                inst_names = list(INSTRUMENT_PRESETS.keys())
+                                half_inst = len(inst_names) // 2
+                                with gr.Row():
+                                    for name in inst_names[:half_inst]:
+                                        btn = gr.Button(name, size="sm")
+                                        btn.click(fn=lambda current, n=name: on_instrument_preset(current, n), inputs=style_input, outputs=style_input)
+                                with gr.Row():
+                                    for name in inst_names[half_inst:]:
+                                        btn = gr.Button(name, size="sm")
+                                        btn.click(fn=lambda current, n=name: on_instrument_preset(current, n), inputs=style_input, outputs=style_input)
 
-                        gr.Markdown("#### 歌曲结构模板")
-                        with gr.Row():
-                            gr.Button("Verse-Chorus", size="sm")
-                            gr.Button("V-C-V-C", size="sm")
-                            gr.Button("V-C-V-C-B-C", size="sm")
-                            gr.Button("V-V-C", size="sm")
-                            gr.Button("A-A-B-A", size="sm")
+                            with gr.Accordion("情绪标签", open=False):
+                                mood_names = list(MOOD_PRESETS.keys())
+                                half_mood = len(mood_names) // 2
+                                with gr.Row():
+                                    for name in mood_names[:half_mood]:
+                                        btn = gr.Button(name, size="sm")
+                                        btn.click(fn=lambda current, n=name: on_mood_preset(current, n), inputs=style_input, outputs=style_input)
+                                with gr.Row():
+                                    for name in mood_names[half_mood:]:
+                                        btn = gr.Button(name, size="sm")
+                                        btn.click(fn=lambda current, n=name: on_mood_preset(current, n), inputs=style_input, outputs=style_input)
 
-                        lyrics_input = gr.Textbox(
-                            label="Lyrics",
-                            placeholder="[Verse]\n在这里输入歌词...\n\n[Chorus]\n副歌歌词...",
-                            lines=10,
-                            info="支持 [Verse] [Chorus] [Bridge] 段落标记，可拖拽排序",
-                        )
+                        with gr.Accordion("歌词", open=False):
+                            gr.Markdown("### 歌词")
 
-                        segment_cards = gr.HTML(
-                            label="段落拖拽排序",
-                            value='<div id="segment-cards" style="padding:4px 0;"></div>',
-                        )
-                        structure_analysis = gr.HTML(
-                            label="结构分析",
-                            value='<div id="lyrics-structure" style="padding:4px 8px;color:#888;">输入歌词后显示结构分析</div>',
-                        )
+                            with gr.Row():
+                                gr.Button("+ Verse", size="sm")
+                                gr.Button("+ Chorus", size="sm")
+                                gr.Button("+ Bridge", size="sm")
+                                gr.Button("+ Intro", size="sm")
+                                gr.Button("+ Outro", size="sm")
+                                gr.Button("+ Pre-Chorus", size="sm")
 
-                        template_dropdown = gr.Dropdown(
-                            label="歌词模板 (内容)",
-                            choices=list(LYRICS_TEMPLATES.keys()),
-                            value=None,
-                            info="选择模板将填充歌词内容（覆盖现有内容）",
-                        )
-                        template_dropdown.change(fn=on_lyrics_template, inputs=template_dropdown, outputs=lyrics_input)
+                            gr.Markdown("#### 歌曲结构模板")
+                            with gr.Row():
+                                gr.Button("Verse-Chorus", size="sm")
+                                gr.Button("V-C-V-C", size="sm")
+                                gr.Button("V-C-V-C-B-C", size="sm")
+                                gr.Button("V-V-C", size="sm")
+                                gr.Button("A-A-B-A", size="sm")
+
+                            lyrics_input = gr.Textbox(
+                                label="Lyrics",
+                                placeholder="[Verse]\n在这里输入歌词...\n\n[Chorus]\n副歌歌词...",
+                                lines=10,
+                                info="支持 [Verse] [Chorus] [Bridge] 段落标记，可拖拽排序",
+                            )
+
+                            segment_cards = gr.HTML(
+                                label="段落拖拽排序",
+                                value='<div id="segment-cards" style="padding:4px 0;"></div>',
+                            )
+                            structure_analysis = gr.HTML(
+                                label="结构分析",
+                                value='<div id="lyrics-structure" style="padding:4px 8px;color:#888;">输入歌词后显示结构分析</div>',
+                            )
+
+                            template_dropdown = gr.Dropdown(
+                                label="歌词模板 (内容)",
+                                choices=list(LYRICS_TEMPLATES.keys()),
+                                value=None,
+                                info="选择模板将填充歌词内容（覆盖现有内容）",
+                            )
+                            template_dropdown.change(fn=on_lyrics_template, inputs=template_dropdown, outputs=lyrics_input)
 
                         gr.Markdown("### 工作模式")
                         cot_input = gr.Radio(
