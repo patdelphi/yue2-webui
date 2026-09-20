@@ -622,15 +622,14 @@ def build_ui():
             with gr.Tab("创作"):
                 with gr.Row():
                     with gr.Column(scale=1):
-                        with gr.Accordion("风格描述", open=False):
-                            gr.Markdown("### 风格描述")
-                            style_input = gr.Textbox(
-                                label="Style",
-                                placeholder="English, warm piano pop, expressive female voice, acoustic piano, 88 BPM",
-                                lines=2,
-                                info="语言 + 流派 + 乐器 + 人声 + 速度",
-                            )
+                        style_input = gr.Textbox(
+                            label="风格描述",
+                            placeholder="English, warm piano pop, expressive female voice, acoustic piano, 88 BPM",
+                            lines=2,
+                            info="语言 + 流派 + 乐器 + 人声 + 速度",
+                        )
 
+                        with gr.Accordion("风格标签", open=False):
                             gr.Markdown("#### 风格快捷标签")
                             preset_names = list(STYLE_PRESETS.keys())
                             half = len(preset_names) // 2
@@ -703,9 +702,14 @@ def build_ui():
                                         btn = gr.Button(name, size="sm")
                                         btn.click(fn=lambda current, n=name: on_genre_preset(current, n), inputs=style_input, outputs=style_input)
 
-                        with gr.Accordion("歌词", open=False):
-                            gr.Markdown("### 歌词")
+                        lyrics_input = gr.Textbox(
+                            label="歌词",
+                            placeholder="[Verse]\n在这里输入歌词...\n\n[Chorus]\n副歌歌词...",
+                            lines=10,
+                            info="支持 [Verse] [Chorus] [Bridge] 段落标记，可拖拽排序",
+                        )
 
+                        with gr.Accordion("歌词工具", open=False):
                             with gr.Row():
                                 gr.Button("+ Verse", size="sm")
                                 gr.Button("+ Chorus", size="sm")
@@ -721,13 +725,6 @@ def build_ui():
                                 gr.Button("V-C-V-C-B-C", size="sm")
                                 gr.Button("V-V-C", size="sm")
                                 gr.Button("A-A-B-A", size="sm")
-
-                            lyrics_input = gr.Textbox(
-                                label="Lyrics",
-                                placeholder="[Verse]\n在这里输入歌词...\n\n[Chorus]\n副歌歌词...",
-                                lines=10,
-                                info="支持 [Verse] [Chorus] [Bridge] 段落标记，可拖拽排序",
-                            )
 
                             segment_cards = gr.HTML(
                                 label="段落拖拽排序",
