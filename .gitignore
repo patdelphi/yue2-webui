@@ -49,3 +49,9 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.bak
+
+# Test screenshots
+test_*.png
+
+# Misc temporary
+=1.47

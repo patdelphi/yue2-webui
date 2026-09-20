@@ -88,21 +88,18 @@ class GGUFBackend:
         
         if params.abc is not None:
             cmd.extend(["--request-option", f"abc={params.abc}"])
-        
-        abc_defaults = {"temperature": 0.7, "top_p": 0.9, "top_k": 30,
-                        "repetition_penalty": 1.005, "penalty_window": 100,
-                        "min_tokens": 32, "max_tokens": 4096}
-        for key, default in abc_defaults.items():
+
+        from config import GenerationParams as GP
+        abc_defaults = GP.__dataclass_fields__["abc_sampling"].default_factory()
+        for key in ["temperature", "top_p", "top_k", "repetition_penalty", "penalty_window", "min_tokens", "max_tokens"]:
             val = getattr(params.abc_sampling, key)
-            if val != default:
+            if val != getattr(abc_defaults, key):
                 cmd.extend(["--request-option", f"abc_{key}={val}"])
-        
-        sem_defaults = {"temperature": 1.0, "top_p": 0.95, "top_k": 100,
-                        "repetition_penalty": 1.2, "penalty_window": 50,
-                        "min_tokens": 200, "max_tokens": 9000}
-        for key, default in sem_defaults.items():
+
+        sem_defaults = GP.__dataclass_fields__["semantic_sampling"].default_factory()
+        for key in ["temperature", "top_p", "top_k", "repetition_penalty", "penalty_window", "min_tokens", "max_tokens"]:
             val = getattr(params.semantic_sampling, key)
-            if val != default:
+            if val != getattr(sem_defaults, key):
                 cmd.extend(["--request-option", f"semantic_{key}={val}"])
         
         cmd.extend(["--session-option", f"yue2.model_gguf={params.model_gguf}"])
@@ -220,6 +217,13 @@ class GGUFBackend:
         except Exception:
             return None
     
+    def re_export_flac(self, wav_path: Path) -> Optional[Path]:
+        """Re-export WAV to FLAC (e.g. after post-processing). Returns FLAC path or None."""
+        flac_path = wav_path.with_suffix(".flac")
+        if flac_path.exists():
+            flac_path.unlink()
+        return self.export_flac(wav_path)
+
     def check_models(self) -> dict:
         """Check if model files exist."""
         model_path = self.model_dir / "yue2-3b-q8_0.gguf"
