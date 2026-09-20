@@ -581,7 +581,7 @@ def build_ui():
         with gr.Tabs():
             with gr.Tab("创作"):
                 with gr.Row():
-                    with gr.Column(scale=2):
+                    with gr.Column(scale=1):
                         gr.Markdown("### 风格描述")
                         style_input = gr.Textbox(
                             label="Style",
@@ -731,11 +731,10 @@ def build_ui():
                                 sem_min_tok_input = gr.Slider(label="语义 Min Tokens", minimum=0, maximum=9000, step=1, value=200)
                                 sem_max_tok_input = gr.Slider(label="语义 Max Tokens", minimum=1, maximum=9000, step=1, value=9000)
 
+                    with gr.Column(scale=1):
                         with gr.Row():
                             generate_btn = gr.Button("🎵 生成歌曲", variant="primary", size="lg")
                             cancel_btn = gr.Button("取消", size="lg")
-
-                    with gr.Column(scale=1):
                         gr.Markdown("### 输出")
                         audio_output = gr.Audio(label="生成的歌曲", type="filepath")
                         info_output = gr.Markdown()
