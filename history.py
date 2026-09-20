@@ -13,13 +13,14 @@ class HistoryRecord:
     task_id: str
     created_at: str
     style: str
-    lyrics_preview: str
-    cot: str
-    seed: int
-    audio_duration_seconds: float
-    generation_time_seconds: float
-    audio_path: str
-    output_dir: str
+    lyrics: str = ""
+    lyrics_preview: str = ""
+    cot: str = ""
+    seed: int = 0
+    audio_duration_seconds: float = 0
+    generation_time_seconds: float = 0
+    audio_path: str = ""
+    output_dir: str = ""
     backend: str = "gguf"
     status: str = "completed"
     abc_path: str = ""

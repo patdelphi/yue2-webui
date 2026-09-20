@@ -6,6 +6,9 @@ import shutil
 import threading
 from pathlib import Path
 from datetime import datetime
+from starlette.staticfiles import StaticFiles
+from starlette.responses import FileResponse
+from starlette.routing import Route
 
 from config import GenerationParams, CotMode, SamplingParams, OutFormat, validate_params
 from backend_gguf import GGUFBackend
@@ -61,6 +64,31 @@ def on_generate(
 ):
     """Generate button callback."""
     global current_task_id, current_cancel_event
+    try:
+        return _on_generate_impl(
+            style, lyrics, cot, seed, cfg_scale, num_inference_steps, out_format, batch_count,
+            normalize, fade, trim, metadata, abc_text,
+            abc_temp, abc_top_p, abc_top_k, abc_rep_penalty, abc_pen_window, abc_min_tok, abc_max_tok,
+            sem_temp, sem_top_p, sem_top_k, sem_rep_penalty, sem_pen_window, sem_min_tok, sem_max_tok,
+            progress,
+        )
+    except Exception as e:
+        import traceback
+        error_log = WEBUI_ROOT / "error.log"
+        error_log.write_text(
+            f"{datetime.now()}\n{traceback.format_exc()}",
+            encoding="utf-8",
+        )
+        raise
+
+
+def _on_generate_impl(
+    style, lyrics, cot, seed, cfg_scale, num_inference_steps, out_format, batch_count,
+    normalize, fade, trim, metadata, abc_text,
+    abc_temp, abc_top_p, abc_top_k, abc_rep_penalty, abc_pen_window, abc_min_tok, abc_max_tok,
+    sem_temp, sem_top_p, sem_top_k, sem_rep_penalty, sem_pen_window, sem_min_tok, sem_max_tok,
+    progress,
+):
 
     if not style or not style.strip():
         raise gr.Error("请输入风格描述")
@@ -161,14 +189,16 @@ def on_generate(
                     new_flac = backend.re_export_flac(wav_path)
                     result.flac_path = str(new_flac) if new_flac else None
 
-    total_time = sum(r.generation_time_seconds or 0 for _, _, r in successful)
-    avg_duration = sum(r.audio_duration_seconds or 0 for _, _, r in successful) / len(successful)
+    total_time = sum(r.generation_time_seconds or 0 for _, _, r, _ in successful)
+    avg_duration = sum(r.audio_duration_seconds or 0 for _, _, r, _ in successful) / len(successful)
 
     if batch_count > 1:
         duration_info = f"批量生成 **{len(successful)}/{batch_count}** 个变体 | 总耗时 **{total_time:.1f}s** | 平均音频时长 **{avg_duration:.1f}s** | {format_label}"
     else:
         r = successful[0][2]
         duration_info = f"生成耗时 **{r.generation_time_seconds:.1f}s** | 音频时长 **{r.audio_duration_seconds:.1f}s** | {format_label}"
+
+    lyrics_data_html = f'<div class="gen-lyrics-data" style="display:none" data-lyrics=\'{json.dumps(params.lyrics, ensure_ascii=False)}\' data-duration="{avg_duration}"></div>'
 
     for task_id, variant_dir, result, variant_seed in successful:
         abc_path = ""
@@ -181,6 +211,7 @@ def on_generate(
             task_id=task_id,
             created_at=datetime.now().isoformat(timespec="seconds"),
             style=params.style,
+            lyrics=params.lyrics,
             lyrics_preview=params.lyrics[:60],
             cot=params.cot.value,
             seed=variant_seed,
@@ -200,7 +231,7 @@ def on_generate(
 
     if batch_count == 1:
         flac_download = first_result.flac_path
-        return first_result.audio_path, duration_info, abc_display, abc_download, flac_download
+        return first_result.audio_path, duration_info, abc_display, abc_download, flac_download, lyrics_data_html, refresh_history()
     else:
         zip_path = output_dir / "batch.zip"
         import zipfile
@@ -218,7 +249,7 @@ def on_generate(
                     zf.write(abc_file, f"{var_name}/score.abc")
 
         audio_paths = [str(r.audio_path) for _, _, r, _ in successful]
-        return audio_paths, duration_info, abc_display, abc_download, str(zip_path)
+        return audio_paths, duration_info, abc_display, abc_download, str(zip_path), lyrics_data_html, refresh_history()
 
 
 def on_cancel():
@@ -309,6 +340,7 @@ def on_resynthesize(
             task_id=task_id,
             created_at=datetime.now().isoformat(timespec="seconds"),
             style=params.style,
+            lyrics=params.lyrics,
             lyrics_preview="(重新合成)",
             cot="melody",
             seed=params.seed,
@@ -325,7 +357,8 @@ def on_resynthesize(
 
         abc_download = str(output_dir / "score.abc") if result.abc_score else None
         flac_download = result.flac_path
-        return result.audio_path, duration_info, abc_download, flac_download
+        resynth_lyrics_data = f'<div class="gen-lyrics-data" style="display:none" data-lyrics=\'{json.dumps(params.lyrics, ensure_ascii=False)}\' data-duration="{result.audio_duration_seconds}"></div>'
+        return result.audio_path, duration_info, abc_download, flac_download, resynth_lyrics_data
     else:
         raise gr.Error(f"重新合成失败：{result.error_message}")
 
@@ -357,20 +390,33 @@ def refresh_history():
     return rows
 
 
-def on_history_select(evt: gr.SelectData, current_state: list):
-    """Handle history row selection. Returns updated state, audio, info, abc."""
+def _load_history_entry(row_index, current_state):
+    """Load a history entry by row index. Returns state, audio, info, style, lyrics, abc, preview, lyrics_data, duration_data."""
     rows = history_mgr.to_dataframe_rows()
-    if evt.index[0] >= len(rows):
-        return current_state, None, "请选择一条记录", ""
-    task_id = rows[evt.index[0]][5]
+    if row_index < 0 or row_index >= len(rows):
+        return current_state, None, "请选择一条记录", "", "", "", "", "", ""
+    task_id = rows[row_index][5]
     entry = history_mgr.get(task_id)
     if not entry:
-        return current_state, None, "记录不存在", ""
+        return current_state, None, "记录不存在", "", "", "", "", "", ""
     audio_path = Path(entry.audio_path)
     abc_score = history_mgr.get_abc_score(task_id) or ""
     if audio_path.exists():
-        return [task_id], str(audio_path), f"**{entry.task_id}** | {entry.style[:50]}...", abc_score
-    return [task_id], None, "音频文件不存在", ""
+        lyrics = entry.lyrics or entry.lyrics_preview or ""
+        lyrics_data = f'<div class="history-lyrics-data" style="display:none" data-lyrics=\'{json.dumps(lyrics, ensure_ascii=False)}\' data-duration="{entry.audio_duration_seconds}"></div>'
+        abc_preview = '<div id="history-abc-preview-container" style="padding: 20px; border-radius: 8px; min-height: 200px;"><div id="history-abc-paper"></div><div id="history-abc-audio"></div></div>'
+        return [task_id], str(audio_path), f"**{entry.task_id}**", entry.style, lyrics, abc_score, abc_preview, lyrics_data, f'<div class="history-duration-data" style="display:none" data-duration="{entry.audio_duration_seconds}"></div>'
+    return [task_id], None, "音频文件不存在", "", "", "", "", "", ""
+
+
+def on_history_select(evt: gr.SelectData, current_state: list):
+    """Handle history row selection via Dataframe.select (fallback)."""
+    return _load_history_entry(evt.index[0], current_state)
+
+
+def on_history_row_click(row_index, current_state):
+    """Handle history row selection via JS click handler."""
+    return _load_history_entry(int(row_index), current_state)
 
 
 def on_history_delete(selected_state):
@@ -694,43 +740,65 @@ def build_ui():
                         audio_output = gr.Audio(label="生成的歌曲", type="filepath")
                         info_output = gr.Markdown()
                         gr.Markdown("### ABC 乐谱")
-                        abc_output = gr.Textbox(
-                            label="生成的乐谱 (可编辑)",
-                            lines=10,
-                            interactive=True,
-                            info="生成后可编辑乐谱，点击「重新合成」使用修改后的乐谱生成新音频",
-                        )
+                        with gr.Accordion("生成的乐谱 (可编辑)", open=False):
+                            abc_output = gr.Textbox(
+                                label="ABC 乐谱文本",
+                                placeholder="X:1",
+                                lines=10,
+                                interactive=True,
+                                elem_id="abc-output",
+                                info="生成后可编辑乐谱，点击「重新合成」使用修改后的乐谱生成新音频",
+                            )
+                        gr.Markdown("#### 乐谱预览")
                         gr.HTML(
-                            label="乐谱预览",
-                            value='<div id="abc-preview-container" style="background: white; padding: 20px; border-radius: 8px; min-height: 200px;"><div id="abc-paper"></div><div id="abc-audio"></div></div>',
+                            value='<div id="abc-preview-container" style="padding: 20px; border-radius: 8px; min-height: 200px; border: 1px dashed rgba(255,255,255,0.15);"><div style="text-align:center;color:#666;margin-bottom:12px;">生成歌曲后乐谱将在此处渲染</div><div id="abc-paper"></div><div id="abc-audio"></div></div>',
                         )
                         with gr.Row():
                             gr.Button("导出 MIDI", size="sm")
                             gr.Button("导出 PNG", size="sm")
                         abc_file_output = gr.File(label="下载乐谱")
                         flac_file_output = gr.File(label="下载 FLAC")
+                        lyrics_sync_data = gr.HTML(value="", visible=False)
                         with gr.Row():
                             resynthesize_btn = gr.Button("重新合成", variant="secondary")
 
             with gr.Tab("历史"):
                 gr.Markdown("### 生成历史")
                 history_state = gr.State(value=[])
+                history_row_trigger = gr.Number(visible=True, value=-1, elem_id="history-row-trigger", label="")
                 history_df = gr.Dataframe(
                     headers=["时间", "风格", "模式", "音频时长", "生成耗时", "Task ID"],
                     datatype=["str", "str", "str", "str", "str", "str"],
                     row_count=10,
                     interactive=False,
                     value=refresh_history(),
+                    elem_id="history-table",
                 )
                 history_audio = gr.Audio(label="试听", type="filepath")
                 history_info = gr.Markdown()
-                history_abc = gr.Textbox(label="ABC 乐谱", lines=6, interactive=False)
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        history_lyrics = gr.Textbox(label="歌词", lines=10, interactive=False)
+                        history_lyric_sync = gr.HTML(
+                            label="歌词同步",
+                            value='<div id="history-lyric-sync" style="padding: 12px; min-height: 100px; border-radius: 8px;"></div>',
+                        )
+                    with gr.Column(scale=1):
+                        history_abc_preview = gr.HTML(
+                            label="乐谱预览",
+                            value='<div id="history-abc-preview-container" style="padding: 20px; border-radius: 8px; min-height: 200px; border: 1px dashed rgba(255,255,255,0.15);"><div style="text-align:center;color:#666;margin-bottom:12px;">点击历史记录后乐谱将在此处渲染</div><div id="history-abc-paper"></div><div id="history-abc-audio"></div></div>',
+                        )
+                        history_abc = gr.Textbox(label="ABC 乐谱文本", lines=6, interactive=False, elem_id="history-abc")
+                history_lyrics_data = gr.HTML(value="", visible=False)
+                history_duration_data = gr.HTML(value="", visible=False)
+                history_style = gr.Markdown(label="风格描述")
                 with gr.Row():
                     history_refresh_btn = gr.Button("刷新")
                     history_delete_btn = gr.Button("删除选中")
                     history_clear_btn = gr.Button("清空历史")
 
-                history_df.select(fn=on_history_select, inputs=history_state, outputs=[history_state, history_audio, history_info, history_abc])
+                history_df.select(fn=on_history_select, inputs=history_state, outputs=[history_state, history_audio, history_info, history_style, history_lyrics, history_abc, history_abc_preview, history_lyrics_data, history_duration_data])
+                history_row_trigger.change(fn=on_history_row_click, inputs=[history_row_trigger, history_state], outputs=[history_state, history_audio, history_info, history_style, history_lyrics, history_abc, history_abc_preview, history_lyrics_data, history_duration_data])
                 history_refresh_btn.click(fn=refresh_history, outputs=history_df)
                 history_delete_btn.click(fn=on_history_delete, inputs=history_state, outputs=[history_df, history_info, history_state])
                 history_clear_btn.click(fn=on_history_clear, outputs=[history_df, history_info, history_state])
@@ -766,7 +834,7 @@ def build_ui():
                 abc_temp_input, abc_top_p_input, abc_top_k_input, abc_rep_input, abc_pen_window_input, abc_min_tok_input, abc_max_tok_input,
                 sem_temp_input, sem_top_p_input, sem_top_k_input, sem_rep_input, sem_pen_window_input, sem_min_tok_input, sem_max_tok_input,
             ],
-            outputs=[audio_output, info_output, abc_output, abc_file_output, flac_file_output],
+            outputs=[audio_output, info_output, abc_output, abc_file_output, flac_file_output, lyrics_sync_data, history_df],
         )
 
         cancel_btn.click(fn=on_cancel, outputs=info_output)
@@ -778,7 +846,7 @@ def build_ui():
                 abc_temp_input, abc_top_p_input, abc_top_k_input, abc_rep_input, abc_pen_window_input, abc_min_tok_input, abc_max_tok_input,
                 sem_temp_input, sem_top_p_input, sem_top_k_input, sem_rep_input, sem_pen_window_input, sem_min_tok_input, sem_max_tok_input,
             ],
-            outputs=[audio_output, info_output, abc_file_output, flac_file_output],
+            outputs=[audio_output, info_output, abc_file_output, flac_file_output, lyrics_sync_data],
         )
 
         preset_load_btn.click(
@@ -813,266 +881,33 @@ if __name__ == "__main__":
             print(f"  缺少: {checks['vae_gguf']['path']}")
 
     demo = build_ui()
+
+    def _register_js_route():
+        import time
+        for _ in range(50):
+            time.sleep(0.2)
+            try:
+                import urllib.request
+                urllib.request.urlopen("http://127.0.0.1:9898", timeout=0.5)
+            except Exception:
+                continue
+            break
+        demo.app.routes.insert(0, Route(
+            "/static/js/app.js",
+            lambda request: FileResponse(WEBUI_ROOT / "static" / "js" / "app.js", media_type="application/javascript"),
+            methods=["GET"],
+        ))
+    threading.Thread(target=_register_js_route, daemon=True).start()
+
     demo.launch(
         server_name="127.0.0.1",
         server_port=9898,
         share=False,
+        show_error=True,
         head="""
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/abcjs/6.3.0/abcjs-audio.min.css">
         <script src="https://cdnjs.cloudflare.com/ajax/libs/abcjs/6.3.0/abcjs-basic-min.js"></script>
         <script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.0/Sortable.min.js"></script>
-        <script>
-        (function() {
-            console.log('YuE2 scripts loaded');
-
-            function getLyricsTextarea() {
-                return document.querySelector('textarea[placeholder*="[Verse]"]');
-            }
-
-            function triggerUpdate(ta) {
-                ta.dispatchEvent(new Event('input', { bubbles: true }));
-                ta.dispatchEvent(new Event('change', { bubbles: true }));
-            }
-
-            function insertSegment(name) {
-                const ta = getLyricsTextarea();
-                if (!ta) return;
-                const marker = '\\n[' + name + ']\\n';
-                const pos = ta.selectionStart || ta.value.length;
-                const before = ta.value.substring(0, pos);
-                const after = ta.value.substring(pos);
-                const needNL = before.length > 0 && !before.endsWith('\\n');
-                ta.value = before + (needNL ? '\\n' : '') + marker + after;
-                triggerUpdate(ta);
-                setTimeout(updateSegmentDisplay, 100);
-            }
-
-            function applyStructure(segments) {
-                const ta = getLyricsTextarea();
-                if (!ta) return;
-                let text = '';
-                for (const seg of segments) {
-                    text += '[' + seg + ']\\n\\n';
-                }
-                ta.value = text.trim();
-                triggerUpdate(ta);
-                setTimeout(updateSegmentDisplay, 100);
-            }
-
-            const segColors = {
-                'verse': '#4a90d9', 'chorus': '#e67e22', 'bridge': '#27ae60',
-                'intro': '#95a5a6', 'outro': '#7f8c8d', 'pre-chorus': '#8e44ad',
-            };
-
-            function getSegColor(name) {
-                return segColors[name.toLowerCase().replace(/\\s/g, '-')] || '#666';
-            }
-
-            function updateSegmentDisplay() {
-                const ta = getLyricsTextarea();
-                if (!ta) return;
-                const text = ta.value;
-                if (!text.trim()) {
-                    const container = document.getElementById('segment-cards');
-                    if (container) container.innerHTML = '';
-                    return;
-                }
-
-                const segments = [];
-                const lines = text.split('\\n');
-                let current = { name: 'Intro', lines: [], content: '' };
-
-                for (const line of lines) {
-                    const trimmed = line.trim();
-                    if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
-                        if (current.name !== 'Intro' || current.content.trim() || segments.length > 0) {
-                            segments.push(current);
-                        }
-                        current = { name: trimmed.slice(1, -1), lines: [], content: '' };
-                    } else {
-                        if (trimmed) {
-                            current.lines.push(trimmed);
-                            current.content += line + '\\n';
-                        }
-                    }
-                }
-                segments.push(current);
-
-                const container = document.getElementById('segment-cards');
-                if (!container) return;
-                container.innerHTML = '';
-
-                for (const seg of segments) {
-                    const card = document.createElement('div');
-                    card.className = 'segment-card';
-                    card.dataset.name = seg.name;
-                    card.dataset.content = seg.content.trim();
-                    card.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 10px;' +
-                        'background:rgba(255,255,255,0.05);border-radius:6px;margin:3px 0;' +
-                        'border-left:3px solid ' + getSegColor(seg.name) + ';cursor:grab;';
-
-                    const handle = document.createElement('span');
-                    handle.textContent = '\\u283F';
-                    handle.style.cssText = 'cursor:grab;color:#666;font-size:16px;';
-
-                    const label = document.createElement('span');
-                    label.textContent = seg.name;
-                    label.style.cssText = 'font-weight:bold;color:' + getSegColor(seg.name) + ';min-width:80px;';
-
-                    const info = document.createElement('span');
-                    info.textContent = seg.lines.length + ' \\u884C';
-                    info.style.cssText = 'color:#888;font-size:12px;';
-
-                    card.appendChild(handle);
-                    card.appendChild(label);
-                    card.appendChild(info);
-                    container.appendChild(card);
-                }
-
-                if (typeof Sortable !== 'undefined' && container.children.length > 1) {
-                    if (container._sortable) container._sortable.destroy();
-                    container._sortable = Sortable.create(container, {
-                        handle: '.segment-card span:first-child',
-                        animation: 150,
-                        ghostClass: 'segment-ghost',
-                        onEnd: function(evt) {
-                            const cards = container.querySelectorAll('.segment-card');
-                            let text = '';
-                            cards.forEach(function(c) {
-                                text += '[' + c.dataset.name + ']\\n';
-                                if (c.dataset.content) text += c.dataset.content + '\\n';
-                                text += '\\n';
-                            });
-                            ta.value = text.trim();
-                            triggerUpdate(ta);
-                        }
-                    });
-                }
-            }
-
-            const segBtns = { '+ Verse': 'Verse', '+ Chorus': 'Chorus', '+ Bridge': 'Bridge',
-                '+ Intro': 'Intro', '+ Outro': 'Outro', '+ Pre-Chorus': 'Pre-Chorus' };
-            const structTemplates = {
-                'Verse-Chorus': ['Verse', 'Chorus', 'Verse', 'Chorus'],
-                'V-C-V-C': ['Verse', 'Chorus', 'Verse', 'Chorus'],
-                'V-C-V-C-B-C': ['Verse', 'Chorus', 'Verse', 'Chorus', 'Bridge', 'Chorus'],
-                'V-V-C': ['Verse', 'Verse', 'Chorus'],
-                'A-A-B-A': ['Verse', 'Verse', 'Bridge', 'Verse'],
-            };
-
-            function initButtonWiring() {
-                const allBtns = document.querySelectorAll('button');
-                let wired = false;
-                allBtns.forEach(function(btn) {
-                    const t = btn.textContent.trim();
-                    if (segBtns[t]) {
-                        btn.addEventListener('click', function() { insertSegment(segBtns[t]); });
-                        wired = true;
-                    }
-                    if (structTemplates[t]) {
-                        btn.addEventListener('click', function() { applyStructure(structTemplates[t]); });
-                        wired = true;
-                    }
-                });
-                if (!wired) setTimeout(initButtonWiring, 500);
-            }
-            initButtonWiring();
-
-            function initLyricsEditor() {
-                const ta = getLyricsTextarea();
-                if (!ta) { setTimeout(initLyricsEditor, 500); return; }
-                updateSegmentDisplay();
-                let timer;
-                ta.addEventListener('input', function() {
-                    clearTimeout(timer);
-                    timer = setTimeout(updateSegmentDisplay, 600);
-                });
-            }
-            initLyricsEditor();
-
-            function initAbcPreview() {
-                if (typeof ABCJS === 'undefined') {
-                    setTimeout(initAbcPreview, 500);
-                    return;
-                }
-
-                const abcTextarea = document.querySelector('textarea[placeholder*="X:1"]');
-                if (!abcTextarea) {
-                    setTimeout(initAbcPreview, 500);
-                    return;
-                }
-
-                function renderAbc() {
-                    const abcText = abcTextarea.value;
-                    if (abcText && abcText.trim()) {
-                        try {
-                            ABCJS.renderAbc("abc-paper", abcText, {
-                                responsive: "resize",
-                                scale: 1.0,
-                                staffwidth: 600
-                            });
-                            ABCJS.renderAudio("abc-audio", abcText, {
-                                displayLoop: true,
-                                displayRestart: true,
-                                displayPlay: true,
-                                displayProgress: true
-                            });
-                        } catch (e) {
-                            console.log("ABC render error:", e);
-                        }
-                    }
-                }
-
-                let debounceTimer;
-                abcTextarea.addEventListener('input', function() {
-                    clearTimeout(debounceTimer);
-                    debounceTimer = setTimeout(renderAbc, 500);
-                });
-
-                renderAbc();
-
-                document.querySelectorAll('button').forEach(function(btn) {
-                    if (btn.textContent.includes('\\u5BFC\\u51FA MIDI')) {
-                        btn.onclick = function() {
-                            const abcText = abcTextarea.value;
-                            if (abcText && abcText.trim()) {
-                                const midiData = ABCJS.synth.createSynth(abcText);
-                                const blob = new Blob([midiData], {type: 'audio/midi'});
-                                const url = URL.createObjectURL(blob);
-                                const a = document.createElement('a');
-                                a.href = url;
-                                a.download = 'score.mid';
-                                a.click();
-                                URL.revokeObjectURL(url);
-                            }
-                        };
-                    }
-                    if (btn.textContent.includes('\\u5BFC\\u51FA PNG')) {
-                        btn.onclick = function() {
-                            const svg = document.querySelector('#abc-paper svg');
-                            if (svg) {
-                                const svgData = new XMLSerializer().serializeToString(svg);
-                                const canvas = document.createElement('canvas');
-                                const ctx = canvas.getContext('2d');
-                                const img = new Image();
-                                img.onload = function() {
-                                    canvas.width = img.width;
-                                    canvas.height = img.height;
-                                    ctx.drawImage(img, 0, 0);
-                                    const pngUrl = canvas.toDataURL('image/png');
-                                    const a = document.createElement('a');
-                                    a.href = pngUrl;
-                                    a.download = 'score.png';
-                                    a.click();
-                                };
-                                img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgData)));
-                            }
-                        };
-                    }
-                });
-            }
-            initAbcPreview();
-        })();
-        </script>
+        <script src="/static/js/app.js"></script>
         """,
     )
