@@ -65,6 +65,49 @@ MOOD_PRESETS = {
 }
 
 
+LANGUAGE_PRESETS = {
+    "中文": "Mandarin",
+    "英文": "English",
+    "日文": "Japanese",
+    "韩文": "Korean",
+    "粤语": "Cantonese",
+    "西班牙文": "Spanish",
+    "法文": "French",
+    "德文": "German",
+    "意大利文": "Italian",
+    "葡萄牙文": "Portuguese",
+    "俄文": "Russian",
+    "阿拉伯文": "Arabic",
+    "泰文": "Thai",
+    "越南文": "Vietnamese",
+    "印尼文": "Indonesian",
+}
+
+
+GENRE_PRESETS = {
+    "流行": "pop",
+    "摇滚": "rock",
+    "民谣": "folk",
+    "爵士": "jazz",
+    "蓝调": "blues",
+    "古典": "classical",
+    "电子": "electronic",
+    "嘻哈": "hip hop",
+    "R&B": "R&B",
+    "灵魂": "soul",
+    "放克": "funk",
+    "乡村": "country",
+    "雷鬼": "reggae",
+    "金属": "metal",
+    "朋克": "punk",
+    "独立": "indie",
+    "实验": "experimental",
+    "新世纪": "new age",
+    "拉丁": "latin",
+    "世界音乐": "world music",
+}
+
+
 def get_vocal_preset_names() -> list[str]:
     """Get list of vocal preset names."""
     return list(VOCAL_PRESETS.keys())
@@ -93,3 +136,23 @@ def get_mood_preset_names() -> list[str]:
 def get_mood_preset(name: str) -> str | None:
     """Get mood preset text by name."""
     return MOOD_PRESETS.get(name)
+
+
+def get_language_preset_names() -> list[str]:
+    """Get list of language preset names."""
+    return list(LANGUAGE_PRESETS.keys())
+
+
+def get_language_preset(name: str) -> str | None:
+    """Get language preset text by name."""
+    return LANGUAGE_PRESETS.get(name)
+
+
+def get_genre_preset_names() -> list[str]:
+    """Get list of genre preset names."""
+    return list(GENRE_PRESETS.keys())
+
+
+def get_genre_preset(name: str) -> str | None:
+    """Get genre preset text by name."""
+    return GENRE_PRESETS.get(name)

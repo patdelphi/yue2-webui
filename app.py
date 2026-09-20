@@ -13,7 +13,7 @@ from starlette.routing import Route
 from config import GenerationParams, CotMode, SamplingParams, OutFormat, validate_params
 from backend_gguf import GGUFBackend
 from style_presets import STYLE_PRESETS
-from vocal_presets import VOCAL_PRESETS, INSTRUMENT_PRESETS, MOOD_PRESETS
+from vocal_presets import VOCAL_PRESETS, INSTRUMENT_PRESETS, MOOD_PRESETS, LANGUAGE_PRESETS, GENRE_PRESETS
 from lyrics_templates import LYRICS_TEMPLATES
 from history import HistoryManager, HistoryRecord
 from postprocess import postprocess_audio
@@ -401,6 +401,18 @@ def on_mood_preset(current_style, name):
     return append_to_style(current_style, preset)
 
 
+def on_language_preset(current_style, name):
+    """Append language preset to style."""
+    preset = LANGUAGE_PRESETS.get(name, "")
+    return append_to_style(current_style, preset)
+
+
+def on_genre_preset(current_style, name):
+    """Append genre preset to style."""
+    preset = GENRE_PRESETS.get(name, "")
+    return append_to_style(current_style, preset)
+
+
 def on_lyrics_template(name):
     """Fill lyrics from template."""
     return LYRICS_TEMPLATES.get(name, "")
@@ -666,6 +678,30 @@ def build_ui():
                                     for name in mood_names[half_mood:]:
                                         btn = gr.Button(name, size="sm")
                                         btn.click(fn=lambda current, n=name: on_mood_preset(current, n), inputs=style_input, outputs=style_input)
+
+                            with gr.Accordion("语言标签", open=False):
+                                lang_names = list(LANGUAGE_PRESETS.keys())
+                                half_lang = len(lang_names) // 2
+                                with gr.Row():
+                                    for name in lang_names[:half_lang]:
+                                        btn = gr.Button(name, size="sm")
+                                        btn.click(fn=lambda current, n=name: on_language_preset(current, n), inputs=style_input, outputs=style_input)
+                                with gr.Row():
+                                    for name in lang_names[half_lang:]:
+                                        btn = gr.Button(name, size="sm")
+                                        btn.click(fn=lambda current, n=name: on_language_preset(current, n), inputs=style_input, outputs=style_input)
+
+                            with gr.Accordion("流派标签", open=False):
+                                genre_names = list(GENRE_PRESETS.keys())
+                                half_genre = len(genre_names) // 2
+                                with gr.Row():
+                                    for name in genre_names[:half_genre]:
+                                        btn = gr.Button(name, size="sm")
+                                        btn.click(fn=lambda current, n=name: on_genre_preset(current, n), inputs=style_input, outputs=style_input)
+                                with gr.Row():
+                                    for name in genre_names[half_genre:]:
+                                        btn = gr.Button(name, size="sm")
+                                        btn.click(fn=lambda current, n=name: on_genre_preset(current, n), inputs=style_input, outputs=style_input)
 
                         with gr.Accordion("歌词", open=False):
                             gr.Markdown("### 歌词")
