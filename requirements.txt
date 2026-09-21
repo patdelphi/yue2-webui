@@ -1,6 +1,6 @@
---extra-index-url https://download.pytorch.org/whl/cu128
-gradio>=5.0
-torch>=2.9
-torchaudio>=2.9
-soundfile>=0.12
-mutagen>=1.47
+gradio>=5.48.0
+numpy>=1.24.0
+soundfile>=0.12.1
+torch>=2.0.0
+tqdm>=4.65.0
+mutagen>=1.47.0
