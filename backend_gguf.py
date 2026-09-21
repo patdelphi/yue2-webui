@@ -111,7 +111,7 @@ class GGUFBackend:
         if params.out_format != OutFormat.PCM16:
             cmd.extend(["--out-format", params.out_format.value])
 
-        output_path = output_dir / "audio.wav"
+        output_path = output_dir / f"{output_dir.name}.wav"
         cmd.extend(["--out", str(output_path)])
         cmd.extend(["--out-dir", str(output_dir)])
         cmd.append("--log")
@@ -123,7 +123,7 @@ class GGUFBackend:
                  cancel_event: Optional[threading.Event] = None) -> GenerationResult:
         """Execute generation."""
         output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / "audio.wav"
+        output_path = output_dir / f"{output_dir.name}.wav"
         cmd = self.build_command(params, output_dir)
         
         start_time = time.time()

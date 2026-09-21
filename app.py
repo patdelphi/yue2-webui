@@ -280,12 +280,13 @@ def _on_generate_impl(
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
             for task_id, variant_dir, result, _ in successful:
                 var_name = task_id.split('_')[-1]
-                wav_file = variant_dir / "audio.wav"
+                base_name = variant_dir.name
+                wav_file = variant_dir / f"{base_name}.wav"
                 if wav_file.exists():
-                    zf.write(wav_file, f"{var_name}/audio.wav")
-                mp3_file = variant_dir / "audio.mp3"
+                    zf.write(wav_file, f"{var_name}/{base_name}.wav")
+                mp3_file = variant_dir / f"{base_name}.mp3"
                 if mp3_file.exists():
-                    zf.write(mp3_file, f"{var_name}/audio.mp3")
+                    zf.write(mp3_file, f"{var_name}/{base_name}.mp3")
                 abc_file = variant_dir / "score.abc"
                 if abc_file.exists():
                     zf.write(abc_file, f"{var_name}/score.abc")
