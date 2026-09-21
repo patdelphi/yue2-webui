@@ -4,11 +4,18 @@ import random
 import json
 import shutil
 import threading
+import logging
 from pathlib import Path
 from datetime import datetime
 from starlette.staticfiles import StaticFiles
 from starlette.responses import FileResponse
 from starlette.routing import Route
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+)
+logger = logging.getLogger(__name__)
 
 from config import GenerationParams, CotMode, SamplingParams, OutFormat, validate_params
 from backend_gguf import GGUFBackend
@@ -66,10 +73,7 @@ def on_generate(
     """Generate button callback."""
     global current_task_id, current_cancel_event
     
-    debug_log = WEBUI_ROOT / "debug.log"
-    with open(debug_log, "a", encoding="utf-8") as f:
-        f.write(f"[{datetime.now()}] on_generate: style={style!r}, lyrics={lyrics!r}, cot={cot!r}, seed={seed!r}\n")
-        f.write(f"[{datetime.now()}] cfg_scale={cfg_scale!r}, steps={num_inference_steps!r}, batch={batch_count!r}\n")
+    logger.info(f"on_generate: style={style!r}, cot={cot!r}, seed={seed!r}, cfg_scale={cfg_scale!r}, steps={num_inference_steps!r}, batch={batch_count!r}")
     
     # Handle None values from frontend (Gradio may send None for uninitialized sliders)
     cot = cot if cot is not None else "full"
@@ -108,12 +112,7 @@ def on_generate(
             progress,
         )
     except Exception as e:
-        import traceback
-        error_log = WEBUI_ROOT / "error.log"
-        error_log.write_text(
-            f"{datetime.now()}\n{traceback.format_exc()}",
-            encoding="utf-8",
-        )
+        logger.exception(f"生成失败: {e}")
         raise
 
 
@@ -222,7 +221,11 @@ def _on_generate_impl(
                 )
                 if result.mp3_path:
                     new_mp3 = backend.re_export_mp3(wav_path)
-                    result.mp3_path = str(new_mp3) if new_mp3 else None
+                    if new_mp3:
+                        result.mp3_path = str(new_mp3)
+                    else:
+                        logger.warning("MP3 re-export failed after post-processing")
+                        result.mp3_path = None
 
     total_time = sum(r.generation_time_seconds or 0 for _, _, r, _ in successful)
     avg_duration = sum(r.audio_duration_seconds or 0 for _, _, r, _ in successful) / len(successful)
@@ -344,10 +347,9 @@ def on_resynthesize(
         ),
     )
 
-    if params.seed is None or params.seed < 0 or params.seed > 2**31 - 1:
-        raise gr.Error("种子必须为非负整数")
-    if params.num_inference_steps is None or params.num_inference_steps < 1 or params.num_inference_steps > 64:
-        raise gr.Error("ODE步数必须在1-64之间")
+    error = validate_params(params)
+    if error:
+        raise gr.Error(error)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     task_id = f"{timestamp}_resynth_{params.id}"

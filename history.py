@@ -1,6 +1,7 @@
 """Generation history manager with JSON persistence."""
 import json
 import shutil
+import threading
 from pathlib import Path
 from dataclasses import dataclass, asdict
 from datetime import datetime
@@ -34,6 +35,7 @@ class HistoryManager:
         self.history_file = Path(history_file)
         self.outputs_root = Path(outputs_root)
         self._entries: list[HistoryRecord] = []
+        self._lock = threading.RLock()
         self._load()
 
     def _load(self):
@@ -61,8 +63,9 @@ class HistoryManager:
 
     def append(self, record: HistoryRecord):
         """Add a new history entry."""
-        self._entries.insert(0, record)
-        self._save()
+        with self._lock:
+            self._entries.insert(0, record)
+            self._save()
 
     def list_all(self) -> list[HistoryRecord]:
         """Return all entries (newest first)."""
@@ -87,41 +90,44 @@ class HistoryManager:
 
     def delete(self, task_id: str) -> bool:
         """Delete a history entry and its output directory."""
-        entry = self.get(task_id)
-        if not entry:
-            return False
+        with self._lock:
+            entry = self.get(task_id)
+            if not entry:
+                return False
 
-        output_path = self.outputs_root.parent / entry.output_dir
-        if output_path.exists():
-            shutil.rmtree(output_path, ignore_errors=True)
+            output_path = self.outputs_root.parent / entry.output_dir
+            if output_path.exists():
+                shutil.rmtree(output_path, ignore_errors=True)
 
-        self._entries = [e for e in self._entries if e.task_id != task_id]
-        self._save()
-        return True
+            self._entries = [e for e in self._entries if e.task_id != task_id]
+            self._save()
+            return True
 
     def clear(self):
         """Clear all history entries and output directories."""
-        for entry in self._entries:
-            output_path = self.outputs_root.parent / entry.output_dir
-            if output_path.exists():
-                shutil.rmtree(output_path, ignore_errors=True)
-        self._entries = []
-        self._save()
+        with self._lock:
+            for entry in self._entries:
+                output_path = self.outputs_root.parent / entry.output_dir
+                if output_path.exists():
+                    shutil.rmtree(output_path, ignore_errors=True)
+            self._entries = []
+            self._save()
 
     def auto_prune(self, max_entries: int = 100):
         """Remove oldest entries if over the limit."""
-        if len(self._entries) <= max_entries:
-            return
+        with self._lock:
+            if len(self._entries) <= max_entries:
+                return
 
-        to_remove = self._entries[max_entries:]
-        self._entries = self._entries[:max_entries]
+            to_remove = self._entries[max_entries:]
+            self._entries = self._entries[:max_entries]
 
-        for entry in to_remove:
-            output_path = self.outputs_root.parent / entry.output_dir
-            if output_path.exists():
-                shutil.rmtree(output_path, ignore_errors=True)
+            for entry in to_remove:
+                output_path = self.outputs_root.parent / entry.output_dir
+                if output_path.exists():
+                    shutil.rmtree(output_path, ignore_errors=True)
 
-        self._save()
+            self._save()
 
     def to_dataframe_rows(self) -> list[list]:
         """Convert entries to rows for Gradio Dataframe."""

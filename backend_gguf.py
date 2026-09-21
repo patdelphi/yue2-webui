@@ -2,11 +2,14 @@
 import subprocess
 import threading
 import time
+import logging
 from pathlib import Path
 from typing import Optional, Callable
 from dataclasses import dataclass
 
 from config import GenerationParams, CotMode, OutFormat
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -152,6 +155,7 @@ class GGUFBackend:
             elapsed = time.time() - start_time
             
             if process.returncode != 0:
+                logger.error(f"audiocpp_cli failed with exit code {process.returncode}")
                 return GenerationResult(
                     success=False,
                     error_message=f"audiocpp_cli 退出码 {process.returncode}",
@@ -159,6 +163,7 @@ class GGUFBackend:
                 )
             
             if not output_path.exists():
+                logger.error("Output file not found after generation")
                 return GenerationResult(
                     success=False,
                     error_message="生成完成但输出文件不存在",
@@ -184,6 +189,7 @@ class GGUFBackend:
             )
             
         except Exception as e:
+            logger.exception(f"Generation failed: {e}")
             return GenerationResult(success=False, error_message=str(e))
         finally:
             self._current_process = None
@@ -205,6 +211,7 @@ class GGUFBackend:
         mp3_path = wav_path.with_suffix(".mp3")
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
+            logger.debug("ffmpeg not found, skipping MP3 export")
             return None
         try:
             subprocess.run(
@@ -213,8 +220,10 @@ class GGUFBackend:
             )
             if mp3_path.exists():
                 return mp3_path
+            logger.warning("MP3 export completed but file not found")
             return None
-        except Exception:
+        except Exception as e:
+            logger.warning(f"MP3 export failed: {e}")
             return None
     
     def re_export_mp3(self, wav_path: Path) -> Optional[Path]:
