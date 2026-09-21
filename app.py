@@ -65,6 +65,40 @@ def on_generate(
 ):
     """Generate button callback."""
     global current_task_id, current_cancel_event
+    
+    debug_log = WEBUI_ROOT / "debug.log"
+    with open(debug_log, "a", encoding="utf-8") as f:
+        f.write(f"[{datetime.now()}] on_generate: style={style!r}, lyrics={lyrics!r}, cot={cot!r}, seed={seed!r}\n")
+        f.write(f"[{datetime.now()}] cfg_scale={cfg_scale!r}, steps={num_inference_steps!r}, batch={batch_count!r}\n")
+    
+    # Handle None values from frontend (Gradio may send None for uninitialized sliders)
+    cot = cot if cot is not None else "full"
+    # Handle boolean cot value (frontend may send False instead of "off")
+    if isinstance(cot, bool):
+        cot = "off" if not cot else "full"
+    seed = seed if seed is not None else 831001
+    cfg_scale = cfg_scale if cfg_scale is not None else 0
+    num_inference_steps = num_inference_steps if num_inference_steps is not None else 8
+    batch_count = batch_count if batch_count is not None else 1
+    
+    # ABC sampling params defaults
+    abc_temp = abc_temp if abc_temp is not None else 0.7
+    abc_top_p = abc_top_p if abc_top_p is not None else 0.9
+    abc_top_k = abc_top_k if abc_top_k is not None else 30
+    abc_rep_penalty = abc_rep_penalty if abc_rep_penalty is not None else 1.005
+    abc_pen_window = abc_pen_window if abc_pen_window is not None else 100
+    abc_min_tok = abc_min_tok if abc_min_tok is not None else 32
+    abc_max_tok = abc_max_tok if abc_max_tok is not None else 4096
+    
+    # Semantic sampling params defaults
+    sem_temp = sem_temp if sem_temp is not None else 1.0
+    sem_top_p = sem_top_p if sem_top_p is not None else 0.95
+    sem_top_k = sem_top_k if sem_top_k is not None else 100
+    sem_rep_penalty = sem_rep_penalty if sem_rep_penalty is not None else 1.2
+    sem_pen_window = sem_pen_window if sem_pen_window is not None else 50
+    sem_min_tok = sem_min_tok if sem_min_tok is not None else 200
+    sem_max_tok = sem_max_tok if sem_max_tok is not None else 9000
+    
     try:
         return _on_generate_impl(
             style, lyrics, cot, seed, cfg_scale, num_inference_steps, out_format, batch_count,
@@ -186,9 +220,9 @@ def _on_generate_impl(
                     style=params.style, seed=variant_seed,
                     out_format=params.out_format.value,
                 )
-                if result.flac_path:
-                    new_flac = backend.re_export_flac(wav_path)
-                    result.flac_path = str(new_flac) if new_flac else None
+                if result.mp3_path:
+                    new_mp3 = backend.re_export_mp3(wav_path)
+                    result.mp3_path = str(new_mp3) if new_mp3 else None
 
     total_time = sum(r.generation_time_seconds or 0 for _, _, r, _ in successful)
     avg_duration = sum(r.audio_duration_seconds or 0 for _, _, r, _ in successful) / len(successful)
@@ -207,6 +241,9 @@ def _on_generate_impl(
             abc_file = variant_dir / "score.abc"
             abc_file.write_text(result.abc_score, encoding="utf-8")
             abc_path = str(abc_file.relative_to(WEBUI_ROOT))
+
+        lyrics_file = variant_dir / "lyrics.txt"
+        lyrics_file.write_text(params.lyrics, encoding="utf-8")
 
         record = HistoryRecord(
             task_id=task_id,
@@ -231,8 +268,9 @@ def _on_generate_impl(
     abc_download = str(successful[0][1] / "score.abc") if first_result.abc_score else None
 
     if batch_count == 1:
-        flac_download = first_result.flac_path
-        return first_result.audio_path, duration_info, abc_display, abc_download, flac_download, lyrics_data_html, refresh_history()
+        mp3_download = first_result.mp3_path
+        h_rows, h_info = refresh_history()
+        return first_result.audio_path, duration_info, abc_display, abc_download, mp3_download, lyrics_data_html, h_rows, h_info, 0
     else:
         zip_path = output_dir / "batch.zip"
         import zipfile
@@ -242,15 +280,19 @@ def _on_generate_impl(
                 wav_file = variant_dir / "audio.wav"
                 if wav_file.exists():
                     zf.write(wav_file, f"{var_name}/audio.wav")
-                flac_file = variant_dir / "audio.flac"
-                if flac_file.exists():
-                    zf.write(flac_file, f"{var_name}/audio.flac")
+                mp3_file = variant_dir / "audio.mp3"
+                if mp3_file.exists():
+                    zf.write(mp3_file, f"{var_name}/audio.mp3")
                 abc_file = variant_dir / "score.abc"
                 if abc_file.exists():
                     zf.write(abc_file, f"{var_name}/score.abc")
+                lyrics_file = variant_dir / "lyrics.txt"
+                if lyrics_file.exists():
+                    zf.write(lyrics_file, f"{var_name}/lyrics.txt")
 
         audio_paths = [str(r.audio_path) for _, _, r, _ in successful]
-        return audio_paths, duration_info, abc_display, abc_download, str(zip_path), lyrics_data_html, refresh_history()
+        h_rows, h_info = refresh_history()
+        return audio_paths, duration_info, abc_display, abc_download, str(zip_path), lyrics_data_html, h_rows, h_info, 0
 
 
 def on_cancel():
@@ -272,6 +314,11 @@ def on_resynthesize(
 ):
     """Resynthesize with edited ABC score."""
     global current_task_id, current_cancel_event
+
+    # Handle None values from frontend
+    seed = seed if seed is not None else 831001
+    cfg_scale = cfg_scale if cfg_scale is not None else 0
+    num_inference_steps = num_inference_steps if num_inference_steps is not None else 8
 
     if not abc_text or not abc_text.strip():
         raise gr.Error("ABC 乐谱不能为空")
@@ -297,9 +344,9 @@ def on_resynthesize(
         ),
     )
 
-    if params.seed < 0 or params.seed > 2**31 - 1:
+    if params.seed is None or params.seed < 0 or params.seed > 2**31 - 1:
         raise gr.Error("种子必须为非负整数")
-    if params.num_inference_steps < 1 or params.num_inference_steps > 64:
+    if params.num_inference_steps is None or params.num_inference_steps < 1 or params.num_inference_steps > 64:
         raise gr.Error("ODE步数必须在1-64之间")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -356,10 +403,13 @@ def on_resynthesize(
         history_mgr.append(record)
         history_mgr.auto_prune(max_entries=100)
 
+        lyrics_file = output_dir / "lyrics.txt"
+        lyrics_file.write_text(params.lyrics, encoding="utf-8")
+
         abc_download = str(output_dir / "score.abc") if result.abc_score else None
-        flac_download = result.flac_path
+        mp3_download = result.mp3_path
         resynth_lyrics_data = f'<div class="gen-lyrics-data" style="display:none" data-lyrics=\'{json.dumps(params.lyrics, ensure_ascii=False)}\' data-duration="{result.audio_duration_seconds}"></div>'
-        return result.audio_path, duration_info, abc_download, flac_download, resynth_lyrics_data
+        return result.audio_path, duration_info, abc_download, mp3_download, resynth_lyrics_data
     else:
         raise gr.Error(f"重新合成失败：{result.error_message}")
 
@@ -380,6 +430,8 @@ def append_to_style(current_style, preset_value):
         return preset_value
     if preset_value in current_style:
         return current_style
+    # Strip trailing commas and whitespace to avoid double commas
+    current_style = current_style.rstrip(", ").strip()
     return f"{current_style}, {preset_value}"
 
 
@@ -424,10 +476,47 @@ def on_cot_change(cot_value):
     return gr.update(visible=not is_off)
 
 
+HISTORY_PAGE_SIZE = 10
+
+
 def refresh_history():
-    """Refresh history dataframe."""
+    """Refresh history dataframe (first page)."""
     rows = history_mgr.to_dataframe_rows()
-    return rows
+    page_rows = rows[:HISTORY_PAGE_SIZE]
+    total = len(rows)
+    pages = max(1, (total + HISTORY_PAGE_SIZE - 1) // HISTORY_PAGE_SIZE)
+    return page_rows, f"第 1 / {pages} 页，共 {total} 条"
+
+
+def refresh_history_full():
+    """Refresh history with page state reset (for buttons)."""
+    rows, info = refresh_history()
+    return rows, info, 0
+
+
+def _get_history_page(page):
+    """Get a specific page of history. Returns (rows, page_info)."""
+    rows = history_mgr.to_dataframe_rows()
+    total = len(rows)
+    pages = max(1, (total + HISTORY_PAGE_SIZE - 1) // HISTORY_PAGE_SIZE)
+    page = max(0, min(int(page), pages - 1))
+    start = page * HISTORY_PAGE_SIZE
+    page_rows = rows[start:start + HISTORY_PAGE_SIZE]
+    return page_rows, f"第 {page + 1} / {pages} 页，共 {total} 条"
+
+
+def on_history_prev_page(current_page):
+    """Go to previous page."""
+    new_page = max(0, int(current_page) - 1)
+    return _get_history_page(new_page) + (new_page,)
+
+
+def on_history_next_page(current_page):
+    """Go to next page."""
+    rows = history_mgr.to_dataframe_rows()
+    pages = max(1, (len(rows) + HISTORY_PAGE_SIZE - 1) // HISTORY_PAGE_SIZE)
+    new_page = min(pages - 1, int(current_page) + 1)
+    return _get_history_page(new_page) + (new_page,)
 
 
 def _load_history_entry(row_index, current_state):
@@ -449,30 +538,36 @@ def _load_history_entry(row_index, current_state):
     return [task_id], None, "音频文件不存在", "", "", "", "", "", ""
 
 
-def on_history_select(evt: gr.SelectData, current_state: list):
+def on_history_select(evt: gr.SelectData, current_state: list, current_page):
     """Handle history row selection via Dataframe.select (fallback)."""
-    return _load_history_entry(evt.index[0], current_state)
+    actual_index = evt.index[0] + int(current_page) * HISTORY_PAGE_SIZE
+    return _load_history_entry(actual_index, current_state)
 
 
-def on_history_row_click(row_index, current_state):
+def on_history_row_click(row_index, current_state, current_page):
     """Handle history row selection via JS click handler."""
-    return _load_history_entry(int(row_index), current_state)
+    actual_index = int(row_index) + int(current_page) * HISTORY_PAGE_SIZE
+    return _load_history_entry(actual_index, current_state)
 
 
 def on_history_delete(selected_state):
     """Delete the currently selected history entry."""
     if not selected_state:
-        return refresh_history(), "请先点击选择要删除的记录", selected_state
+        rows, info = refresh_history()
+        return rows, info, "请先点击选择要删除的记录", selected_state, 0
     task_id = selected_state[0]
     if history_mgr.delete(task_id):
-        return refresh_history(), f"已删除 {task_id}", []
-    return refresh_history(), "删除失败", selected_state
+        rows, info = refresh_history()
+        return rows, info, f"已删除 {task_id}", [], 0
+    rows, info = refresh_history()
+    return rows, info, "删除失败", selected_state, 0
 
 
 def on_history_clear():
     """Clear all history."""
     history_mgr.clear()
-    return refresh_history(), "已清空所有历史", []
+    rows, info = refresh_history()
+    return rows, info, "已清空所有历史", [], 0
 
 
 def on_check_models():
@@ -769,8 +864,8 @@ def build_ui():
 
                         cfg_input = gr.Slider(
                             label="CFG 引导强度",
-                            minimum=0, maximum=20, step=0.1, value=None,
-                            info="Auto时: off模式=1.01, 其他=1.0",
+                            minimum=0, maximum=20, step=0.1, value=0,
+                            info="0=Auto (off模式=1.01, 其他=1.0)",
                         )
 
                         steps_input = gr.Slider(
@@ -835,7 +930,7 @@ def build_ui():
                             generate_btn = gr.Button("🎵 生成歌曲", variant="primary", size="lg")
                             cancel_btn = gr.Button("取消", size="lg")
                         gr.Markdown("### 输出")
-                        audio_output = gr.Audio(label="生成的歌曲", type="filepath")
+                        audio_output = gr.Audio(label="生成的歌曲", type="filepath", elem_id="gen-audio")
                         info_output = gr.Markdown()
                         gr.Markdown("### ABC 乐谱")
                         with gr.Accordion("生成的乐谱 (可编辑)", open=False):
@@ -855,24 +950,30 @@ def build_ui():
                             gr.Button("导出 MIDI", size="sm")
                             gr.Button("导出 PNG", size="sm")
                         abc_file_output = gr.File(label="下载乐谱")
-                        flac_file_output = gr.File(label="下载 FLAC")
+                        flac_file_output = gr.File(label="下载 MP3")
                         lyrics_sync_data = gr.HTML(value="", visible=False)
                         with gr.Row():
                             resynthesize_btn = gr.Button("重新合成", variant="secondary")
 
-            with gr.Tab("历史"):
+            with gr.Tab("历史") as history_tab:
                 gr.Markdown("### 生成历史")
                 history_state = gr.State(value=[])
+                history_page = gr.State(value=0)
                 history_row_trigger = gr.Number(visible=True, value=-1, elem_id="history-row-trigger", label="")
                 history_df = gr.Dataframe(
                     headers=["时间", "风格", "模式", "音频时长", "生成耗时", "Task ID"],
                     datatype=["str", "str", "str", "str", "str", "str"],
-                    row_count=10,
+                    col_count=6,
+                    max_height=500,
                     interactive=False,
-                    value=refresh_history(),
+                    value=refresh_history()[0],
                     elem_id="history-table",
                 )
-                history_audio = gr.Audio(label="试听", type="filepath")
+                with gr.Row():
+                    history_prev_btn = gr.Button("上一页", size="sm")
+                    history_page_info = gr.Markdown(value=refresh_history()[1], elem_id="history-page-info")
+                    history_next_btn = gr.Button("下一页", size="sm")
+                history_audio = gr.Audio(label="试听", type="filepath", elem_id="history-audio")
                 history_info = gr.Markdown()
                 with gr.Row():
                     with gr.Column(scale=1):
@@ -895,11 +996,13 @@ def build_ui():
                     history_delete_btn = gr.Button("删除选中")
                     history_clear_btn = gr.Button("清空历史")
 
-                history_df.select(fn=on_history_select, inputs=history_state, outputs=[history_state, history_audio, history_info, history_style, history_lyrics, history_abc, history_abc_preview, history_lyrics_data, history_duration_data])
-                history_row_trigger.change(fn=on_history_row_click, inputs=[history_row_trigger, history_state], outputs=[history_state, history_audio, history_info, history_style, history_lyrics, history_abc, history_abc_preview, history_lyrics_data, history_duration_data])
-                history_refresh_btn.click(fn=refresh_history, outputs=history_df)
-                history_delete_btn.click(fn=on_history_delete, inputs=history_state, outputs=[history_df, history_info, history_state])
-                history_clear_btn.click(fn=on_history_clear, outputs=[history_df, history_info, history_state])
+                history_df.select(fn=on_history_select, inputs=[history_state, history_page], outputs=[history_state, history_audio, history_info, history_style, history_lyrics, history_abc, history_abc_preview, history_lyrics_data, history_duration_data])
+                history_row_trigger.change(fn=on_history_row_click, inputs=[history_row_trigger, history_state, history_page], outputs=[history_state, history_audio, history_info, history_style, history_lyrics, history_abc, history_abc_preview, history_lyrics_data, history_duration_data])
+                history_refresh_btn.click(fn=refresh_history_full, outputs=[history_df, history_page_info, history_page])
+                history_delete_btn.click(fn=on_history_delete, inputs=history_state, outputs=[history_df, history_page_info, history_info, history_state, history_page])
+                history_clear_btn.click(fn=on_history_clear, outputs=[history_df, history_page_info, history_info, history_state, history_page])
+                history_prev_btn.click(fn=on_history_prev_page, inputs=history_page, outputs=[history_df, history_page_info, history_page])
+                history_next_btn.click(fn=on_history_next_page, inputs=history_page, outputs=[history_df, history_page_info, history_page])
 
             with gr.Tab("设置"):
                 gr.Markdown("### 系统状态")
@@ -932,7 +1035,7 @@ def build_ui():
                 abc_temp_input, abc_top_p_input, abc_top_k_input, abc_rep_input, abc_pen_window_input, abc_min_tok_input, abc_max_tok_input,
                 sem_temp_input, sem_top_p_input, sem_top_k_input, sem_rep_input, sem_pen_window_input, sem_min_tok_input, sem_max_tok_input,
             ],
-            outputs=[audio_output, info_output, abc_output, abc_file_output, flac_file_output, lyrics_sync_data, history_df],
+            outputs=[audio_output, info_output, abc_output, abc_file_output, flac_file_output, lyrics_sync_data, history_df, history_page_info, history_page],
         )
 
         cancel_btn.click(fn=on_cancel, outputs=info_output)
@@ -980,7 +1083,7 @@ if __name__ == "__main__":
 
     demo = build_ui()
 
-    def _register_js_route():
+    def _register_custom_routes():
         import time
         for _ in range(50):
             time.sleep(0.2)
@@ -990,22 +1093,44 @@ if __name__ == "__main__":
             except Exception:
                 continue
             break
+        
+        from starlette.responses import HTMLResponse
+        
+        original_index = None
+        for route in demo.app.routes:
+            if hasattr(route, 'path') and route.path == "/":
+                original_index = route
+                break
+        
+        if original_index:
+            from fastapi import Request
+            async def custom_index(request: Request):
+                response = original_index.endpoint(request)
+                if hasattr(response, 'body'):
+                    html = response.body.decode("utf-8")
+                    scripts = """
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/abcjs/6.3.0/abcjs-audio.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/abcjs/6.3.0/abcjs-basic-min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.0/Sortable.min.js"></script>
+<script src="/static/js/app.js"></script>
+"""
+                    html = html.replace("</head>", scripts + "</head>")
+                    return HTMLResponse(content=html, status_code=response.status_code)
+                return response
+            
+            demo.app.routes.remove(original_index)
+            demo.app.add_api_route("/", custom_index, methods=["GET"])
+        
         demo.app.routes.insert(0, Route(
             "/static/js/app.js",
             lambda request: FileResponse(WEBUI_ROOT / "static" / "js" / "app.js", media_type="application/javascript"),
             methods=["GET"],
         ))
-    threading.Thread(target=_register_js_route, daemon=True).start()
+    threading.Thread(target=_register_custom_routes, daemon=True).start()
 
     demo.launch(
         server_name="127.0.0.1",
         server_port=9898,
         share=False,
         show_error=True,
-        head="""
-        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/abcjs/6.3.0/abcjs-audio.min.css">
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/abcjs/6.3.0/abcjs-basic-min.js"></script>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.0/Sortable.min.js"></script>
-        <script src="/static/js/app.js"></script>
-        """,
     )

@@ -60,10 +60,10 @@ def validate_params(params: GenerationParams) -> Optional[str]:
         return "风格描述不能为空"
     if not params.lyrics or not params.lyrics.strip():
         return "歌词不能为空"
-    if params.seed < 0:
+    if params.seed is None or params.seed < 0:
         return "种子必须为非负整数"
     if params.cfg_scale is not None and (params.cfg_scale < 0 or params.cfg_scale > 20):
         return "CFG强度必须在0-20之间"
-    if params.num_inference_steps < 1 or params.num_inference_steps > 64:
+    if params.num_inference_steps is None or params.num_inference_steps < 1 or params.num_inference_steps > 64:
         return "ODE步数必须在1-64之间"
     return None

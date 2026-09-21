@@ -1,5 +1,26 @@
         console.log('YuE2 scripts loading...');
 
+        function initAccordionCollapse() {
+            var textareas = document.querySelectorAll('textarea');
+            if (textareas.length < 2) { setTimeout(initAccordionCollapse, 500); return; }
+            setTimeout(function() {
+                var buttons = document.querySelectorAll('button.label-wrap');
+                var labelsToClose = ['风格标签', '歌词工具', '音频后处理', '高级采样参数', '生成的乐谱'];
+                for (var i = 0; i < buttons.length; i++) {
+                    var btn = buttons[i];
+                    var text = btn.textContent.trim();
+                    for (var j = 0; j < labelsToClose.length; j++) {
+                        if (text.indexOf(labelsToClose[j]) !== -1 && text.indexOf('▼') !== -1) {
+                            btn.click();
+                            break;
+                        }
+                    }
+                }
+                console.log('Accordions auto-collapsed after initialization');
+            }, 1000);
+        }
+        initAccordionCollapse();
+
         window.initHistoryTableClick = function() {
             var tableContainer = document.querySelector('#history-table');
             if (!tableContainer) { setTimeout(window.initHistoryTableClick, 500); return; }
@@ -220,16 +241,36 @@
                     return;
                 }
 
-                var abcTextareas = document.querySelectorAll('textarea[placeholder*="X:1"]');
-                var abcTextarea = abcTextareas.length > 1 ? abcTextareas[abcTextareas.length - 1] : abcTextareas[0];
+                function findAbcTextarea() {
+                    var abcTextareas = document.querySelectorAll('textarea[placeholder*="X:1"]');
+                    return abcTextareas.length > 1 ? abcTextareas[abcTextareas.length - 1] : abcTextareas[0];
+                }
+
+                function ensureAccordionOpen(textarea) {
+                    if (!textarea) return;
+                    var buttons = document.querySelectorAll('button.label-wrap');
+                    for (var i = 0; i < buttons.length; i++) {
+                        var btn = buttons[i];
+                        if (btn.textContent.includes('生成的乐谱')) {
+                            if (!btn.classList.contains('open')) {
+                                btn.click();
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                var abcTextarea = findAbcTextarea();
                 if (!abcTextarea) {
                     setTimeout(initAbcPreview, 500);
                     return;
                 }
 
                 function renderAbc() {
-                    const abcText = abcTextarea.value;
+                    var current = findAbcTextarea();
+                    var abcText = current ? current.value : '';
                     if (abcText && abcText.trim()) {
+                        ensureAccordionOpen(current);
                         try {
                             ABCJS.renderAbc("abc-paper", abcText, {
                                 responsive: "resize",
@@ -258,8 +299,13 @@
 
                 var lastValue = abcTextarea.value;
                 setInterval(function() {
-                    if (abcTextarea.value !== lastValue) {
-                        lastValue = abcTextarea.value;
+                    var current = findAbcTextarea();
+                    if (!current) return;
+                    if (current.value !== lastValue) {
+                        lastValue = current.value;
+                        if (current.value && current.value.trim()) {
+                            ensureAccordionOpen(current);
+                        }
                         debouncedRender();
                     }
                 }, 300);
@@ -269,7 +315,8 @@
                 document.querySelectorAll('button').forEach(function(btn) {
                     if (btn.textContent.includes('\u5BFC\u51FA MIDI')) {
                         btn.onclick = function() {
-                            const abcText = abcTextarea.value;
+                            var ta = findAbcTextarea();
+                            const abcText = ta ? ta.value : '';
                             if (abcText && abcText.trim()) {
                                 const midiData = ABCJS.synth.createSynth(abcText);
                                 const blob = new Blob([midiData], {type: 'audio/midi'});
@@ -321,21 +368,25 @@
                     return;
                 }
 
-                var abcTextarea = document.getElementById('history-abc');
-                if (abcTextarea && abcTextarea.tagName !== 'TEXTAREA' && abcTextarea.tagName !== 'INPUT') {
-                    var tab = abcTextarea.querySelector('textarea, input[type="text"]');
-                    if (tab) abcTextarea = tab;
+                function findHistoryAbcTextarea() {
+                    var el = document.getElementById('history-abc');
+                    if (el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT')) return el;
+                    if (el) {
+                        var tab = el.querySelector('textarea, input[type="text"]');
+                        if (tab) return tab;
+                    }
+                    return document.querySelector('#history-abc textarea, #history-abc input[type="text"]');
                 }
-                if (!abcTextarea) {
-                    abcTextarea = document.querySelector('#history-abc textarea, #history-abc input[type="text"]');
-                }
+
+                var abcTextarea = findHistoryAbcTextarea();
                 if (!abcTextarea) {
                     setTimeout(initHistoryAbcPreview, 500);
                     return;
                 }
 
                 function renderHistoryAbc() {
-                    var abcText = abcTextarea.value || '';
+                    var current = findHistoryAbcTextarea();
+                    var abcText = current ? (current.value || '') : '';
                     if (abcText && abcText.trim()) {
                         try {
                             ABCJS.renderAbc("history-abc-paper", abcText, {
@@ -360,7 +411,8 @@
 
                 var lastHistoryValue = abcTextarea.value;
                 setInterval(function() {
-                    var currentValue = abcTextarea.value || '';
+                    var current = findHistoryAbcTextarea();
+                    var currentValue = current ? (current.value || '') : '';
                     if (currentValue !== lastHistoryValue) {
                         lastHistoryValue = currentValue;
                         renderHistoryAbc();
@@ -526,6 +578,17 @@
                 });
             }
             initGenLyricSync();
+
+            function initAudioTimeDisplay() {
+                var style = document.createElement('style');
+                style.textContent = '#gen-audio, #history-audio { overflow: visible !important; }' +
+                    '#gen-audio .component-wrapper, #history-audio .component-wrapper { overflow: visible !important; }' +
+                    '#gen-audio .waveform-container, #history-audio .waveform-container { overflow: visible !important; }' +
+                    '#gen-audio .timestamps, #history-audio .timestamps { visibility: visible !important; opacity: 1 !important; font-size: 15px !important; font-weight: bold !important; color: #fff !important; font-family: monospace !important; letter-spacing: 0.5px !important; text-shadow: 0 2px 4px rgba(0,0,0,0.5) !important; padding: 4px 12px !important; background: rgba(0,0,0,0.7) !important; border-radius: 4px !important; display: flex !important; justify-content: space-between !important; align-items: center !important; margin-top: 12px !important; width: 100% !important; box-sizing: border-box !important; }' +
+                    '#gen-audio .timestamps time, #history-audio .timestamps time { color: #4ade80 !important; font-size: 15px !important; }';
+                document.head.appendChild(style);
+            }
+            initAudioTimeDisplay();
 
             if (window.initHistoryTableClick) {
                 window.initHistoryTableClick();

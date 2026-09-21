@@ -18,7 +18,7 @@ class GenerationResult:
     generation_time_seconds: Optional[float] = None
     error_message: Optional[str] = None
     abc_score: Optional[str] = None
-    flac_path: Optional[str] = None
+    mp3_path: Optional[str] = None
 
 
 class LogParser:
@@ -172,7 +172,7 @@ class GGUFBackend:
             if abc_path.exists():
                 abc_score = abc_path.read_text(encoding="utf-8")
             
-            flac_path = self.export_flac(output_path)
+            mp3_path = self.export_mp3(output_path)
             
             return GenerationResult(
                 success=True,
@@ -180,7 +180,7 @@ class GGUFBackend:
                 audio_duration_seconds=audio_duration,
                 generation_time_seconds=elapsed,
                 abc_score=abc_score,
-                flac_path=str(flac_path) if flac_path else None,
+                mp3_path=str(mp3_path) if mp3_path else None,
             )
             
         except Exception as e:
@@ -199,30 +199,30 @@ class GGUFBackend:
         info = soundfile.info(str(path))
         return info.frames / info.samplerate
 
-    def export_flac(self, wav_path: Path) -> Optional[Path]:
-        """Convert WAV to FLAC using ffmpeg. Returns FLAC path or None on failure."""
+    def export_mp3(self, wav_path: Path) -> Optional[Path]:
+        """Convert WAV to MP3 using ffmpeg. Returns MP3 path or None on failure."""
         import shutil
-        flac_path = wav_path.with_suffix(".flac")
+        mp3_path = wav_path.with_suffix(".mp3")
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
             return None
         try:
             subprocess.run(
-                [ffmpeg, "-y", "-i", str(wav_path), "-c", "flac", str(flac_path)],
-                capture_output=True, timeout=60,
+                [ffmpeg, "-y", "-i", str(wav_path), "-codec:a", "libmp3lame", "-qscale:a", "2", str(mp3_path)],
+                capture_output=True, timeout=120,
             )
-            if flac_path.exists():
-                return flac_path
+            if mp3_path.exists():
+                return mp3_path
             return None
         except Exception:
             return None
     
-    def re_export_flac(self, wav_path: Path) -> Optional[Path]:
-        """Re-export WAV to FLAC (e.g. after post-processing). Returns FLAC path or None."""
-        flac_path = wav_path.with_suffix(".flac")
-        if flac_path.exists():
-            flac_path.unlink()
-        return self.export_flac(wav_path)
+    def re_export_mp3(self, wav_path: Path) -> Optional[Path]:
+        """Re-export WAV to MP3 (e.g. after post-processing). Returns MP3 path or None."""
+        mp3_path = wav_path.with_suffix(".mp3")
+        if mp3_path.exists():
+            mp3_path.unlink()
+        return self.export_mp3(wav_path)
 
     def check_models(self) -> dict:
         """Check if model files exist."""
