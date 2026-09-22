@@ -6,17 +6,21 @@
             setTimeout(function() {
                 var buttons = document.querySelectorAll('button.label-wrap');
                 var labelsToClose = ['风格标签', '歌词工具', '音频后处理', '高级采样参数', '生成的乐谱'];
+                var clickedCount = 0;
                 for (var i = 0; i < buttons.length; i++) {
                     var btn = buttons[i];
                     var text = btn.textContent.trim();
                     for (var j = 0; j < labelsToClose.length; j++) {
-                        if (text.indexOf(labelsToClose[j]) !== -1 && text.indexOf('▼') !== -1) {
-                            btn.click();
+                        if (text.indexOf(labelsToClose[j]) !== -1) {
+                            if (btn.classList.contains('open')) {
+                                btn.click();
+                                clickedCount++;
+                            }
                             break;
                         }
                     }
                 }
-                console.log('Accordions auto-collapsed after initialization');
+                console.log('Accordions auto-collapsed:', clickedCount);
             }, 1000);
         }
         initAccordionCollapse();

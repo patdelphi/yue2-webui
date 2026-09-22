@@ -241,11 +241,11 @@ def _on_generate_impl(
     for task_id, variant_dir, result, variant_seed in successful:
         abc_path = ""
         if result.abc_score:
-            abc_file = variant_dir / "score.abc"
+            abc_file = variant_dir / f"{variant_dir.name}.abc"
             abc_file.write_text(result.abc_score, encoding="utf-8")
             abc_path = str(abc_file.relative_to(WEBUI_ROOT))
 
-        lyrics_file = variant_dir / "lyrics.txt"
+        lyrics_file = variant_dir / f"{variant_dir.name}.txt"
         lyrics_file.write_text(params.lyrics, encoding="utf-8")
 
         record = HistoryRecord(
@@ -267,8 +267,9 @@ def _on_generate_impl(
     history_mgr.auto_prune(max_entries=100)
 
     first_result = successful[0][2]
+    first_dir = successful[0][1]
     abc_display = first_result.abc_score or ""
-    abc_download = str(successful[0][1] / "score.abc") if first_result.abc_score else None
+    abc_download = str(first_dir / f"{first_dir.name}.abc") if first_result.abc_score else None
 
     if batch_count == 1:
         mp3_download = first_result.mp3_path
@@ -287,12 +288,12 @@ def _on_generate_impl(
                 mp3_file = variant_dir / f"{base_name}.mp3"
                 if mp3_file.exists():
                     zf.write(mp3_file, f"{var_name}/{base_name}.mp3")
-                abc_file = variant_dir / "score.abc"
+                abc_file = variant_dir / f"{base_name}.abc"
                 if abc_file.exists():
-                    zf.write(abc_file, f"{var_name}/score.abc")
-                lyrics_file = variant_dir / "lyrics.txt"
+                    zf.write(abc_file, f"{var_name}/{base_name}.abc")
+                lyrics_file = variant_dir / f"{base_name}.txt"
                 if lyrics_file.exists():
-                    zf.write(lyrics_file, f"{var_name}/lyrics.txt")
+                    zf.write(lyrics_file, f"{var_name}/{base_name}.txt")
 
         audio_paths = [str(r.audio_path) for _, _, r, _ in successful]
         h_rows, h_info = refresh_history()
@@ -406,10 +407,10 @@ def on_resynthesize(
         history_mgr.append(record)
         history_mgr.auto_prune(max_entries=100)
 
-        lyrics_file = output_dir / "lyrics.txt"
+        lyrics_file = output_dir / f"{output_dir.name}.txt"
         lyrics_file.write_text(params.lyrics, encoding="utf-8")
 
-        abc_download = str(output_dir / "score.abc") if result.abc_score else None
+        abc_download = str(output_dir / f"{output_dir.name}.abc") if result.abc_score else None
         mp3_download = result.mp3_path
         resynth_lyrics_data = f'<div class="gen-lyrics-data" style="display:none" data-lyrics=\'{json.dumps(params.lyrics, ensure_ascii=False)}\' data-duration="{result.audio_duration_seconds}"></div>'
         return result.audio_path, duration_info, abc_download, mp3_download, resynth_lyrics_data
@@ -1115,7 +1116,7 @@ if __name__ == "__main__":
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/abcjs/6.3.0/abcjs-audio.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/abcjs/6.3.0/abcjs-basic-min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.0/Sortable.min.js"></script>
-<script src="/static/js/app.js"></script>
+<script src="/static/js/app.js?v=2"></script>
 """
                     html = html.replace("</head>", scripts + "</head>")
                     return HTMLResponse(content=html, status_code=response.status_code)

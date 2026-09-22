@@ -173,7 +173,11 @@ class GGUFBackend:
             audio_duration = self._get_audio_duration(output_path)
             
             abc_score = None
-            abc_path = output_dir / "score.abc"
+            abc_name = f"{output_dir.name}.abc"
+            abc_path = output_dir / abc_name
+            legacy_abc = output_dir / "score.abc"
+            if not abc_path.exists() and legacy_abc.exists():
+                legacy_abc.rename(abc_path)
             if abc_path.exists():
                 abc_score = abc_path.read_text(encoding="utf-8")
             
