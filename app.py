@@ -95,7 +95,7 @@ def on_generate(
     cot = cot if cot is not None else "full"
     if isinstance(cot, bool):
         cot = "off" if not cot else "full"
-    seed = seed if seed is not None else 831001
+    seed = random.randint(0, 2**31 - 1)
     cfg_scale = cfg_scale if cfg_scale is not None else 0
     num_inference_steps = num_inference_steps if num_inference_steps is not None else 8
     batch_count = batch_count if batch_count is not None else 1
@@ -170,7 +170,8 @@ def on_generate(
         for prog_val, desc in task.drain_progress():
             progress(prog_val, desc=desc)
         
-        return task.result
+        result = task.result if isinstance(task.result, (tuple, list)) else [task.result]
+        return (*result, seed)
     except gr.Error:
         raise
     except Exception as e:
@@ -1064,7 +1065,7 @@ def build_ui():
                         cot_input.change(fn=on_cot_change, inputs=cot_input, outputs=abc_input)
 
                         with gr.Row():
-                            seed_input = gr.Number(label="随机种子", value=831001, precision=0)
+                            seed_input = gr.Number(label="随机种子", value=831001, precision=0, info="每次点击「生成歌曲」自动换新种子，此处显示实际使用的种子")
                             random_seed_btn = gr.Button("🎲 随机", size="sm")
 
                         cfg_input = gr.Slider(
@@ -1270,7 +1271,7 @@ def build_ui():
                 abc_temp_input, abc_top_p_input, abc_top_k_input, abc_rep_input, abc_pen_window_input, abc_min_tok_input, abc_max_tok_input,
                 sem_temp_input, sem_top_p_input, sem_top_k_input, sem_rep_input, sem_pen_window_input, sem_min_tok_input, sem_max_tok_input,
             ],
-            outputs=[audio_output, info_output, abc_output, abc_file_output, flac_file_output, lyrics_sync_data, history_df, history_page_info, history_page],
+            outputs=[audio_output, info_output, abc_output, abc_file_output, flac_file_output, lyrics_sync_data, history_df, history_page_info, history_page, seed_input],
         )
 
         cancel_btn.click(fn=on_cancel, outputs=info_output)
