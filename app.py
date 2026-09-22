@@ -352,7 +352,11 @@ def _generate_worker(
     if batch_count == 1:
         mp3_download = first_result.mp3_path
         h_rows, h_info = refresh_history()
-        return first_result.audio_path, duration_info, abc_display, abc_download, mp3_download, lyrics_data_html, h_rows, h_info, 0
+        return (
+            first_result.audio_path, duration_info, abc_display, abc_download, mp3_download,
+            lyrics_data_html, h_rows, h_info, 0,
+            gr.update(visible=False), gr.update(visible=False, choices=[], value=None), [],
+        )
     else:
         zip_path = output_dir / "batch.zip"
         import zipfile
@@ -373,9 +377,73 @@ def _generate_worker(
                 if lyrics_file.exists():
                     zf.write(lyrics_file, f"{var_name}/{base_name}.txt")
 
+        variants_payload = []
+        for idx, (task_id, variant_dir, result, variant_seed) in enumerate(successful, start=1):
+            variants_payload.append({
+                "label": f"变体{idx} (seed={variant_seed}, {result.audio_duration_seconds or 0:.1f}s)",
+                "task_id": task_id,
+                "audio_path": str(result.audio_path),
+                "abc_text": result.abc_score or "",
+                "abc_file": str(variant_dir / f"{variant_dir.name}.abc") if result.abc_score else None,
+                "mp3_file": result.mp3_path,
+            })
+
         audio_paths = [str(r.audio_path) for _, _, r, _ in successful]
         h_rows, h_info = refresh_history()
-        return audio_paths, duration_info, abc_display, abc_download, str(zip_path), lyrics_data_html, h_rows, h_info, 0
+        return (
+            audio_paths[0], duration_info, abc_display, abc_download, str(zip_path),
+            lyrics_data_html, h_rows, h_info, 0,
+            gr.update(visible=True),
+            gr.update(visible=True, choices=[v["label"] for v in variants_payload], value=variants_payload[0]["label"]),
+            variants_payload,
+        )
+
+
+def on_variant_select(label, payload):
+    """Switch main outputs to the selected batch variant."""
+    for v in payload:
+        if v["label"] == label:
+            return v["audio_path"], v["abc_text"], v["abc_file"], v["mp3_file"]
+    raise gr.Error("变体不存在")
+
+
+def on_variant_finalize(label, payload):
+    """Mark selected variant as final and delete the others."""
+    return _finalize_variant(label, payload, keep_all=False)
+
+
+def on_variant_keep_all(label, payload):
+    """Mark selected variant as final but keep all variants."""
+    return _finalize_variant(label, payload, keep_all=True)
+
+
+def _finalize_variant(label, payload, keep_all):
+    if not payload or not label:
+        raise gr.Error("没有可用的批量变体")
+    selected = next((v for v in payload if v["label"] == label), None)
+    if not selected:
+        raise gr.Error("变体不存在")
+
+    history_mgr.set_status(selected["task_id"], "final")
+    removed = 0
+    if not keep_all:
+        for v in payload:
+            if v["task_id"] != selected["task_id"]:
+                history_mgr.delete(v["task_id"])
+                removed += 1
+
+    h_rows, h_info, _ = refresh_history_full()
+    msg = f"🏆 已选定 **{label}** 为最终版"
+    msg += f"，已清理其余 {removed} 个变体" if removed else "，全部变体已保留"
+    if keep_all:
+        return (
+            msg, h_rows, h_info, 0,
+            gr.update(visible=True), gr.update(visible=True, choices=[v["label"] for v in payload], value=label), payload,
+        )
+    return (
+        msg, h_rows, h_info, 0,
+        gr.update(visible=False), gr.update(visible=False, choices=[], value=None), [],
+    )
 
 
 def on_cancel():
@@ -1204,6 +1272,13 @@ def build_ui():
                         abc_file_output = gr.File(label="下载乐谱")
                         flac_file_output = gr.File(label="下载 MP3")
                         lyrics_sync_data = gr.HTML(value="", visible=False)
+
+                        with gr.Group(visible=False) as variant_group:
+                            variant_selector = gr.Radio(label="批量变体选择", choices=[], interactive=True)
+                            with gr.Row():
+                                variant_finalize_btn = gr.Button("✅ 选定为最终版", variant="primary", size="sm")
+                                variant_keep_btn = gr.Button("保留全部变体", size="sm")
+                        variant_state = gr.State([])
                         with gr.Row():
                             resynthesize_btn = gr.Button("重新合成", variant="secondary")
 
@@ -1318,7 +1393,23 @@ def build_ui():
                 abc_temp_input, abc_top_p_input, abc_top_k_input, abc_rep_input, abc_pen_window_input, abc_min_tok_input, abc_max_tok_input,
                 sem_temp_input, sem_top_p_input, sem_top_k_input, sem_rep_input, sem_pen_window_input, sem_min_tok_input, sem_max_tok_input,
             ],
-            outputs=[audio_output, info_output, abc_output, abc_file_output, flac_file_output, lyrics_sync_data, history_df, history_page_info, history_page, seed_input],
+            outputs=[audio_output, info_output, abc_output, abc_file_output, flac_file_output, lyrics_sync_data, history_df, history_page_info, history_page, variant_group, variant_selector, variant_state, seed_input],
+        )
+
+        variant_selector.change(
+            fn=on_variant_select,
+            inputs=[variant_selector, variant_state],
+            outputs=[audio_output, abc_output, abc_file_output, flac_file_output],
+        )
+        variant_finalize_btn.click(
+            fn=on_variant_finalize,
+            inputs=[variant_selector, variant_state],
+            outputs=[info_output, history_df, history_page_info, history_page, variant_group, variant_selector, variant_state],
+        )
+        variant_keep_btn.click(
+            fn=on_variant_keep_all,
+            inputs=[variant_selector, variant_state],
+            outputs=[info_output, history_df, history_page_info, history_page, variant_group, variant_selector, variant_state],
         )
 
         cancel_btn.click(fn=on_cancel, outputs=info_output)

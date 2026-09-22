@@ -106,6 +106,16 @@ class HistoryManager:
             return abc_file.read_text(encoding="utf-8")
         return None
 
+    def set_status(self, task_id: str, status: str) -> bool:
+        """Update the status of a history entry."""
+        with self._lock:
+            entry = self.get(task_id)
+            if not entry:
+                return False
+            entry.status = status
+            self._save()
+            return True
+
     def delete(self, task_id: str) -> bool:
         """Delete a history entry and its output directory."""
         with self._lock:
@@ -153,6 +163,8 @@ class HistoryManager:
         rows = []
         for e in self._entries:
             style_short = e.style[:40] + "..." if len(e.style) > 40 else e.style
+            if e.status == "final":
+                style_short = f"🏆 {style_short}"
             rows.append([
                 e.created_at,
                 style_short,
