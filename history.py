@@ -50,8 +50,6 @@ class HistoryManager:
         except (json.JSONDecodeError, KeyError, TypeError):
             self._entries = []
 
-        self.prune_missing()
-
     def prune_missing(self) -> int:
         """Drop entries whose audio file no longer exists on disk."""
         with self._lock:
@@ -148,6 +146,7 @@ class HistoryManager:
 
     def to_dataframe_rows(self) -> list[list]:
         """Convert entries to rows for Gradio Dataframe."""
+        self.prune_missing()
         rows = []
         for e in self._entries:
             style_short = e.style[:40] + "..." if len(e.style) > 40 else e.style

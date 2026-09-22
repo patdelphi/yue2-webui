@@ -1239,6 +1239,7 @@ def build_ui():
                 history_clear_btn.click(fn=on_history_clear, outputs=[history_df, history_page_info, history_info, history_state, history_page])
                 history_prev_btn.click(fn=on_history_prev_page, inputs=history_page, outputs=[history_df, history_page_info, history_page])
                 history_next_btn.click(fn=on_history_next_page, inputs=history_page, outputs=[history_df, history_page_info, history_page])
+                demo.load(fn=refresh_history_full, outputs=[history_df, history_page_info, history_page])
 
             with gr.Tab("设置"):
                 gr.Markdown("### 系统状态")
