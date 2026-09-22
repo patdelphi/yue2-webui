@@ -3,6 +3,8 @@ import subprocess
 import threading
 import time
 import logging
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Optional, Callable
 from dataclasses import dataclass
@@ -125,6 +127,7 @@ class GGUFBackend:
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / f"{output_dir.name}.wav"
         cmd = self.build_command(params, output_dir)
+        logger.info(f"Executing audiocpp_cli command: {' '.join(str(c) for c in cmd)}")
         
         start_time = time.time()
         
@@ -141,16 +144,18 @@ class GGUFBackend:
             
             self._current_process = process
             parser = LogParser()
-            
+            output_lines = []
+
             for line in process.stdout:
                 if cancel_event and cancel_event.is_set():
                     process.kill()
                     return GenerationResult(success=False, error_message="已取消")
-                
+
+                output_lines.append(line)
                 progress = parser.parse_line(line)
                 if progress and on_progress:
                     on_progress(progress)
-            
+
             process.wait()
             elapsed = time.time() - start_time
             
@@ -171,15 +176,31 @@ class GGUFBackend:
                 )
             
             audio_duration = self._get_audio_duration(output_path)
-            
+
             abc_score = None
             abc_name = f"{output_dir.name}.abc"
             abc_path = output_dir / abc_name
             legacy_abc = output_dir / "score.abc"
+            logger.info(f"Checking for ABC files: {abc_path} exists={abc_path.exists()}, {legacy_abc} exists={legacy_abc.exists()}")
             if not abc_path.exists() and legacy_abc.exists():
+                logger.info(f"Renaming legacy {legacy_abc} to {abc_path}")
                 legacy_abc.rename(abc_path)
             if abc_path.exists():
                 abc_score = abc_path.read_text(encoding="utf-8")
+                logger.info(f"Loaded ABC score: {len(abc_score)} chars")
+            elif params.abc:
+                abc_score = params.abc
+                abc_path.write_text(abc_score, encoding="utf-8")
+                logger.info(f"Saved user-provided ABC score: {len(abc_score)} chars to {abc_path}")
+            else:
+                logger.info(f"ABC file not found, extracting from CLI output")
+                abc_score = self._extract_abc_from_output(output_lines)
+                if abc_score:
+                    abc_path.write_text(abc_score, encoding="utf-8")
+                    logger.info(f"Extracted and saved ABC score: {len(abc_score)} chars to {abc_path}")
+                else:
+                    logger.warning(f"No ABC content found in output")
+                    logger.info(f"Files in {output_dir}: {list(output_dir.iterdir())}")
             
             mp3_path = self.export_mp3(output_path)
             
@@ -202,6 +223,30 @@ class GGUFBackend:
         """Cancel current generation."""
         if self._current_process:
             self._current_process.kill()
+
+    def _extract_abc_from_output(self, output_lines: list[str]) -> Optional[str]:
+        """Extract ABC notation from CLI output lines."""
+        abc_lines = []
+        in_abc = False
+        abc_start_markers = ['X:', 'T:', 'M:', 'L:', 'K:']
+
+        for line in output_lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            if not in_abc:
+                if any(stripped.startswith(marker) for marker in abc_start_markers):
+                    in_abc = True
+                    abc_lines.append(stripped)
+            else:
+                if stripped.startswith('--') or 'session-option' in stripped or 'request-option' in stripped:
+                    break
+                abc_lines.append(stripped)
+
+        if abc_lines:
+            return '\n'.join(abc_lines)
+        return None
     
     def _get_audio_duration(self, path: Path) -> float:
         """Get WAV file duration in seconds."""
@@ -274,12 +319,61 @@ class GGUFBackend:
         abc_path = output_dir / f"{base_name}.abc"
         midi_path = output_dir / f"{base_name}.mid"
         
+        wav_path = audio_path
+        temp_wav = None
+        
+        if audio_path.suffix.lower() != '.wav':
+            ffmpeg = shutil.which("ffmpeg")
+            if not ffmpeg:
+                return TranscriptionResult(
+                    success=False,
+                    error_message="需要 ffmpeg 来转换音频格式，但未找到 ffmpeg",
+                )
+            
+            temp_wav = Path(tempfile.mktemp(suffix='.wav'))
+            logger.info(f"Converting {audio_path.name} to WAV: {temp_wav}")
+            
+            try:
+                convert_cmd = [
+                    ffmpeg, "-y", "-i", str(audio_path),
+                    "-ar", "16000", "-ac", "1", "-sample_fmt", "s16",
+                    str(temp_wav)
+                ]
+                result = subprocess.run(
+                    convert_cmd,
+                    capture_output=True,
+                    timeout=300
+                )
+                
+                if result.returncode != 0:
+                    stderr_text = result.stderr.decode('utf-8', errors='replace') if result.stderr else ""
+                    logger.error(f"ffmpeg conversion failed: {stderr_text}")
+                    if temp_wav.exists():
+                        temp_wav.unlink()
+                    return TranscriptionResult(
+                        success=False,
+                        error_message=f"音频转换失败: {stderr_text[:200]}",
+                    )
+                
+                wav_path = temp_wav
+                logger.info(f"Converted to WAV: {temp_wav}")
+                
+            except Exception as e:
+                logger.exception(f"ffmpeg conversion error: {e}")
+                if temp_wav and temp_wav.exists():
+                    temp_wav.unlink()
+                return TranscriptionResult(
+                    success=False,
+                    error_message=f"音频转换异常: {str(e)}",
+                )
+        
         cmd = [
             str(self.cli_path),
             "--task", "midi",
             "--family", "sheetsage2",
             "--model", str(sheetsage2_model),
-            "--audio", str(audio_path),
+            "--backend", "cuda",
+            "--audio", str(wav_path),
             "--text-out", str(abc_path),
             "--out", str(midi_path),
             "--out-dir", str(output_dir),
@@ -300,6 +394,7 @@ class GGUFBackend:
             )
             
             self._current_process = process
+            output_lines = []
             
             for line in process.stdout:
                 if cancel_event and cancel_event.is_set():
@@ -307,6 +402,8 @@ class GGUFBackend:
                     return TranscriptionResult(success=False, error_message="已取消")
                 
                 line_stripped = line.strip()
+                output_lines.append(line_stripped)
+                logger.debug(f"SheetSage2: {line_stripped}")
                 if on_progress:
                     if "Loading model" in line_stripped or "model loaded" in line_stripped.lower():
                         on_progress({"phase": "loading", "message": "加载 SheetSage2 模型..."})
@@ -319,10 +416,12 @@ class GGUFBackend:
             elapsed = time.time() - start_time
             
             if process.returncode != 0:
-                logger.error(f"SheetSage2 failed with exit code {process.returncode}")
+                last_lines = [l for l in output_lines if l][-10:]
+                error_detail = "\n".join(last_lines) if last_lines else "无输出"
+                logger.error(f"SheetSage2 failed with exit code {process.returncode}:\n{error_detail}")
                 return TranscriptionResult(
                     success=False,
-                    error_message=f"转谱失败，退出码 {process.returncode}",
+                    error_message=f"转谱失败，退出码 {process.returncode}: {error_detail}",
                     transcription_time_seconds=elapsed,
                 )
             
@@ -337,6 +436,23 @@ class GGUFBackend:
                     transcription_time_seconds=elapsed,
                 )
             
+            events_src = output_dir / "events.json"
+            if events_src.exists():
+                events_dst = output_dir / f"{base_name}_events.json"
+                try:
+                    events_src.rename(events_dst)
+                    logger.debug(f"Renamed events.json to {events_dst.name}")
+                except Exception as e:
+                    logger.warning(f"Failed to rename events.json: {e}")
+            
+            score_abc = output_dir / "score.abc"
+            if score_abc.exists():
+                try:
+                    score_abc.unlink()
+                    logger.debug(f"Removed duplicate score.abc")
+                except Exception as e:
+                    logger.warning(f"Failed to remove score.abc: {e}")
+            
             return TranscriptionResult(
                 success=True,
                 abc_score=abc_score,
@@ -349,3 +465,9 @@ class GGUFBackend:
             return TranscriptionResult(success=False, error_message=str(e))
         finally:
             self._current_process = None
+            if temp_wav and temp_wav.exists():
+                try:
+                    temp_wav.unlink()
+                    logger.debug(f"Cleaned up temp WAV: {temp_wav}")
+                except Exception as e:
+                    logger.warning(f"Failed to clean up temp WAV {temp_wav}: {e}")

@@ -4,6 +4,7 @@ import random
 import json
 import shutil
 import threading
+import time
 import logging
 from pathlib import Path
 from datetime import datetime
@@ -24,6 +25,7 @@ from vocal_presets import VOCAL_PRESETS, INSTRUMENT_PRESETS, MOOD_PRESETS, LANGU
 from lyrics_templates import LYRICS_TEMPLATES
 from history import HistoryManager, HistoryRecord
 from postprocess import postprocess_audio
+from queue_manager import queue_manager, TaskType, TaskStatus
 
 PROJECT_ROOT = Path(__file__).parent.parent
 WEBUI_ROOT = PROJECT_ROOT / "yue2-webui"
@@ -70,14 +72,13 @@ def on_generate(
     sem_temp, sem_top_p, sem_top_k, sem_rep_penalty, sem_pen_window, sem_min_tok, sem_max_tok,
     progress=gr.Progress(track_tqdm=False),
 ):
-    """Generate button callback."""
+    """Generate button callback - submits to queue and polls for results."""
     global current_task_id, current_cancel_event
     
     logger.info(f"on_generate: style={style!r}, cot={cot!r}, seed={seed!r}, cfg_scale={cfg_scale!r}, steps={num_inference_steps!r}, batch={batch_count!r}")
     
     # Handle None values from frontend (Gradio may send None for uninitialized sliders)
     cot = cot if cot is not None else "full"
-    # Handle boolean cot value (frontend may send False instead of "off")
     if isinstance(cot, bool):
         cot = "off" if not cot else "full"
     seed = seed if seed is not None else 831001
@@ -85,7 +86,6 @@ def on_generate(
     num_inference_steps = num_inference_steps if num_inference_steps is not None else 8
     batch_count = batch_count if batch_count is not None else 1
     
-    # ABC sampling params defaults
     abc_temp = abc_temp if abc_temp is not None else 0.7
     abc_top_p = abc_top_p if abc_top_p is not None else 0.9
     abc_top_k = abc_top_k if abc_top_k is not None else 30
@@ -94,7 +94,6 @@ def on_generate(
     abc_min_tok = abc_min_tok if abc_min_tok is not None else 32
     abc_max_tok = abc_max_tok if abc_max_tok is not None else 4096
     
-    # Semantic sampling params defaults
     sem_temp = sem_temp if sem_temp is not None else 1.0
     sem_top_p = sem_top_p if sem_top_p is not None else 0.95
     sem_top_k = sem_top_k if sem_top_k is not None else 100
@@ -103,31 +102,83 @@ def on_generate(
     sem_min_tok = sem_min_tok if sem_min_tok is not None else 200
     sem_max_tok = sem_max_tok if sem_max_tok is not None else 9000
     
-    try:
-        return _on_generate_impl(
-            style, lyrics, cot, seed, cfg_scale, num_inference_steps, out_format, batch_count,
-            normalize, fade, trim, metadata, abc_text,
-            abc_temp, abc_top_p, abc_top_k, abc_rep_penalty, abc_pen_window, abc_min_tok, abc_max_tok,
-            sem_temp, sem_top_p, sem_top_k, sem_rep_penalty, sem_pen_window, sem_min_tok, sem_max_tok,
-            progress,
-        )
-    except Exception as e:
-        logger.exception(f"生成失败: {e}")
-        raise
-
-
-def _on_generate_impl(
-    style, lyrics, cot, seed, cfg_scale, num_inference_steps, out_format, batch_count,
-    normalize, fade, trim, metadata, abc_text,
-    abc_temp, abc_top_p, abc_top_k, abc_rep_penalty, abc_pen_window, abc_min_tok, abc_max_tok,
-    sem_temp, sem_top_p, sem_top_k, sem_rep_penalty, sem_pen_window, sem_min_tok, sem_max_tok,
-    progress,
-):
-
+    # Validate inputs before queuing
     if not style or not style.strip():
         raise gr.Error("请输入风格描述")
     if not lyrics or not lyrics.strip():
         raise gr.Error("请输入歌词")
+    
+    # Submit to queue
+    cancel_evt = threading.Event()
+    current_cancel_event = cancel_evt
+    
+    task = queue_manager.submit(
+        TaskType.GENERATION,
+        _generate_worker,
+        cancel_event=cancel_evt,
+        style=style, lyrics=lyrics, cot=cot, seed=seed, cfg_scale=cfg_scale,
+        num_inference_steps=num_inference_steps, out_format=out_format, batch_count=batch_count,
+        normalize=normalize, fade=fade, trim=trim, metadata=metadata, abc_text=abc_text,
+        abc_temp=abc_temp, abc_top_p=abc_top_p, abc_top_k=abc_top_k,
+        abc_rep_penalty=abc_rep_penalty, abc_pen_window=abc_pen_window,
+        abc_min_tok=abc_min_tok, abc_max_tok=abc_max_tok,
+        sem_temp=sem_temp, sem_top_p=sem_top_p, sem_top_k=sem_top_k,
+        sem_rep_penalty=sem_rep_penalty, sem_pen_window=sem_pen_window,
+        sem_min_tok=sem_min_tok, sem_max_tok=sem_max_tok,
+    )
+    
+    current_task_id = task.task_id
+    logger.info(f"Task {task.task_id} submitted to queue")
+    
+    # Poll for completion, forwarding progress to Gradio
+    try:
+        while True:
+            status_info = queue_manager.get_status(task)
+            status = status_info["status"]
+            
+            if status == TaskStatus.QUEUED:
+                pos = status_info["position"]
+                progress(0, desc=f"排队中... 前面还有 {pos - 1} 个任务")
+            elif status == TaskStatus.RUNNING:
+                running_time = status_info.get("running_time", 0)
+                progress(0, desc=f"执行中... ({running_time:.0f}s)")
+            elif status == TaskStatus.COMPLETED:
+                break
+            elif status == TaskStatus.FAILED:
+                error_msg = status_info.get("error", "未知错误")
+                raise gr.Error(f"生成失败: {error_msg}")
+            elif status == TaskStatus.CANCELLED:
+                raise gr.Error("任务已取消")
+            
+            # Forward progress updates from worker
+            for prog_val, desc in task.drain_progress():
+                progress(prog_val, desc=desc)
+            
+            time.sleep(0.5)
+        
+        # Forward any remaining progress
+        for prog_val, desc in task.drain_progress():
+            progress(prog_val, desc=desc)
+        
+        return task.result
+    except gr.Error:
+        raise
+    except Exception as e:
+        logger.exception(f"生成失败: {e}")
+        raise
+    finally:
+        current_task_id = None
+        current_cancel_event = None
+
+
+def _generate_worker(
+    _task,
+    style, lyrics, cot, seed, cfg_scale, num_inference_steps, out_format, batch_count,
+    normalize, fade, trim, metadata, abc_text,
+    abc_temp, abc_top_p, abc_top_k, abc_rep_penalty, abc_pen_window, abc_min_tok, abc_max_tok,
+    sem_temp, sem_top_p, sem_top_k, sem_rep_penalty, sem_pen_window, sem_min_tok, sem_max_tok,
+):
+    """Worker function that runs in the queue thread. Returns the result tuple."""
 
     params = GenerationParams(
         style=style.strip(),
@@ -152,15 +203,12 @@ def _on_generate_impl(
 
     error = validate_params(params)
     if error:
-        raise gr.Error(error)
+        raise ValueError(error)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base_task_id = f"{timestamp}_{params.id}"
     output_dir = WEBUI_ROOT / "outputs" / base_task_id
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    current_task_id = base_task_id
-    current_cancel_event = threading.Event()
 
     def on_progress(p):
         phase_labels = {
@@ -172,14 +220,14 @@ def _on_generate_impl(
             "done": "完成",
         }
         label = phase_labels.get(p.get("phase", ""), "处理中...")
-        progress(0, desc=label)
+        _task.push_progress(0, label)
 
     batch_count = int(batch_count)
     results = []
     base_seed = int(seed)
 
     for i in range(batch_count):
-        if current_cancel_event and current_cancel_event.is_set():
+        if _task.cancel_event and _task.cancel_event.is_set():
             break
 
         current_seed = base_seed + i
@@ -188,23 +236,20 @@ def _on_generate_impl(
         variant_dir.mkdir(parents=True, exist_ok=True)
 
         params.seed = current_seed
-        progress(0, desc=f"生成变体 {i+1}/{batch_count} (seed={current_seed})...")
+        _task.push_progress(0, f"生成变体 {i+1}/{batch_count} (seed={current_seed})...")
 
         result = backend.generate(
             params=params,
             output_dir=variant_dir,
             on_progress=on_progress,
-            cancel_event=current_cancel_event,
+            cancel_event=_task.cancel_event,
         )
         results.append((task_id, variant_dir, result, current_seed))
-
-    current_task_id = None
-    current_cancel_event = None
 
     successful = [(tid, d, r, s) for tid, d, r, s in results if r.success]
     if not successful:
         failed_msg = results[0][2].error_message if results else "未知错误"
-        raise gr.Error(f"生成失败: {failed_msg}")
+        raise ValueError(f"生成失败: {failed_msg}")
 
     format_label = FORMAT_LABELS.get(params.out_format.value, "PCM 16-bit")
 
@@ -212,7 +257,7 @@ def _on_generate_impl(
         for task_id, variant_dir, result, variant_seed in successful:
             wav_path = Path(result.audio_path)
             if wav_path.exists():
-                progress(0, desc="后处理音频...")
+                _task.push_progress(0, "后处理音频...")
                 postprocess_audio(
                     wav_path,
                     normalize=normalize, fade=fade, trim=trim, metadata=metadata,
@@ -305,6 +350,8 @@ def on_cancel():
     global current_task_id, current_cancel_event
     if current_cancel_event:
         current_cancel_event.set()
+    if current_task_id:
+        queue_manager.cancel_task_by_id(current_task_id)
         current_task_id = None
         current_cancel_event = None
         return "正在取消..."
@@ -317,16 +364,78 @@ def on_resynthesize(
     sem_temp, sem_top_p, sem_top_k, sem_rep_penalty, sem_pen_window, sem_min_tok, sem_max_tok,
     progress=gr.Progress(track_tqdm=False),
 ):
-    """Resynthesize with edited ABC score."""
+    """Resynthesize with edited ABC score - submits to queue."""
     global current_task_id, current_cancel_event
 
-    # Handle None values from frontend
     seed = seed if seed is not None else 831001
     cfg_scale = cfg_scale if cfg_scale is not None else 0
     num_inference_steps = num_inference_steps if num_inference_steps is not None else 8
 
     if not abc_text or not abc_text.strip():
         raise gr.Error("ABC 乐谱不能为空")
+
+    cancel_evt = threading.Event()
+    current_cancel_event = cancel_evt
+
+    task = queue_manager.submit(
+        TaskType.GENERATION,
+        _resynthesize_worker,
+        cancel_event=cancel_evt,
+        abc_text=abc_text, style=style, lyrics=lyrics, seed=seed,
+        cfg_scale=cfg_scale, num_inference_steps=num_inference_steps, out_format=out_format,
+        abc_temp=abc_temp, abc_top_p=abc_top_p, abc_top_k=abc_top_k,
+        abc_rep_penalty=abc_rep_penalty, abc_pen_window=abc_pen_window,
+        abc_min_tok=abc_min_tok, abc_max_tok=abc_max_tok,
+        sem_temp=sem_temp, sem_top_p=sem_top_p, sem_top_k=sem_top_k,
+        sem_rep_penalty=sem_rep_penalty, sem_pen_window=sem_pen_window,
+        sem_min_tok=sem_min_tok, sem_max_tok=sem_max_tok,
+    )
+
+    current_task_id = task.task_id
+    logger.info(f"Resynthesize task {task.task_id} submitted to queue")
+
+    try:
+        while True:
+            status_info = queue_manager.get_status(task)
+            status = status_info["status"]
+
+            if status == TaskStatus.QUEUED:
+                pos = status_info["position"]
+                progress(0, desc=f"排队中... 前面还有 {pos - 1} 个任务")
+            elif status == TaskStatus.RUNNING:
+                running_time = status_info.get("running_time", 0)
+                progress(0, desc=f"重新合成中... ({running_time:.0f}s)")
+            elif status == TaskStatus.COMPLETED:
+                break
+            elif status == TaskStatus.FAILED:
+                error_msg = status_info.get("error", "未知错误")
+                raise gr.Error(f"重新合成失败: {error_msg}")
+
+            for prog_val, desc in task.drain_progress():
+                progress(prog_val, desc=desc)
+
+            time.sleep(0.5)
+
+        for prog_val, desc in task.drain_progress():
+            progress(prog_val, desc=desc)
+
+        return task.result
+    except gr.Error:
+        raise
+    except Exception as e:
+        logger.exception(f"重新合成失败: {e}")
+        raise
+    finally:
+        current_task_id = None
+        current_cancel_event = None
+
+
+def _resynthesize_worker(
+    _task, abc_text, style, lyrics, seed, cfg_scale, num_inference_steps, out_format,
+    abc_temp, abc_top_p, abc_top_k, abc_rep_penalty, abc_pen_window, abc_min_tok, abc_max_tok,
+    sem_temp, sem_top_p, sem_top_k, sem_rep_penalty, sem_pen_window, sem_min_tok, sem_max_tok,
+):
+    """Worker function for resynthesis, runs in queue thread."""
 
     params = GenerationParams(
         style=style.strip() if style else "",
@@ -351,15 +460,12 @@ def on_resynthesize(
 
     error = validate_params(params)
     if error:
-        raise gr.Error(error)
+        raise ValueError(error)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     task_id = f"{timestamp}_resynth_{params.id}"
     output_dir = WEBUI_ROOT / "outputs" / task_id
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    current_task_id = task_id
-    current_cancel_event = threading.Event()
 
     def on_progress(p):
         phase_labels = {
@@ -370,19 +476,16 @@ def on_resynthesize(
             "done": "完成",
         }
         label = phase_labels.get(p.get("phase", ""), "处理中...")
-        progress(0, desc=label)
+        _task.push_progress(0, label)
 
-    progress(0, desc="开始重新合成...")
+    _task.push_progress(0, "开始重新合成...")
 
     result = backend.generate(
         params=params,
         output_dir=output_dir,
         on_progress=on_progress,
-        cancel_event=current_cancel_event,
+        cancel_event=_task.cancel_event,
     )
-
-    current_task_id = None
-    current_cancel_event = None
 
     if result.success:
         format_label = FORMAT_LABELS.get(params.out_format.value, "PCM 16-bit")
@@ -415,11 +518,11 @@ def on_resynthesize(
         resynth_lyrics_data = f'<div class="gen-lyrics-data" style="display:none" data-lyrics=\'{json.dumps(params.lyrics, ensure_ascii=False)}\' data-duration="{result.audio_duration_seconds}"></div>'
         return result.audio_path, duration_info, abc_download, mp3_download, resynth_lyrics_data
     else:
-        raise gr.Error(f"重新合成失败：{result.error_message}")
+        raise ValueError(f"重新合成失败：{result.error_message}")
 
 
 def on_transcribe(audio_file, progress=gr.Progress(track_tqdm=False)):
-    """Transcribe audio to ABC score using SheetSage2."""
+    """Transcribe audio to ABC score using SheetSage2 - submits to queue."""
     if not audio_file:
         raise gr.Error("请先上传音频文件")
     
@@ -427,13 +530,61 @@ def on_transcribe(audio_file, progress=gr.Progress(track_tqdm=False)):
     if not audio_path.exists():
         raise gr.Error("音频文件不存在")
     
+    supported_formats = {'.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac', '.wma'}
+    if audio_path.suffix.lower() not in supported_formats:
+        raise gr.Error(f"不支持的音频格式：{audio_path.suffix}。支持的格式：{', '.join(sorted(supported_formats))}")
+    
+    task = queue_manager.submit(
+        TaskType.TRANSCRIPTION,
+        _transcribe_worker,
+        audio_path=str(audio_path),
+    )
+    
+    logger.info(f"Transcription task {task.task_id} submitted to queue")
+    
+    try:
+        while True:
+            status_info = queue_manager.get_status(task)
+            status = status_info["status"]
+            
+            if status == TaskStatus.QUEUED:
+                pos = status_info["position"]
+                progress(0, desc=f"排队中... 前面还有 {pos - 1} 个任务")
+            elif status == TaskStatus.RUNNING:
+                running_time = status_info.get("running_time", 0)
+                progress(0, desc=f"转谱中... ({running_time:.0f}s)")
+            elif status == TaskStatus.COMPLETED:
+                break
+            elif status == TaskStatus.FAILED:
+                error_msg = status_info.get("error", "未知错误")
+                raise gr.Error(f"转谱失败: {error_msg}")
+            
+            for prog_val, desc in task.drain_progress():
+                progress(prog_val, desc=desc)
+            
+            time.sleep(0.5)
+        
+        for prog_val, desc in task.drain_progress():
+            progress(prog_val, desc=desc)
+        
+        return task.result
+    except gr.Error:
+        raise
+    except Exception as e:
+        logger.exception(f"转谱失败: {e}")
+        raise
+
+
+def _transcribe_worker(_task, audio_path):
+    """Worker function for transcription, runs in queue thread."""
+    audio_path = Path(audio_path)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     task_id = f"transcribe_{timestamp}"
     output_dir = WEBUI_ROOT / "outputs" / task_id
     
     def on_progress(p):
         if p and p.get("message"):
-            progress(p.get("progress", 0), p["message"])
+            _task.push_progress(p.get("progress", 0), p["message"])
     
     result = backend.transcribe(audio_path, output_dir, on_progress=on_progress)
     
@@ -447,7 +598,7 @@ def on_transcribe(audio_file, progress=gr.Progress(track_tqdm=False)):
         
         return abc_score, info, abc_file_path, midi_path, task_id
     else:
-        raise gr.Error(f"转谱失败：{result.error_message}")
+        raise ValueError(f"转谱失败：{result.error_message}")
 
 
 def on_send_to_generate(abc_text):
@@ -943,7 +1094,7 @@ def build_ui():
                             with gr.Row():
                                 metadata_checkbox = gr.Checkbox(label="嵌入元数据", value=True, info="标题/风格/种子")
 
-                        with gr.Accordion("高级采样参数", open=False):
+                        with gr.Accordion("高级采样参数", open=True):
                             gr.Markdown("#### ABC 乐谱采样 (Stage 1)")
                             with gr.Row():
                                 abc_temp_input = gr.Slider(label="ABC 温度", minimum=0, maximum=5, step=0.1, value=0.7)
@@ -982,7 +1133,7 @@ def build_ui():
                                 placeholder="X:1",
                                 lines=10,
                                 interactive=True,
-                                elem_id="abc-output",
+                                elem_id="gen-abc-output",
                                 info="生成后可编辑乐谱，点击「重新合成」使用修改后的乐谱生成新音频",
                             )
                         gr.Markdown("#### 乐谱预览")
@@ -1002,27 +1153,28 @@ def build_ui():
                 gr.Markdown("### 音频转乐谱")
                 gr.Markdown("上传音频文件，使用 SheetSage2 模型自动转写为 ABC 乐谱")
                 
-                transcribe_audio_input = gr.Audio(label="上传音频", type="filepath")
-                transcribe_btn = gr.Button("开始转谱", variant="primary")
-                transcribe_info = gr.Markdown()
-                
-                with gr.Accordion("转谱结果", open=False):
-                    transcribe_abc_output = gr.Textbox(
-                        label="ABC 乐谱 (可编辑)",
-                        placeholder="转谱完成后乐谱将显示在这里...",
-                        lines=10,
-                    )
-                    transcribe_abc_preview = gr.HTML(
-                        label="乐谱预览",
-                        value='<div id="transcribe-abc-preview-container" style="padding: 20px; border-radius: 8px; min-height: 200px; border: 1px dashed rgba(255,255,255,0.15);"><div style="text-align:center;color:#666;">转谱后乐谱预览将在此处显示</div><div id="transcribe-abc-paper"></div><div id="transcribe-abc-audio"></div></div>',
-                    )
+                with gr.Row():
+                    with gr.Column():
+                        transcribe_audio_input = gr.Audio(label="上传音频 (支持 WAV/MP3/FLAC/OGG/M4A 等)", type="filepath", elem_id="transcribe-audio-input")
+                        with gr.Row():
+                            transcribe_btn = gr.Button("开始转谱", variant="primary")
+                            transcribe_send_btn = gr.Button("→ 发送到生成页", variant="secondary")
+                        transcribe_info = gr.Markdown()
                     
-                    with gr.Row():
-                        transcribe_abc_download = gr.File(label="下载 ABC")
-                        transcribe_midi_download = gr.File(label="下载 MIDI")
-                    
-                    with gr.Row():
-                        transcribe_send_btn = gr.Button("→ 发送到生成页", variant="secondary", size="sm")
+                    with gr.Column():
+                        transcribe_abc_output = gr.Textbox(
+                            label="ABC 乐谱 (可编辑)",
+                            placeholder="转谱完成后乐谱将显示在这里...",
+                            lines=10,
+                        )
+                        transcribe_abc_preview = gr.HTML(
+                            label="乐谱预览",
+                            value='<div id="transcribe-abc-preview-container" style="padding: 20px; border-radius: 8px; min-height: 200px; border: 1px dashed rgba(255,255,255,0.15);"><div style="text-align:center;color:#666;">转谱后乐谱预览将在此处显示</div><div id="transcribe-abc-paper"></div><div id="transcribe-abc-audio"></div></div>',
+                        )
+                        
+                        with gr.Row():
+                            transcribe_abc_download = gr.File(label="下载 ABC")
+                            transcribe_midi_download = gr.File(label="下载 MIDI")
                 
                 transcribe_task_id = gr.State(value="")
                 transcribe_abc_bridge = gr.Textbox(elem_id="abc-bridge", label="")

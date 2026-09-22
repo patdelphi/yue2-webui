@@ -246,8 +246,13 @@
                 }
 
                 function findAbcTextarea() {
-                    var abcTextareas = document.querySelectorAll('textarea[placeholder*="X:1"]');
-                    return abcTextareas.length > 1 ? abcTextareas[abcTextareas.length - 1] : abcTextareas[0];
+                    var el = document.getElementById('gen-abc-output');
+                    if (el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT')) return el;
+                    if (el) {
+                        var tab = el.querySelector('textarea, input[type="text"]');
+                        if (tab) return tab;
+                    }
+                    return document.querySelector('#gen-abc-output textarea, #gen-abc-output input[type="text"]');
                 }
 
                 function ensureAccordionOpen(textarea) {
@@ -509,8 +514,13 @@
                 var bridgeInput = bridge.querySelector('textarea') || bridge.querySelector('input[type="text"]') || bridge;
 
                 function findGenAbcTextarea() {
-                    var abcTextareas = document.querySelectorAll('textarea[placeholder*="X:1"]');
-                    return abcTextareas.length > 0 ? abcTextareas[0] : null;
+                    var el = document.getElementById('gen-abc-output');
+                    if (el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT')) return el;
+                    if (el) {
+                        var tab = el.querySelector('textarea, input[type="text"]');
+                        if (tab) return tab;
+                    }
+                    return document.querySelector('#gen-abc-output textarea, #gen-abc-output input[type="text"]');
                 }
 
                 function clickTab(tabName) {
@@ -713,6 +723,34 @@
                 document.head.appendChild(style);
             }
             initAudioTimeDisplay();
+
+            function initWaveformZoom() {
+                var audioIds = ['gen-audio', 'history-audio', 'transcribe-audio-input'];
+                audioIds.forEach(function(id) {
+                    var el = document.getElementById(id);
+                    if (!el) return;
+                    var observer = new MutationObserver(function() {
+                        var waveEl = el.querySelector('wave');
+                        if (waveEl && waveEl.__wavesurfer) {
+                            var ws = waveEl.__wavesurfer;
+                            var applyZoom = function() {
+                                var duration = ws.getDuration();
+                                if (duration > 0 && ws.container.clientWidth > 0) {
+                                    ws.zoom(duration * ws.params.pixelRatio / ws.container.clientWidth);
+                                }
+                            };
+                            if (ws.getDuration() > 0) {
+                                applyZoom();
+                            } else {
+                                ws.on('loaded', applyZoom);
+                                ws.on('ready', applyZoom);
+                            }
+                        }
+                    });
+                    observer.observe(el, { childList: true, subtree: true });
+                });
+            }
+            initWaveformZoom();
 
             if (window.initHistoryTableClick) {
                 window.initHistoryTableClick();
