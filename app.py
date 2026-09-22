@@ -788,6 +788,11 @@ def on_check_models():
     lines.append(f"- 主模型: {'✅' if checks['model_gguf']['exists'] else '❌'} `{checks['model_gguf']['path']}`")
     lines.append(f"- VAE: {'✅' if checks['vae_gguf']['exists'] else '❌'} `{checks['vae_gguf']['path']}`")
 
+    sheetsage2 = backend.check_sheetsage2()
+    ss_icon = "✅" if sheetsage2["exists"] else "❌"
+    ss_state = "就绪" if sheetsage2["exists"] else "缺失"
+    lines.append(f"- SheetSage2 (转谱): {ss_icon} {ss_state} `{sheetsage2['model_path']}`")
+
     try:
         import torch
         if torch.cuda.is_available():
