@@ -72,7 +72,8 @@ class GGUFBackend:
         self.backend = os.environ.get("YUE2_BACKEND", "cuda")
         self._current_process: Optional[subprocess.Popen] = None
     
-    def build_command(self, params: GenerationParams, output_dir: Path) -> list[str]:
+    def build_command(self, params: GenerationParams, output_dir: Path,
+                      output_name: Optional[str] = None) -> list[str]:
         """Build CLI command from parameters."""
         cmd = [
             str(self.cli_path),
@@ -115,20 +116,21 @@ class GGUFBackend:
         if params.out_format != OutFormat.PCM16:
             cmd.extend(["--out-format", params.out_format.value])
 
-        output_path = output_dir / f"{output_dir.name}.wav"
+        output_path = output_dir / f"{output_name or output_dir.name}.wav"
         cmd.extend(["--out", str(output_path)])
         cmd.extend(["--out-dir", str(output_dir)])
         cmd.append("--log")
-        
+
         return cmd
-    
+
     def generate(self, params: GenerationParams, output_dir: Path,
                  on_progress: Optional[Callable[[dict], None]] = None,
-                 cancel_event: Optional[threading.Event] = None) -> GenerationResult:
+                 cancel_event: Optional[threading.Event] = None,
+                 output_name: Optional[str] = None) -> GenerationResult:
         """Execute generation."""
         output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / f"{output_dir.name}.wav"
-        cmd = self.build_command(params, output_dir)
+        output_path = output_dir / f"{output_name or output_dir.name}.wav"
+        cmd = self.build_command(params, output_dir, output_name=output_name)
         logger.info(f"Executing audiocpp_cli command: {' '.join(str(c) for c in cmd)}")
         
         start_time = time.time()
@@ -180,7 +182,7 @@ class GGUFBackend:
             audio_duration = self._get_audio_duration(output_path)
 
             abc_score = None
-            abc_name = f"{output_dir.name}.abc"
+            abc_name = f"{output_name or output_dir.name}.abc"
             abc_path = output_dir / abc_name
             legacy_abc = output_dir / "score.abc"
             logger.info(f"Checking for ABC files: {abc_path} exists={abc_path.exists()}, {legacy_abc} exists={legacy_abc.exists()}")

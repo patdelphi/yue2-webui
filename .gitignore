@@ -36,6 +36,7 @@ env/
 # Generated outputs
 outputs/
 history.json
+last_inputs.json
 presets/*.json
 !presets/default.json
 

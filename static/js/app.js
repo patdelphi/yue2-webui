@@ -237,6 +237,20 @@
                     clearTimeout(timer);
                     timer = setTimeout(updateSegmentDisplay, 600);
                 });
+                // Gradio's programmatic value updates (e.g. the 使用上一次
+                // restore button) bypass DOM input events, so hook the setter.
+                const desc = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value');
+                if (desc && desc.set && !ta.__yuE2ValuePatched) {
+                    const origGet = desc.get, origSet = desc.set;
+                    Object.defineProperty(ta, 'value', {
+                        get: function() { return origGet.call(this); },
+                        set: function(v) {
+                            origSet.call(this, v);
+                            this.dispatchEvent(new Event('input', { bubbles: true }));
+                        }
+                    });
+                    ta.__yuE2ValuePatched = true;
+                }
             }
             initLyricsEditor();
 

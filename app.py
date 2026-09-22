@@ -29,6 +29,7 @@ from queue_manager import queue_manager, TaskType, TaskStatus, TaskCancelledErro
 
 PROJECT_ROOT = Path(__file__).parent.parent
 WEBUI_ROOT = PROJECT_ROOT / "yue2-webui"
+LAST_INPUTS_FILE = WEBUI_ROOT / "last_inputs.json"
 backend = GGUFBackend(PROJECT_ROOT)
 history_mgr = HistoryManager(
     history_file=WEBUI_ROOT / "history.json",
@@ -92,6 +93,28 @@ def strip_comment_lines(lyrics: str) -> str:
     )
 
 
+def _load_last_inputs() -> dict:
+    if not LAST_INPUTS_FILE.exists():
+        return {}
+    try:
+        data = json.loads(LAST_INPUTS_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_last_inputs(style: str, lyrics: str, abc: str):
+    data = {
+        "style": style or "",
+        "lyrics": lyrics or "",
+        "abc": abc or "",
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    tmp = LAST_INPUTS_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(LAST_INPUTS_FILE)
+
+
 def on_generate(
     style, lyrics, cot, seed, random_seed, cfg_scale, num_inference_steps, out_format, batch_count,
     normalize, fade, trim, metadata,
@@ -115,7 +138,14 @@ def on_generate(
         seed = int(seed)
     cfg_scale = cfg_scale if cfg_scale is not None else 0
     num_inference_steps = num_inference_steps if num_inference_steps is not None else 8
-    batch_count = batch_count if batch_count is not None else 1
+    batch_count = int(batch_count) if batch_count is not None else 1
+    if batch_count > 1:
+        # Batch variants get independent random seeds; a pinned seed only
+        # governs single generation.
+        seeds = [random.randint(0, 2**31 - 1) for _ in range(batch_count)]
+        seed = seeds[0]
+    else:
+        seeds = [seed]
     
     abc_temp = abc_temp if abc_temp is not None else 0.7
     abc_top_p = abc_top_p if abc_top_p is not None else 0.9
@@ -144,7 +174,7 @@ def on_generate(
     task = queue_manager.submit(
         TaskType.GENERATION,
         _generate_worker,
-        style=style, lyrics=lyrics, cot=cot, seed=seed, cfg_scale=cfg_scale,
+        style=style, lyrics=lyrics, cot=cot, seeds=seeds, cfg_scale=cfg_scale,
         num_inference_steps=num_inference_steps, out_format=out_format, batch_count=batch_count,
         normalize=normalize, fade=fade, trim=trim, metadata=metadata, abc_text=abc_text,
         abc_temp=abc_temp, abc_top_p=abc_top_p, abc_top_k=abc_top_k,
@@ -201,7 +231,7 @@ def on_generate(
 
 def _generate_worker(
     _task,
-    style, lyrics, cot, seed, cfg_scale, num_inference_steps, out_format, batch_count,
+    style, lyrics, cot, seeds, cfg_scale, num_inference_steps, out_format, batch_count,
     normalize, fade, trim, metadata, abc_text,
     abc_temp, abc_top_p, abc_top_k, abc_rep_penalty, abc_pen_window, abc_min_tok, abc_max_tok,
     sem_temp, sem_top_p, sem_top_k, sem_rep_penalty, sem_pen_window, sem_min_tok, sem_max_tok,
@@ -212,7 +242,7 @@ def _generate_worker(
         style=style.strip(),
         lyrics=lyrics.strip(),
         cot=CotMode(cot),
-        seed=int(seed),
+        seed=int(seeds[0]),
         cfg_scale=float(cfg_scale) if cfg_scale else None,
         num_inference_steps=int(num_inference_steps),
         out_format=OutFormat(out_format),
@@ -233,8 +263,11 @@ def _generate_worker(
     if error:
         raise ValueError(error)
 
+    _save_last_inputs(params.style, params.lyrics, abc_text or "")
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base_task_id = f"{timestamp}_{params.id}"
+    batch_count = int(batch_count)
     output_dir = WEBUI_ROOT / "outputs" / base_task_id
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -252,15 +285,15 @@ def _generate_worker(
 
     batch_count = int(batch_count)
     results = []
-    base_seed = int(seed)
+    seeds = [int(s) for s in seeds]
 
     for i in range(batch_count):
         if _task.cancel_event and _task.cancel_event.is_set():
             break
 
-        current_seed = base_seed + i
+        current_seed = seeds[i]
         task_id = f"{base_task_id}_var{i+1}" if batch_count > 1 else base_task_id
-        variant_dir = output_dir / f"var{i+1}" if batch_count > 1 else output_dir
+        variant_dir = output_dir
         variant_dir.mkdir(parents=True, exist_ok=True)
 
         params.seed = current_seed
@@ -271,6 +304,7 @@ def _generate_worker(
             output_dir=variant_dir,
             on_progress=on_progress,
             cancel_event=_task.cancel_event,
+            output_name=task_id,
         )
         results.append((task_id, variant_dir, result, current_seed))
 
@@ -316,11 +350,11 @@ def _generate_worker(
     for task_id, variant_dir, result, variant_seed in successful:
         abc_path = ""
         if result.abc_score:
-            abc_file = variant_dir / f"{variant_dir.name}.abc"
+            abc_file = variant_dir / f"{task_id}.abc"
             abc_file.write_text(result.abc_score, encoding="utf-8")
             abc_path = str(abc_file.relative_to(WEBUI_ROOT))
 
-        lyrics_file = variant_dir / f"{variant_dir.name}.txt"
+        lyrics_file = variant_dir / f"{task_id}.txt"
         lyrics_file.write_text(params.lyrics, encoding="utf-8")
 
         record = HistoryRecord(
@@ -345,9 +379,10 @@ def _generate_worker(
     history_mgr.auto_prune(max_entries=100)
 
     first_result = successful[0][2]
+    first_task_id = successful[0][0]
     first_dir = successful[0][1]
     abc_display = first_result.abc_score or ""
-    abc_download = str(first_dir / f"{first_dir.name}.abc") if first_result.abc_score else None
+    abc_download = str(first_dir / f"{first_task_id}.abc") if first_result.abc_score else None
 
     if batch_count == 1:
         mp3_download = first_result.mp3_path
@@ -358,25 +393,6 @@ def _generate_worker(
             gr.update(visible=False), gr.update(visible=False, choices=[], value=None), [],
         )
     else:
-        zip_path = output_dir / "batch.zip"
-        import zipfile
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-            for task_id, variant_dir, result, _ in successful:
-                var_name = task_id.split('_')[-1]
-                base_name = variant_dir.name
-                wav_file = variant_dir / f"{base_name}.wav"
-                if wav_file.exists():
-                    zf.write(wav_file, f"{var_name}/{base_name}.wav")
-                mp3_file = variant_dir / f"{base_name}.mp3"
-                if mp3_file.exists():
-                    zf.write(mp3_file, f"{var_name}/{base_name}.mp3")
-                abc_file = variant_dir / f"{base_name}.abc"
-                if abc_file.exists():
-                    zf.write(abc_file, f"{var_name}/{base_name}.abc")
-                lyrics_file = variant_dir / f"{base_name}.txt"
-                if lyrics_file.exists():
-                    zf.write(lyrics_file, f"{var_name}/{base_name}.txt")
-
         variants_payload = []
         for idx, (task_id, variant_dir, result, variant_seed) in enumerate(successful, start=1):
             variants_payload.append({
@@ -384,19 +400,27 @@ def _generate_worker(
                 "task_id": task_id,
                 "audio_path": str(result.audio_path),
                 "abc_text": result.abc_score or "",
-                "abc_file": str(variant_dir / f"{variant_dir.name}.abc") if result.abc_score else None,
+                "abc_file": str(variant_dir / f"{task_id}.abc") if result.abc_score else None,
                 "mp3_file": result.mp3_path,
             })
 
         audio_paths = [str(r.audio_path) for _, _, r, _ in successful]
         h_rows, h_info = refresh_history()
         return (
-            audio_paths[0], duration_info, abc_display, abc_download, str(zip_path),
+            audio_paths[0], duration_info, abc_display, abc_download, None,
             lyrics_data_html, h_rows, h_info, 0,
             gr.update(visible=True),
             gr.update(visible=True, choices=[v["label"] for v in variants_payload], value=variants_payload[0]["label"]),
             variants_payload,
         )
+
+
+def on_restore_last(kind: str, current: str):
+    """Fill an input box with the last-saved text of the same kind."""
+    value = _load_last_inputs().get(kind, "")
+    if not value:
+        raise gr.Warning("暂无上一次内容")
+    return value
 
 
 def on_variant_select(label, payload):
@@ -557,6 +581,8 @@ def _resynthesize_worker(
     error = validate_params(params)
     if error:
         raise ValueError(error)
+
+    _save_last_inputs(params.style, params.lyrics, abc_text or "")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     task_id = f"{timestamp}_resynth_{params.id}"
@@ -772,7 +798,7 @@ def on_lyrics_template(name):
 def on_cot_change(cot_value):
     """Toggle ABC input visibility based on mode."""
     is_off = (cot_value == "off")
-    return gr.update(visible=not is_off)
+    return gr.update(visible=not is_off), gr.update(visible=not is_off)
 
 
 HISTORY_PAGE_SIZE = 10
@@ -1029,6 +1055,8 @@ def build_ui():
                             lines=2,
                             info="语言 + 流派 + 乐器 + 人声 + 速度",
                         )
+                        with gr.Row(elem_classes="last-btn-row"):
+                            last_style_btn = gr.Button("使用上一次", size="sm", scale=0, min_width=110)
 
                         with gr.Accordion("风格标签", open=False):
                             gr.Markdown("#### 风格快捷标签")
@@ -1109,6 +1137,8 @@ def build_ui():
                             lines=10,
                             info="支持 [Verse] [Chorus] [Bridge] 段落标记，可拖拽排序",
                         )
+                        with gr.Row(elem_classes="last-btn-row"):
+                            last_lyrics_btn = gr.Button("使用上一次", size="sm", scale=0, min_width=110)
 
                         with gr.Accordion("歌词工具", open=False):
                             with gr.Row():
@@ -1175,7 +1205,13 @@ def build_ui():
                             visible=True,
                             info="提供外部ABC乐谱文本。仅在 full/melody 模式下生效。留空则自动生成。",
                         )
-                        cot_input.change(fn=on_cot_change, inputs=cot_input, outputs=abc_input)
+                        with gr.Row(elem_classes="last-btn-row"):
+                            last_abc_btn = gr.Button("使用上一次", size="sm", scale=0, min_width=110)
+                        cot_input.change(fn=on_cot_change, inputs=cot_input, outputs=[abc_input, last_abc_btn])
+
+                        last_style_btn.click(fn=lambda cur: on_restore_last("style", cur), inputs=style_input, outputs=style_input)
+                        last_lyrics_btn.click(fn=lambda cur: on_restore_last("lyrics", cur), inputs=lyrics_input, outputs=lyrics_input)
+                        last_abc_btn.click(fn=lambda cur: on_restore_last("abc", cur), inputs=abc_input, outputs=abc_input)
 
                         with gr.Row():
                             seed_input = gr.Number(label="随机种子", value=831001, precision=0, info="勾选「随机种子变化」时每次生成自动换新，此处显示实际使用的种子")
@@ -1208,7 +1244,7 @@ def build_ui():
                         batch_count_input = gr.Slider(
                             label="批量生成数量",
                             minimum=1, maximum=10, step=1, value=1,
-                            info="一次生成多个变体 (使用递增 seed)",
+                            info="一次生成多个变体 (每个变体使用独立随机种子)",
                         )
 
                         with gr.Accordion("音频后处理", open=False):
@@ -1496,11 +1532,15 @@ if __name__ == "__main__":
                 if hasattr(response, 'body'):
                     html = response.body.decode("utf-8")
                     scripts = """
+<style>
+.last-btn-row { justify-content: flex-end; margin-top: -10px; }
+.last-btn-row > * { flex-grow: 0 !important; }
+</style>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/abcjs/6.3.0/abcjs-audio.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/abcjs/6.3.0/abcjs-basic-min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.0/Sortable.min.js"></script>
 <script src="/static/js/vendor/wavesurfer.min.js?v=1"></script>
-<script src="/static/js/app.js?v=9"></script>
+<script src="/static/js/app.js?v=10"></script>
 """
                     html = html.replace("</head>", scripts + "</head>")
                     return HTMLResponse(content=html, status_code=response.status_code)
