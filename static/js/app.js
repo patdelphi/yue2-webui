@@ -724,6 +724,193 @@
             }
             initAudioTimeDisplay();
 
+            function initPlayerZoom() {
+                if (typeof WaveSurfer === 'undefined') {
+                    console.warn('PlayerZoom: wavesurfer not loaded, zoom disabled');
+                    return;
+                }
+
+                var PLAYER_IDS = ['gen-audio', 'history-audio'];
+                var STEPS = [0, 1, 2, 5, 10, 20, 40, 80, 160];
+                var DEFAULT_STEP = 0;
+
+                var style = document.createElement('style');
+                style.textContent =
+                    '.yz-wave-wrap { margin-top: 10px; }' +
+                    '.yz-toolbar { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }' +
+                    '.yz-toolbar button { background: rgba(0,0,0,0.5); color: #fff; border: 1px solid rgba(255,255,255,0.25); border-radius: 4px; padding: 3px 12px; cursor: pointer; font-size: 13px; line-height: 1.5; }' +
+                    '.yz-toolbar button:hover { background: rgba(255,255,255,0.15); }' +
+                    '.yz-toolbar button:disabled { opacity: 0.4; cursor: default; }' +
+                    '.yz-zoom-label { color: #4ade80; font-size: 12px; font-family: monospace; margin-left: 6px; min-width: 70px; }' +
+                    '.yz-wave { height: 80px; border-radius: 4px; background: rgba(0,0,0,0.25); }' +
+                    '.yz-hidden { display: none !important; }';
+                document.head.appendChild(style);
+
+                function getShadowAudio(root) {
+                    var wf = root.querySelector('#waveform');
+                    if (!wf) return null;
+                    var host = wf.firstElementChild;
+                    if (!host || !host.shadowRoot) return null;
+                    var audio = host.shadowRoot.querySelector('audio');
+                    if (audio && audio.getAttribute('src')) return audio;
+                    return null;
+                }
+
+                function watchPlayer(rootId) {
+                    var root = document.getElementById(rootId);
+                    if (!root) {
+                        setTimeout(function() { watchPlayer(rootId); }, 1000);
+                        return;
+                    }
+
+                    var st = null; // active instance state
+                    var mutating = false;
+
+                    function teardown() {
+                        if (!st) return;
+                        if (st.loadstartHandler && st.audioEl) {
+                            st.audioEl.removeEventListener('loadstart', st.loadstartHandler);
+                        }
+                        if (st.ws) { try { st.ws.destroy(); } catch (e) {} }
+                        if (st.wrapEl && st.wrapEl.parentNode) {
+                            mutating = true;
+                            st.wrapEl.parentNode.removeChild(st.wrapEl);
+                            mutating = false;
+                        }
+                        var orig = root.querySelector('.waveform-container');
+                        if (orig) orig.classList.remove('yz-hidden');
+                        st = null;
+                    }
+
+                    function applyZoom() {
+                        if (!st || !st.ws) return;
+                        var px = STEPS[st.stepIdx];
+                        st.ws.zoom(px);
+                        if (st.labelEl) {
+                            st.labelEl.textContent = px === 0 ? '适应宽度' : (px + ' px/s');
+                        }
+                        if (st.btnOut) st.btnOut.disabled = (st.stepIdx === 0);
+                        if (st.btnIn) st.btnIn.disabled = (st.stepIdx === STEPS.length - 1);
+                    }
+
+                    function tryInit() {
+                        if (st) return;
+                        var container = root.querySelector('.waveform-container');
+                        var audioEl = getShadowAudio(root);
+                        if (!container || !audioEl) return;
+
+                        st = { ws: null, wrapEl: null, waveEl: null, labelEl: null,
+                               btnIn: null, btnOut: null, audioEl: audioEl,
+                               stepIdx: DEFAULT_STEP, loadstartHandler: null };
+
+                        mutating = true;
+
+                        var wrap = document.createElement('div');
+                        wrap.className = 'yz-wave-wrap';
+
+                        var toolbar = document.createElement('div');
+                        toolbar.className = 'yz-toolbar';
+
+                        var btnOut = document.createElement('button');
+                        btnOut.textContent = '−';
+                        btnOut.title = '缩小';
+                        btnOut.addEventListener('click', function() {
+                            if (st && st.stepIdx > 0) { st.stepIdx--; applyZoom(); }
+                        });
+
+                        var btnFit = document.createElement('button');
+                        btnFit.textContent = '适应宽度';
+                        btnFit.title = '整首歌铺满，无横向滚动条';
+                        btnFit.addEventListener('click', function() {
+                            if (st) { st.stepIdx = 0; applyZoom(); }
+                        });
+
+                        var btnIn = document.createElement('button');
+                        btnIn.textContent = '+';
+                        btnIn.title = '放大';
+                        btnIn.addEventListener('click', function() {
+                            if (st && st.stepIdx < STEPS.length - 1) { st.stepIdx++; applyZoom(); }
+                        });
+
+                        var label = document.createElement('span');
+                        label.className = 'yz-zoom-label';
+                        label.textContent = '适应宽度';
+
+                        toolbar.appendChild(btnOut);
+                        toolbar.appendChild(btnFit);
+                        toolbar.appendChild(btnIn);
+                        toolbar.appendChild(label);
+
+                        var wave = document.createElement('div');
+                        wave.className = 'yz-wave';
+
+                        wrap.appendChild(toolbar);
+                        wrap.appendChild(wave);
+                        container.parentNode.insertBefore(wrap, container);
+
+                        st.wrapEl = wrap;
+                        st.waveEl = wave;
+                        st.labelEl = label;
+                        st.btnIn = btnIn;
+                        st.btnOut = btnOut;
+
+                        try {
+                            st.ws = WaveSurfer.create({
+                                container: wave,
+                                media: audioEl,
+                                height: 80,
+                                waveColor: '#7f7f7f',
+                                progressColor: '#4ade80',
+                                cursorColor: '#ffffff',
+                                cursorWidth: 1
+                            });
+                        } catch (e) {
+                            console.warn('PlayerZoom: create failed', e);
+                            teardown();
+                            mutating = false;
+                            return;
+                        }
+
+                        st.ws.on('ready', function() {
+                            var orig = root.querySelector('.waveform-container');
+                            if (orig) orig.classList.add('yz-hidden');
+                            applyZoom();
+                        });
+                        st.ws.on('error', function(e) {
+                            console.warn('PlayerZoom: decode failed, falling back', e);
+                            teardown();
+                        });
+
+                        st.loadstartHandler = function() {
+                            // src changed on the same element: rebuild for new track
+                            setTimeout(function() { teardown(); tryInit(); }, 0);
+                        };
+                        audioEl.addEventListener('loadstart', st.loadstartHandler);
+
+                        mutating = false;
+                    }
+
+                    var observer = new MutationObserver(function() {
+                        if (mutating) return;
+                        var audioNow = getShadowAudio(root);
+                        if (st) {
+                            if (audioNow !== st.audioEl || !root.contains(st.wrapEl)) {
+                                teardown();
+                                tryInit();
+                            }
+                        } else {
+                            tryInit();
+                        }
+                    });
+                    observer.observe(root, { childList: true, subtree: true });
+
+                    tryInit();
+                }
+
+                PLAYER_IDS.forEach(watchPlayer);
+            }
+            initPlayerZoom();
+
             if (window.initHistoryTableClick) {
                 window.initHistoryTableClick();
             }

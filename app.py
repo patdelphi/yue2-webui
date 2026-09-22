@@ -1359,7 +1359,8 @@ if __name__ == "__main__":
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/abcjs/6.3.0/abcjs-audio.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/abcjs/6.3.0/abcjs-basic-min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.0/Sortable.min.js"></script>
-<script src="/static/js/app.js?v=7"></script>
+<script src="/static/js/vendor/wavesurfer.min.js?v=1"></script>
+<script src="/static/js/app.js?v=8"></script>
 """
                     html = html.replace("</head>", scripts + "</head>")
                     return HTMLResponse(content=html, status_code=response.status_code)
@@ -1371,6 +1372,11 @@ if __name__ == "__main__":
         demo.app.routes.insert(0, Route(
             "/static/js/app.js",
             lambda request: FileResponse(WEBUI_ROOT / "static" / "js" / "app.js", media_type="application/javascript"),
+            methods=["GET"],
+        ))
+        demo.app.routes.insert(0, Route(
+            "/static/js/vendor/wavesurfer.min.js",
+            lambda request: FileResponse(WEBUI_ROOT / "static" / "js" / "vendor" / "wavesurfer.min.js", media_type="application/javascript"),
             methods=["GET"],
         ))
     threading.Thread(target=_register_custom_routes, daemon=True).start()
