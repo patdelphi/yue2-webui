@@ -54,6 +54,16 @@ class GenerationParams:
     out_format: OutFormat = OutFormat.PCM16
 
 
+@dataclass
+class TranscriptionResult:
+    """Result of audio-to-score transcription."""
+    success: bool
+    abc_score: Optional[str] = None
+    midi_path: Optional[str] = None
+    error_message: Optional[str] = None
+    transcription_time_seconds: Optional[float] = None
+
+
 def validate_params(params: GenerationParams) -> Optional[str]:
     """Validate parameters, return error message if invalid."""
     if not params.style or not params.style.strip():

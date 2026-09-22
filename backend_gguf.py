@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional, Callable
 from dataclasses import dataclass
 
-from config import GenerationParams, CotMode, OutFormat
+from config import GenerationParams, CotMode, OutFormat, TranscriptionResult
 
 logger = logging.getLogger(__name__)
 
@@ -247,3 +247,105 @@ class GGUFBackend:
             "model_gguf": {"path": str(model_path), "exists": model_path.exists()},
             "vae_gguf": {"path": str(vae_path), "exists": vae_path.exists()},
         }
+
+    def check_sheetsage2(self) -> dict:
+        """Check if SheetSage2 model exists."""
+        model_path = self.project_root / "audio-cpp" / "models" / "SheetSage2-GGUF" / "sheetsage2-orig.gguf"
+        return {
+            "available": model_path.exists(),
+            "model_path": str(model_path),
+            "exists": model_path.exists(),
+        }
+
+    def transcribe(self, audio_path: Path, output_dir: Path,
+                   on_progress: Optional[Callable[[dict], None]] = None,
+                   cancel_event: Optional[threading.Event] = None) -> TranscriptionResult:
+        """Transcribe audio to ABC score using SheetSage2."""
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        sheetsage2_model = self.project_root / "audio-cpp" / "models" / "SheetSage2-GGUF" / "sheetsage2-orig.gguf"
+        if not sheetsage2_model.exists():
+            return TranscriptionResult(
+                success=False,
+                error_message="SheetSage2 模型未找到，请检查 audio-cpp/models/SheetSage2-GGUF/",
+            )
+        
+        base_name = output_dir.name
+        abc_path = output_dir / f"{base_name}.abc"
+        midi_path = output_dir / f"{base_name}.mid"
+        
+        cmd = [
+            str(self.cli_path),
+            "--task", "midi",
+            "--family", "sheetsage2",
+            "--model", str(sheetsage2_model),
+            "--audio", str(audio_path),
+            "--text-out", str(abc_path),
+            "--out", str(midi_path),
+            "--out-dir", str(output_dir),
+            "--log",
+        ]
+        
+        start_time = time.time()
+        
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                cwd=str(self.project_root),
+            )
+            
+            self._current_process = process
+            
+            for line in process.stdout:
+                if cancel_event and cancel_event.is_set():
+                    process.kill()
+                    return TranscriptionResult(success=False, error_message="已取消")
+                
+                line_stripped = line.strip()
+                if on_progress:
+                    if "Loading model" in line_stripped or "model loaded" in line_stripped.lower():
+                        on_progress({"phase": "loading", "message": "加载 SheetSage2 模型..."})
+                    elif "transcrib" in line_stripped.lower() or "decod" in line_stripped.lower():
+                        on_progress({"phase": "transcribing", "message": "转谱中..."})
+                    elif "Total:" in line_stripped or "completed" in line_stripped.lower():
+                        on_progress({"phase": "done", "message": "转谱完成"})
+            
+            process.wait()
+            elapsed = time.time() - start_time
+            
+            if process.returncode != 0:
+                logger.error(f"SheetSage2 failed with exit code {process.returncode}")
+                return TranscriptionResult(
+                    success=False,
+                    error_message=f"转谱失败，退出码 {process.returncode}",
+                    transcription_time_seconds=elapsed,
+                )
+            
+            abc_score = None
+            if abc_path.exists():
+                abc_score = abc_path.read_text(encoding="utf-8")
+            
+            if not abc_score:
+                return TranscriptionResult(
+                    success=False,
+                    error_message="转谱完成但未生成乐谱",
+                    transcription_time_seconds=elapsed,
+                )
+            
+            return TranscriptionResult(
+                success=True,
+                abc_score=abc_score,
+                midi_path=str(midi_path) if midi_path.exists() else None,
+                transcription_time_seconds=elapsed,
+            )
+            
+        except Exception as e:
+            logger.exception(f"Transcription failed: {e}")
+            return TranscriptionResult(success=False, error_message=str(e))
+        finally:
+            self._current_process = None

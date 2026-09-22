@@ -5,7 +5,7 @@
             if (textareas.length < 2) { setTimeout(initAccordionCollapse, 500); return; }
             setTimeout(function() {
                 var buttons = document.querySelectorAll('button.label-wrap');
-                var labelsToClose = ['风格标签', '歌词工具', '音频后处理', '高级采样参数', '生成的乐谱'];
+                var labelsToClose = ['风格标签', '歌词工具', '音频后处理', '高级采样参数', '生成的乐谱', '转谱结果'];
                 var clickedCount = 0;
                 for (var i = 0; i < buttons.length; i++) {
                     var btn = buttons[i];
@@ -426,6 +426,126 @@
                 renderHistoryAbc();
             }
             initHistoryAbcPreview();
+
+            function initTranscribeAbcPreview() {
+                if (typeof ABCJS === 'undefined') {
+                    setTimeout(initTranscribeAbcPreview, 500);
+                    return;
+                }
+
+                var paper = document.getElementById('transcribe-abc-paper');
+                var audio = document.getElementById('transcribe-abc-audio');
+                if (!paper) {
+                    setTimeout(initTranscribeAbcPreview, 500);
+                    return;
+                }
+
+                function findTranscribeAbcTextarea() {
+                    var textareas = document.querySelectorAll('textarea[placeholder*="转谱完成后"]');
+                    return textareas.length > 0 ? textareas[0] : null;
+                }
+
+                var abcTextarea = findTranscribeAbcTextarea();
+                if (!abcTextarea) {
+                    setTimeout(initTranscribeAbcPreview, 500);
+                    return;
+                }
+
+                function renderTranscribeAbc() {
+                    var current = findTranscribeAbcTextarea();
+                    var abcText = current ? (current.value || '') : '';
+                    if (abcText && abcText.trim()) {
+                        var container = document.getElementById('transcribe-abc-preview-container');
+                        if (container) {
+                            var placeholder = container.querySelector('div[style*="text-align:center"]');
+                            if (placeholder) placeholder.style.display = 'none';
+                        }
+                        try {
+                            ABCJS.renderAbc("transcribe-abc-paper", abcText, {
+                                responsive: "resize",
+                                scale: 0.7,
+                                staffwidth: 600
+                            });
+                            ABCJS.renderAudio("transcribe-abc-audio", abcText, {
+                                displayLoop: true,
+                                displayRestart: true,
+                                displayPlay: true,
+                                displayProgress: true
+                            });
+                        } catch (e) {
+                            console.log("Transcribe ABC render error:", e);
+                        }
+                    } else {
+                        if (paper) paper.innerHTML = '';
+                        if (audio) audio.innerHTML = '';
+                    }
+                }
+
+                var lastValue = abcTextarea.value;
+                setInterval(function() {
+                    var current = findTranscribeAbcTextarea();
+                    var currentValue = current ? (current.value || '') : '';
+                    if (currentValue !== lastValue) {
+                        lastValue = currentValue;
+                        renderTranscribeAbc();
+                    }
+                }, 300);
+
+                renderTranscribeAbc();
+            }
+            initTranscribeAbcPreview();
+
+            function initAbcBridge() {
+                var bridge = document.getElementById('abc-bridge');
+                if (!bridge) {
+                    setTimeout(initAbcBridge, 500);
+                    return;
+                }
+
+                var style = document.createElement('style');
+                style.textContent = '#abc-bridge { display: none !important; }';
+                document.head.appendChild(style);
+
+                var bridgeInput = bridge.querySelector('textarea') || bridge.querySelector('input[type="text"]') || bridge;
+
+                function findGenAbcTextarea() {
+                    var abcTextareas = document.querySelectorAll('textarea[placeholder*="X:1"]');
+                    return abcTextareas.length > 0 ? abcTextareas[0] : null;
+                }
+
+                function clickTab(tabName) {
+                    var tabs = document.querySelectorAll('button[role="tab"]');
+                    for (var i = 0; i < tabs.length; i++) {
+                        if (tabs[i].textContent.trim().indexOf(tabName) !== -1) {
+                            tabs[i].click();
+                            return;
+                        }
+                    }
+                }
+
+                var lastBridgeValue = bridgeInput.value;
+                setInterval(function() {
+                    var currentValue = bridgeInput.value || '';
+                    if (currentValue !== lastBridgeValue && currentValue.trim()) {
+                        lastBridgeValue = currentValue;
+
+                        var genAbc = findGenAbcTextarea();
+                        if (genAbc) {
+                            var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+                            nativeSetter.call(genAbc, currentValue);
+                            genAbc.dispatchEvent(new Event('input', { bubbles: true }));
+                            genAbc.dispatchEvent(new Event('change', { bubbles: true }));
+                        }
+
+                        clickTab('创作');
+                        bridgeInput.value = '';
+                        lastBridgeValue = '';
+                    }
+                }, 200);
+
+                console.log('ABC bridge initialized');
+            }
+            initAbcBridge();
 
             function initHistoryLyricSync() {
                 var syncContainer = document.getElementById('history-lyric-sync');

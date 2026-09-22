@@ -17,7 +17,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-from config import GenerationParams, CotMode, SamplingParams, OutFormat, validate_params
+from config import GenerationParams, CotMode, SamplingParams, OutFormat, validate_params, TranscriptionResult
 from backend_gguf import GGUFBackend
 from style_presets import STYLE_PRESETS
 from vocal_presets import VOCAL_PRESETS, INSTRUMENT_PRESETS, MOOD_PRESETS, LANGUAGE_PRESETS, GENRE_PRESETS
@@ -416,6 +416,45 @@ def on_resynthesize(
         return result.audio_path, duration_info, abc_download, mp3_download, resynth_lyrics_data
     else:
         raise gr.Error(f"重新合成失败：{result.error_message}")
+
+
+def on_transcribe(audio_file, progress=gr.Progress(track_tqdm=False)):
+    """Transcribe audio to ABC score using SheetSage2."""
+    if not audio_file:
+        raise gr.Error("请先上传音频文件")
+    
+    audio_path = Path(audio_file)
+    if not audio_path.exists():
+        raise gr.Error("音频文件不存在")
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    task_id = f"transcribe_{timestamp}"
+    output_dir = WEBUI_ROOT / "outputs" / task_id
+    
+    def on_progress(p):
+        if p and p.get("message"):
+            progress(p.get("progress", 0), p["message"])
+    
+    result = backend.transcribe(audio_path, output_dir, on_progress=on_progress)
+    
+    if result.success:
+        abc_score = result.abc_score or ""
+        midi_path = result.midi_path
+        info = f"转谱耗时 **{result.transcription_time_seconds:.1f}s**"
+        
+        abc_file = output_dir / f"{output_dir.name}.abc"
+        abc_file_path = str(abc_file.relative_to(WEBUI_ROOT)) if abc_file.exists() else ""
+        
+        return abc_score, info, abc_file_path, midi_path, task_id
+    else:
+        raise gr.Error(f"转谱失败：{result.error_message}")
+
+
+def on_send_to_generate(abc_text):
+    """Send ABC score to generation tab via bridge."""
+    if not abc_text or not abc_text.strip():
+        raise gr.Error("没有可发送的乐谱内容")
+    return abc_text
 
 
 def on_random_seed():
@@ -959,6 +998,35 @@ def build_ui():
                         with gr.Row():
                             resynthesize_btn = gr.Button("重新合成", variant="secondary")
 
+            with gr.Tab("音频转谱"):
+                gr.Markdown("### 音频转乐谱")
+                gr.Markdown("上传音频文件，使用 SheetSage2 模型自动转写为 ABC 乐谱")
+                
+                transcribe_audio_input = gr.Audio(label="上传音频", type="filepath")
+                transcribe_btn = gr.Button("开始转谱", variant="primary")
+                transcribe_info = gr.Markdown()
+                
+                with gr.Accordion("转谱结果", open=False):
+                    transcribe_abc_output = gr.Textbox(
+                        label="ABC 乐谱 (可编辑)",
+                        placeholder="转谱完成后乐谱将显示在这里...",
+                        lines=10,
+                    )
+                    transcribe_abc_preview = gr.HTML(
+                        label="乐谱预览",
+                        value='<div id="transcribe-abc-preview-container" style="padding: 20px; border-radius: 8px; min-height: 200px; border: 1px dashed rgba(255,255,255,0.15);"><div style="text-align:center;color:#666;">转谱后乐谱预览将在此处显示</div><div id="transcribe-abc-paper"></div><div id="transcribe-abc-audio"></div></div>',
+                    )
+                    
+                    with gr.Row():
+                        transcribe_abc_download = gr.File(label="下载 ABC")
+                        transcribe_midi_download = gr.File(label="下载 MIDI")
+                    
+                    with gr.Row():
+                        transcribe_send_btn = gr.Button("→ 发送到生成页", variant="secondary", size="sm")
+                
+                transcribe_task_id = gr.State(value="")
+                transcribe_abc_bridge = gr.Textbox(elem_id="abc-bridge", label="")
+
             with gr.Tab("历史") as history_tab:
                 gr.Markdown("### 生成历史")
                 history_state = gr.State(value=[])
@@ -1054,6 +1122,18 @@ def build_ui():
             outputs=[audio_output, info_output, abc_file_output, flac_file_output, lyrics_sync_data],
         )
 
+        transcribe_btn.click(
+            fn=on_transcribe,
+            inputs=[transcribe_audio_input],
+            outputs=[transcribe_abc_output, transcribe_info, transcribe_abc_download, transcribe_midi_download, transcribe_task_id],
+        )
+
+        transcribe_send_btn.click(
+            fn=on_send_to_generate,
+            inputs=[transcribe_abc_output],
+            outputs=[transcribe_abc_bridge],
+        )
+
         preset_load_btn.click(
             fn=on_preset_load,
             inputs=preset_dropdown,
@@ -1116,7 +1196,7 @@ if __name__ == "__main__":
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/abcjs/6.3.0/abcjs-audio.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/abcjs/6.3.0/abcjs-basic-min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.0/Sortable.min.js"></script>
-<script src="/static/js/app.js?v=2"></script>
+<script src="/static/js/app.js?v=7"></script>
 """
                     html = html.replace("</head>", scripts + "</head>")
                     return HTMLResponse(content=html, status_code=response.status_code)
