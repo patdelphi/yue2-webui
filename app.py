@@ -25,7 +25,7 @@ from vocal_presets import VOCAL_PRESETS, INSTRUMENT_PRESETS, MOOD_PRESETS, LANGU
 from lyrics_templates import LYRICS_TEMPLATES
 from history import HistoryManager, HistoryRecord
 from postprocess import postprocess_audio
-from queue_manager import queue_manager, TaskType, TaskStatus
+from queue_manager import queue_manager, TaskType, TaskStatus, TaskCancelledError
 
 PROJECT_ROOT = Path(__file__).parent.parent
 WEBUI_ROOT = PROJECT_ROOT / "yue2-webui"
@@ -35,8 +35,24 @@ history_mgr = HistoryManager(
     outputs_root=WEBUI_ROOT / "outputs",
 )
 
-current_task_id = None
-current_cancel_event = None
+# Per-channel active task registry, so concurrent requests (e.g. generation
+# and transcription) don't clobber each other's cancel handles.
+_active_tasks: dict = {}
+_active_tasks_lock = threading.Lock()
+
+
+def _register_task(channel: str, task_id: str):
+    with _active_tasks_lock:
+        _active_tasks.setdefault(channel, set()).add(task_id)
+
+
+def _unregister_task(channel: str, task_id: str):
+    with _active_tasks_lock:
+        tasks = _active_tasks.get(channel)
+        if tasks:
+            tasks.discard(task_id)
+            if not tasks:
+                _active_tasks.pop(channel, None)
 
 BUILTIN_PRESETS = {
     "默认": {
@@ -73,8 +89,6 @@ def on_generate(
     progress=gr.Progress(track_tqdm=False),
 ):
     """Generate button callback - submits to queue and polls for results."""
-    global current_task_id, current_cancel_event
-    
     logger.info(f"on_generate: style={style!r}, cot={cot!r}, seed={seed!r}, cfg_scale={cfg_scale!r}, steps={num_inference_steps!r}, batch={batch_count!r}")
     
     # Handle None values from frontend (Gradio may send None for uninitialized sliders)
@@ -109,13 +123,9 @@ def on_generate(
         raise gr.Error("请输入歌词")
     
     # Submit to queue
-    cancel_evt = threading.Event()
-    current_cancel_event = cancel_evt
-    
     task = queue_manager.submit(
         TaskType.GENERATION,
         _generate_worker,
-        cancel_event=cancel_evt,
         style=style, lyrics=lyrics, cot=cot, seed=seed, cfg_scale=cfg_scale,
         num_inference_steps=num_inference_steps, out_format=out_format, batch_count=batch_count,
         normalize=normalize, fade=fade, trim=trim, metadata=metadata, abc_text=abc_text,
@@ -127,7 +137,7 @@ def on_generate(
         sem_min_tok=sem_min_tok, sem_max_tok=sem_max_tok,
     )
     
-    current_task_id = task.task_id
+    _register_task("generation", task.task_id)
     logger.info(f"Task {task.task_id} submitted to queue")
     
     # Poll for completion, forwarding progress to Gradio
@@ -167,8 +177,7 @@ def on_generate(
         logger.exception(f"生成失败: {e}")
         raise
     finally:
-        current_task_id = None
-        current_cancel_event = None
+        _unregister_task("generation", task.task_id)
 
 
 def _generate_worker(
@@ -248,6 +257,8 @@ def _generate_worker(
 
     successful = [(tid, d, r, s) for tid, d, r, s in results if r.success]
     if not successful:
+        if _task.cancel_event.is_set():
+            raise TaskCancelledError("任务已取消")
         failed_msg = results[0][2].error_message if results else "未知错误"
         raise ValueError(f"生成失败: {failed_msg}")
 
@@ -347,13 +358,11 @@ def _generate_worker(
 
 def on_cancel():
     """Cancel button callback."""
-    global current_task_id, current_cancel_event
-    if current_cancel_event:
-        current_cancel_event.set()
-    if current_task_id:
-        queue_manager.cancel_task_by_id(current_task_id)
-        current_task_id = None
-        current_cancel_event = None
+    with _active_tasks_lock:
+        task_ids = _active_tasks.pop("generation", set())
+    for task_id in task_ids:
+        queue_manager.cancel_task_by_id(task_id)
+    if task_ids:
         return "正在取消..."
     return "没有正在运行的任务"
 
@@ -365,8 +374,6 @@ def on_resynthesize(
     progress=gr.Progress(track_tqdm=False),
 ):
     """Resynthesize with edited ABC score - submits to queue."""
-    global current_task_id, current_cancel_event
-
     seed = seed if seed is not None else 831001
     cfg_scale = cfg_scale if cfg_scale is not None else 0
     num_inference_steps = num_inference_steps if num_inference_steps is not None else 8
@@ -374,13 +381,9 @@ def on_resynthesize(
     if not abc_text or not abc_text.strip():
         raise gr.Error("ABC 乐谱不能为空")
 
-    cancel_evt = threading.Event()
-    current_cancel_event = cancel_evt
-
     task = queue_manager.submit(
         TaskType.GENERATION,
         _resynthesize_worker,
-        cancel_event=cancel_evt,
         abc_text=abc_text, style=style, lyrics=lyrics, seed=seed,
         cfg_scale=cfg_scale, num_inference_steps=num_inference_steps, out_format=out_format,
         abc_temp=abc_temp, abc_top_p=abc_top_p, abc_top_k=abc_top_k,
@@ -391,7 +394,7 @@ def on_resynthesize(
         sem_min_tok=sem_min_tok, sem_max_tok=sem_max_tok,
     )
 
-    current_task_id = task.task_id
+    _register_task("generation", task.task_id)
     logger.info(f"Resynthesize task {task.task_id} submitted to queue")
 
     try:
@@ -410,6 +413,8 @@ def on_resynthesize(
             elif status == TaskStatus.FAILED:
                 error_msg = status_info.get("error", "未知错误")
                 raise gr.Error(f"重新合成失败: {error_msg}")
+            elif status == TaskStatus.CANCELLED:
+                raise gr.Error("任务已取消")
 
             for prog_val, desc in task.drain_progress():
                 progress(prog_val, desc=desc)
@@ -426,8 +431,7 @@ def on_resynthesize(
         logger.exception(f"重新合成失败: {e}")
         raise
     finally:
-        current_task_id = None
-        current_cancel_event = None
+        _unregister_task("generation", task.task_id)
 
 
 def _resynthesize_worker(
@@ -518,6 +522,8 @@ def _resynthesize_worker(
         resynth_lyrics_data = f'<div class="gen-lyrics-data" style="display:none" data-lyrics=\'{json.dumps(params.lyrics, ensure_ascii=False)}\' data-duration="{result.audio_duration_seconds}"></div>'
         return result.audio_path, duration_info, abc_download, mp3_download, resynth_lyrics_data
     else:
+        if _task.cancel_event.is_set():
+            raise TaskCancelledError("任务已取消")
         raise ValueError(f"重新合成失败：{result.error_message}")
 
 
@@ -540,13 +546,14 @@ def on_transcribe(audio_file, progress=gr.Progress(track_tqdm=False)):
         audio_path=str(audio_path),
     )
     
+    _register_task("transcription", task.task_id)
     logger.info(f"Transcription task {task.task_id} submitted to queue")
-    
+
     try:
         while True:
             status_info = queue_manager.get_status(task)
             status = status_info["status"]
-            
+
             if status == TaskStatus.QUEUED:
                 pos = status_info["position"]
                 progress(0, desc=f"排队中... 前面还有 {pos - 1} 个任务")
@@ -558,21 +565,25 @@ def on_transcribe(audio_file, progress=gr.Progress(track_tqdm=False)):
             elif status == TaskStatus.FAILED:
                 error_msg = status_info.get("error", "未知错误")
                 raise gr.Error(f"转谱失败: {error_msg}")
-            
+            elif status == TaskStatus.CANCELLED:
+                raise gr.Error("任务已取消")
+
             for prog_val, desc in task.drain_progress():
                 progress(prog_val, desc=desc)
-            
+
             time.sleep(0.5)
-        
+
         for prog_val, desc in task.drain_progress():
             progress(prog_val, desc=desc)
-        
+
         return task.result
     except gr.Error:
         raise
     except Exception as e:
         logger.exception(f"转谱失败: {e}")
         raise
+    finally:
+        _unregister_task("transcription", task.task_id)
 
 
 def _transcribe_worker(_task, audio_path):

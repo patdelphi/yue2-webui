@@ -1,7 +1,7 @@
 """Test script for queue manager."""
 import time
 import threading
-from queue_manager import queue_manager, TaskType, TaskStatus
+from queue_manager import queue_manager, TaskType, TaskStatus, TaskCancelledError
 
 
 def test_task(_task, duration, name):
@@ -11,6 +11,19 @@ def test_task(_task, duration, name):
         if _task.cancel_event.is_set():
             print(f"[{name}] Cancelled!")
             return f"{name} cancelled"
+        _task.push_progress(i / duration, f"{name} step {i+1}/{int(duration)}")
+        time.sleep(1)
+    print(f"[{name}] Completed!")
+    return f"{name} done"
+
+
+def cooperative_task(_task, duration, name):
+    """Simulate a task that raises TaskCancelledError on cancel."""
+    print(f"[{name}] Starting...")
+    for i in range(int(duration)):
+        if _task.cancel_event.is_set():
+            print(f"[{name}] Raising TaskCancelledError!")
+            raise TaskCancelledError("cancelled")
         _task.push_progress(i / duration, f"{name} step {i+1}/{int(duration)}")
         time.sleep(1)
     print(f"[{name}] Completed!")
@@ -64,5 +77,75 @@ def test_queue():
     print("\n=== All tasks completed ===")
 
 
+def test_cancel_running():
+    """Cancel a running task that raises TaskCancelledError."""
+    print("\n=== Testing cancel of running task ===\n")
+    task = queue_manager.submit(TaskType.GENERATION, cooperative_task, duration=10, name="Cancellable")
+    time.sleep(1.5)
+    ok = queue_manager.cancel_task_by_id(task.task_id)
+    print(f"cancel_task_by_id returned: {ok}")
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        status = queue_manager.get_status(task)
+        if status["status"] in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
+            break
+        time.sleep(0.2)
+    final = queue_manager.get_status(task)["status"]
+    print(f"Final status: {final}")
+    assert final == TaskStatus.CANCELLED, f"expected CANCELLED, got {final}"
+    print("PASS: running task cancelled -> CANCELLED\n")
+
+
+def test_cancel_queued():
+    """Cancel a task while it is still queued behind a running one."""
+    print("=== Testing cancel of queued task ===\n")
+    blocker = queue_manager.submit(TaskType.GENERATION, test_task, duration=4, name="Blocker")
+    queued = queue_manager.submit(TaskType.TRANSCRIPTION, test_task, duration=2, name="Queued")
+    time.sleep(0.5)
+    ok = queue_manager.cancel_task_by_id(queued.task_id)
+    print(f"cancel_task_by_id returned: {ok}")
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        status = queue_manager.get_status(queued)
+        if status["status"] in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
+            break
+        time.sleep(0.2)
+    final = queue_manager.get_status(queued)["status"]
+    print(f"Final status: {final}")
+    assert final == TaskStatus.CANCELLED, f"expected CANCELLED, got {final}"
+    # Blocker should finish normally
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        if queue_manager.get_status(blocker)["status"] == TaskStatus.COMPLETED:
+            break
+        time.sleep(0.2)
+    print(f"Blocker status: {queue_manager.get_status(blocker)['status']}")
+    print("PASS: queued task cancelled -> CANCELLED\n")
+
+
+def test_failed():
+    """A task raising ValueError is marked FAILED, not CANCELLED."""
+    print("=== Testing failed task ===\n")
+
+    def failing_task(_task):
+        raise ValueError("boom")
+
+    task = queue_manager.submit(TaskType.GENERATION, failing_task)
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        status = queue_manager.get_status(task)
+        if status["status"] in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
+            break
+        time.sleep(0.2)
+    final = queue_manager.get_status(task)
+    print(f"Final status: {final['status']}, error: {final.get('error')}")
+    assert final["status"] == TaskStatus.FAILED, f"expected FAILED, got {final['status']}"
+    print("PASS: ValueError -> FAILED\n")
+
+
 if __name__ == "__main__":
     test_queue()
+    test_cancel_running()
+    test_cancel_queued()
+    test_failed()
+    print("=== All queue manager tests passed ===")

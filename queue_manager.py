@@ -8,12 +8,17 @@ import threading
 import time
 import logging
 import uuid
+from datetime import datetime
 from typing import Callable, Optional, Any
 from dataclasses import dataclass, field
 from enum import Enum
 from collections import deque
 
 logger = logging.getLogger(__name__)
+
+
+class TaskCancelledError(Exception):
+    """Raised by task functions to signal cooperative cancellation."""
 
 
 class TaskType(Enum):
@@ -95,6 +100,10 @@ class QueueManager:
                     task.completed_at = time.time()
                     elapsed = task.completed_at - task.started_at
                     logger.info(f"Task {task.task_id} completed in {elapsed:.1f}s")
+                except TaskCancelledError:
+                    task.status = TaskStatus.CANCELLED
+                    task.completed_at = time.time()
+                    logger.info(f"Task {task.task_id} cancelled by worker")
                 except Exception as e:
                     logger.exception(f"Task {task.task_id} failed: {e}")
                     task.error = str(e)
@@ -201,7 +210,5 @@ class QueueManager:
             self._worker_thread.join(timeout=5.0)
         logger.info("Queue manager shutdown")
 
-
-from datetime import datetime
 
 queue_manager = QueueManager()

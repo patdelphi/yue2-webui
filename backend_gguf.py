@@ -1,4 +1,5 @@
 """GGUF backend using audio.cpp CLI."""
+import os
 import subprocess
 import threading
 import time
@@ -68,6 +69,7 @@ class GGUFBackend:
         self.project_root = Path(project_root)
         self.cli_path = self.project_root / "audio-cpp" / "audiocpp_cli.exe"
         self.model_dir = self.project_root / "models"
+        self.backend = os.environ.get("YUE2_BACKEND", "cuda")
         self._current_process: Optional[subprocess.Popen] = None
     
     def build_command(self, params: GenerationParams, output_dir: Path) -> list[str]:
@@ -77,7 +79,7 @@ class GGUFBackend:
             "--task", "gen",
             "--family", "yue2",
             "--model", str(self.model_dir / params.model_gguf),
-            "--backend", "cuda",
+            "--backend", self.backend,
             "--threads", "8",
         ]
         
@@ -330,7 +332,9 @@ class GGUFBackend:
                     error_message="需要 ffmpeg 来转换音频格式，但未找到 ffmpeg",
                 )
             
-            temp_wav = Path(tempfile.mktemp(suffix='.wav'))
+            tmp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+            tmp.close()
+            temp_wav = Path(tmp.name)
             logger.info(f"Converting {audio_path.name} to WAV: {temp_wav}")
             
             try:
@@ -372,7 +376,7 @@ class GGUFBackend:
             "--task", "midi",
             "--family", "sheetsage2",
             "--model", str(sheetsage2_model),
-            "--backend", "cuda",
+            "--backend", self.backend,
             "--audio", str(wav_path),
             "--text-out", str(abc_path),
             "--out", str(midi_path),

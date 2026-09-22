@@ -724,34 +724,6 @@
             }
             initAudioTimeDisplay();
 
-            function initWaveformZoom() {
-                var audioIds = ['gen-audio', 'history-audio', 'transcribe-audio-input'];
-                audioIds.forEach(function(id) {
-                    var el = document.getElementById(id);
-                    if (!el) return;
-                    var observer = new MutationObserver(function() {
-                        var waveEl = el.querySelector('wave');
-                        if (waveEl && waveEl.__wavesurfer) {
-                            var ws = waveEl.__wavesurfer;
-                            var applyZoom = function() {
-                                var duration = ws.getDuration();
-                                if (duration > 0 && ws.container.clientWidth > 0) {
-                                    ws.zoom(duration * ws.params.pixelRatio / ws.container.clientWidth);
-                                }
-                            };
-                            if (ws.getDuration() > 0) {
-                                applyZoom();
-                            } else {
-                                ws.on('loaded', applyZoom);
-                                ws.on('ready', applyZoom);
-                            }
-                        }
-                    });
-                    observer.observe(el, { childList: true, subtree: true });
-                });
-            }
-            initWaveformZoom();
-
             if (window.initHistoryTableClick) {
                 window.initHistoryTableClick();
             }
