@@ -81,7 +81,7 @@ FORMAT_LABELS = {"pcm16": "PCM 16-bit", "pcm24": "PCM 24-bit", "float32": "Float
 
 
 def on_generate(
-    style, lyrics, cot, seed, cfg_scale, num_inference_steps, out_format, batch_count,
+    style, lyrics, cot, seed, random_seed, cfg_scale, num_inference_steps, out_format, batch_count,
     normalize, fade, trim, metadata,
     abc_text,
     abc_temp, abc_top_p, abc_top_k, abc_rep_penalty, abc_pen_window, abc_min_tok, abc_max_tok,
@@ -95,7 +95,12 @@ def on_generate(
     cot = cot if cot is not None else "full"
     if isinstance(cot, bool):
         cot = "off" if not cot else "full"
-    seed = random.randint(0, 2**31 - 1)
+    if random_seed is None:
+        random_seed = True
+    if random_seed or seed is None:
+        seed = random.randint(0, 2**31 - 1)
+    else:
+        seed = int(seed)
     cfg_scale = cfg_scale if cfg_scale is not None else 0
     num_inference_steps = num_inference_steps if num_inference_steps is not None else 8
     batch_count = batch_count if batch_count is not None else 1
@@ -1070,8 +1075,9 @@ def build_ui():
                         cot_input.change(fn=on_cot_change, inputs=cot_input, outputs=abc_input)
 
                         with gr.Row():
-                            seed_input = gr.Number(label="随机种子", value=831001, precision=0, info="每次点击「生成歌曲」自动换新种子，此处显示实际使用的种子")
+                            seed_input = gr.Number(label="随机种子", value=831001, precision=0, info="勾选「随机种子变化」时每次生成自动换新，此处显示实际使用的种子")
                             random_seed_btn = gr.Button("🎲 随机", size="sm")
+                        random_seed_checkbox = gr.Checkbox(label="随机种子变化", value=True, info="勾选: 每次点击「生成歌曲」自动换新种子; 取消勾选: 使用上方固定种子")
 
                         cfg_input = gr.Slider(
                             label="CFG 引导强度",
@@ -1271,7 +1277,7 @@ def build_ui():
         generate_btn.click(
             fn=on_generate,
             inputs=[
-                style_input, lyrics_input, cot_input, seed_input, cfg_input, steps_input, out_format_input, batch_count_input,
+                style_input, lyrics_input, cot_input, seed_input, random_seed_checkbox, cfg_input, steps_input, out_format_input, batch_count_input,
                 normalize_checkbox, fade_checkbox, trim_checkbox, metadata_checkbox,
                 abc_input,
                 abc_temp_input, abc_top_p_input, abc_top_k_input, abc_rep_input, abc_pen_window_input, abc_min_tok_input, abc_max_tok_input,
