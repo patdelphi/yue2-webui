@@ -50,6 +50,23 @@ class HistoryManager:
         except (json.JSONDecodeError, KeyError, TypeError):
             self._entries = []
 
+        self.prune_missing()
+
+    def prune_missing(self) -> int:
+        """Drop entries whose audio file no longer exists on disk."""
+        with self._lock:
+            kept = []
+            removed = 0
+            for e in self._entries:
+                if e.audio_path and Path(e.audio_path).exists():
+                    kept.append(e)
+                else:
+                    removed += 1
+            if removed:
+                self._entries = kept
+                self._save()
+            return removed
+
     def _save(self):
         """Persist history to JSON file."""
         data = {
