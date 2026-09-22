@@ -79,6 +79,18 @@ BUILTIN_PRESETS = {
 
 FORMAT_LABELS = {"pcm16": "PCM 16-bit", "pcm24": "PCM 24-bit", "float32": "Float 32-bit"}
 
+COMMENT_PREFIXES = ("//", "**")
+
+
+def strip_comment_lines(lyrics: str) -> str:
+    """Remove comment lines (starting with // or **) from lyrics."""
+    if not lyrics:
+        return lyrics
+    return "\n".join(
+        line for line in lyrics.split("\n")
+        if not line.strip().startswith(COMMENT_PREFIXES)
+    )
+
 
 def on_generate(
     style, lyrics, cot, seed, random_seed, cfg_scale, num_inference_steps, out_format, batch_count,
@@ -122,6 +134,7 @@ def on_generate(
     sem_max_tok = sem_max_tok if sem_max_tok is not None else 9000
     
     # Validate inputs before queuing
+    lyrics = strip_comment_lines(lyrics)
     if not style or not style.strip():
         raise gr.Error("请输入风格描述")
     if not lyrics or not lyrics.strip():
@@ -386,6 +399,8 @@ def on_resynthesize(
 
     if not abc_text or not abc_text.strip():
         raise gr.Error("ABC 乐谱不能为空")
+
+    lyrics = strip_comment_lines(lyrics)
 
     task = queue_manager.submit(
         TaskType.GENERATION,
@@ -824,6 +839,8 @@ def on_lyrics_change(lyrics):
     current = {"name": "Intro", "lines": []}
     for line in lyrics.split("\n"):
         stripped = line.strip()
+        if stripped.startswith(COMMENT_PREFIXES):
+            continue
         if stripped.startswith("[") and stripped.endswith("]"):
             if current["name"] != "Intro" or current["lines"] or segments:
                 segments.append(current)
@@ -854,7 +871,7 @@ def on_lyrics_change(lyrics):
     html += "</div>"
 
     total_lines = sum(len(s["lines"]) for s in segments)
-    char_count = len(lyrics.strip())
+    char_count = len(strip_comment_lines(lyrics).strip())
     est_seconds = total_lines * 4
     est_min = est_seconds // 60
     est_sec = est_seconds % 60
@@ -1028,6 +1045,19 @@ def build_ui():
                                 gr.Button("+ Intro", size="sm")
                                 gr.Button("+ Outro", size="sm")
                                 gr.Button("+ Pre-Chorus", size="sm")
+
+                            gr.Markdown(
+                                "#### 段落标记说明\n"
+                                "| 标记 | 用途 |\n"
+                                "| --- | --- |\n"
+                                "| [Intro] | 前奏/器乐引入 |\n"
+                                "| [Verse] | 主歌段落 |\n"
+                                "| [Pre-Chorus] | 预副歌，制造期待感 |\n"
+                                "| [Chorus] | 副歌，全曲最抓耳的部分 |\n"
+                                "| [Bridge] | 桥段，打破重复，情感转折 |\n"
+                                "| [Outro] | 尾声/渐弱收尾 |\n\n"
+                                "注释行：以 `//` 或 `**` 开头的行视为注释，不会送入模型生成。"
+                            )
 
                             gr.Markdown("#### 歌曲结构模板")
                             with gr.Row():
@@ -1373,7 +1403,7 @@ if __name__ == "__main__":
 <script src="https://cdnjs.cloudflare.com/ajax/libs/abcjs/6.3.0/abcjs-basic-min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.0/Sortable.min.js"></script>
 <script src="/static/js/vendor/wavesurfer.min.js?v=1"></script>
-<script src="/static/js/app.js?v=8"></script>
+<script src="/static/js/app.js?v=9"></script>
 """
                     html = html.replace("</head>", scripts + "</head>")
                     return HTMLResponse(content=html, status_code=response.status_code)

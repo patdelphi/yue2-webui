@@ -133,6 +133,7 @@
 
                 for (const line of lines) {
                     const trimmed = line.trim();
+                    if (trimmed.startsWith('//') || trimmed.startsWith('**')) continue;
                     if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
                         if (current.name !== 'Intro' || current.content.trim() || segments.length > 0) {
                             segments.push(current);
