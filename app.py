@@ -1252,6 +1252,14 @@ def build_ui():
                         gr.Markdown("### 输出")
                         audio_output = gr.Audio(label="生成的歌曲", type="filepath", elem_id="gen-audio")
                         info_output = gr.Markdown()
+
+                        with gr.Group(visible=False) as variant_group:
+                            variant_selector = gr.Radio(label="批量变体选择", choices=[], interactive=True)
+                            with gr.Row():
+                                variant_finalize_btn = gr.Button("✅ 选定为最终版", variant="primary", size="sm")
+                                variant_keep_btn = gr.Button("保留全部变体", size="sm")
+                        variant_state = gr.State([])
+
                         gr.Markdown("### ABC 乐谱")
                         with gr.Accordion("生成的乐谱 (可编辑)", open=False):
                             abc_output = gr.Textbox(
@@ -1272,13 +1280,6 @@ def build_ui():
                         abc_file_output = gr.File(label="下载乐谱")
                         flac_file_output = gr.File(label="下载 MP3")
                         lyrics_sync_data = gr.HTML(value="", visible=False)
-
-                        with gr.Group(visible=False) as variant_group:
-                            variant_selector = gr.Radio(label="批量变体选择", choices=[], interactive=True)
-                            with gr.Row():
-                                variant_finalize_btn = gr.Button("✅ 选定为最终版", variant="primary", size="sm")
-                                variant_keep_btn = gr.Button("保留全部变体", size="sm")
-                        variant_state = gr.State([])
                         with gr.Row():
                             resynthesize_btn = gr.Button("重新合成", variant="secondary")
 
