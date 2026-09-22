@@ -18,6 +18,9 @@ class HistoryRecord:
     lyrics_preview: str = ""
     cot: str = ""
     seed: int = 0
+    cfg_scale: float = 0
+    num_inference_steps: int = 8
+    batch_count: int = 1
     audio_duration_seconds: float = 0
     generation_time_seconds: float = 0
     audio_path: str = ""
