@@ -1,6 +1,10 @@
 # YuE2 WebUI 详细设计方案
 
-> 版本: v2.0 | 日期: 2026-09-19 | 目标硬件: RTX 3080 10GB / Windows
+> 版本: v2.1 | 日期: 2026-09-23 | 目标硬件: RTX 3080 10GB / Windows
+>
+> v2.1 变更（2026-09-23）：目录重构（核心模块 → `src/`，测试 → `tests/`，本文档 → `Docs/design.md`）；
+> 模型路径外置到 `config.cfg`；新增中英双语 i18n（`src/i18n.py` + 语言持久化）；音频转谱（SheetSage2）。
+> v2.0（2026-09-19）：初版设计。
 
 ---
 
@@ -366,6 +370,10 @@ VAE权重:    ~0.25 GB (yue2-vae-f16.gguf)
 
 ### 2.3 项目位置与目录结构
 
+> v2.1 更新：核心模块已整理到 `src/` 子目录，测试到 `tests/`；模型路径改由 `config.cfg` 外置配置；
+> 设计期的 `backend_python.py`（Python 推理后端，Phase 4）与 `abc_utils.py` 未实现，
+> 队列管理实际实现为 `src/queue_manager.py`（设计稿原名 task_manager.py）。
+
 ```
 Y:\NewStore\AI\Yue2\
 ├── models/                    ← 已有: GGUF模型文件
@@ -375,20 +383,25 @@ Y:\NewStore\AI\Yue2\
 ├── audio-cpp/                 ← 已有: audio.cpp 预编译二进制
 │   ├── audiocpp_cli.exe
 │   ├── audiocpp_server.exe
-│   └── model_specs/yue2.json
+│   └── models/SheetSage2-GGUF/  ← 转谱模型（audio-cpp 转谱时使用）
 ├── src/yue2/                  ← 已有: Python推理代码 (可选后端)
 ├── examples/                  ← 已有: 示例文件
 │
 └── yue2-webui/                ← 新建: WebUI项目
-    ├── app.py                 # Gradio主应用入口
-    ├── config.py              # 参数schema、默认值、预设管理
-    ├── backend_gguf.py        # audio.cpp GGUF后端封装
-    ├── backend_python.py      # Python Pipeline后端封装 (Phase 4)
-    ├── task_manager.py        # 任务队列、进度追踪、取消
-    ├── history.py             # 生成历史CRUD
-    ├── style_presets.py       # 风格预设模板库
-    ├── lyrics_templates.py    # 歌词模板库
-    ├── abc_utils.py           # ABC乐谱验证/解析工具
+    ├── app.py                 # Gradio主应用入口（唯一入口，根目录）
+    ├── src/                   # 核心业务模块
+    │   ├── config.py          # 参数schema、默认值、预设管理
+    │   ├── backend_gguf.py    # audio.cpp GGUF后端封装 + config.cfg 加载
+    │   ├── queue_manager.py   # 任务队列、进度追踪、取消（设计稿名 task_manager.py）
+    │   ├── history.py         # 生成历史CRUD
+    │   ├── postprocess.py     # 音频后处理（标准化/淡入淡出/裁剪/元数据）
+    │   ├── i18n.py            # 中英双语词典与 tr() 接口
+    │   ├── style_presets.py   # 风格预设模板库
+    │   ├── vocal_presets.py   # 人声/乐器/情绪/语言/流派标签库
+    │   └── lyrics_templates.py# 歌词模板库
+    ├── tests/                 # 测试套件（i18n/模型配置/语言持久化/使用上一次/回收站/队列）
+    ├── config.cfg             # 模型路径外置配置（[models] 段）
+    ├── Docs/                  # 项目文档（design.md 本文档 / setup.md / requirements.md）
     ├── requirements.txt       # Python依赖
     ├── run.bat                # Windows一键启动
     ├── run.sh                 # Linux/Mac启动
@@ -400,25 +413,25 @@ Y:\NewStore\AI\Yue2\
     │       └── config.json
     ├── presets/               # 用户参数预设
     │   └── default.json
-    ├── history.json           # 生成历史索引
-    └── DESIGN.md              # 本文档
+    └── history.json           # 生成历史索引
 ```
 
 ### 2.4 依赖关系图
 
 ```
-yue2-webui/app.py
-    ├── imports config.py          (参数schema, 预设)
-    ├── imports backend_gguf.py    (GGUF后端)
+yue2-webui/app.py                (sys.path 引入 src/ 后 import 核心模块)
+    ├── imports src/config.py          (参数schema, 预设)
+    ├── imports src/backend_gguf.py    (GGUF后端 + 转谱)
     │       └── subprocess → audio-cpp/audiocpp_cli.exe
-    │               └── reads models/*.gguf + models/sidecars/*
-    ├── imports backend_python.py  (可选, Phase 4)
-    │       └── imports src/yue2/pipeline.py
-    │               └── loads models/YuE2-3B/ + models/YuE2-Vae/
-    ├── imports task_manager.py    (队列管理)
-    ├── imports history.py         (历史管理)
-    ├── imports style_presets.py   (风格模板)
-    └── imports lyrics_templates.py(歌词模板)
+    │               └── reads 路径由 config.cfg [models] 段决定（默认 models/*.gguf）
+    ├── imports src/queue_manager.py   (队列管理, 设计稿名 task_manager.py)
+    ├── imports src/history.py         (历史管理)
+    ├── imports src/postprocess.py     (音频后处理)
+    ├── imports src/i18n.py            (中英双语 tr())
+    ├── imports src/style_presets.py   (风格模板)
+    ├── imports src/vocal_presets.py   (标签库)
+    └── imports src/lyrics_templates.py(歌词模板)
+    (设计期的 backend_python.py Python 推理后端未实现)
 ```
 
 ---
@@ -2260,7 +2273,7 @@ python3 app.py
 
 ---
 
-## 附录 B: app.py 入口结构
+## 附录 B: app.py 入口结构（设计稿伪代码，实际实现见 app.py；模块在 src/ 下、队列为 queue_manager 单例）
 
 ```python
 """YuE2 Music Studio — Gradio WebUI for YuE2 Music Generation"""

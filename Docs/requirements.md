@@ -1,9 +1,9 @@
 ﻿# YuE2 WebUI 需求文档
 
 > 状态：重建版（原 `demands.md` 已丢失，无法从回收站 / Git / 磁盘恢复）
-> 重建依据：`README.md`、`DESIGN.md`、代码实测（`app.py` / `config.py` / `backend_gguf.py` / `history.py` / `postprocess.py`）
+> 重建依据：`README.md`、`Docs/design.md`（原 DESIGN.md）、代码实测（`app.py` / `src/config.py` / `src/backend_gguf.py` / `src/history.py` / `src/postprocess.py`）
 > 更新日期：2026-09-23
-> 说明：本文为**需求梳理与重建**，非原文逐字还原。带「据设计」标记的条目来自 DESIGN.md 规划，需与原始需求核对；「待核实」条目为无法确证原稿是否收录的项。
+> 说明：本文为**需求梳理与重建**，非原文逐字还原。带「据设计」标记的条目来自 design.md 规划，需与原始需求核对；「待核实」条目为无法确证原稿是否收录的项。
 
 ## 1. 需求分类总览
 

@@ -121,9 +121,8 @@ yue2-webui/
 ├── outputs/              # 生成结果（按任务定时戳分目录）
 ├── logs/                 # 运行日志
 ├── static/               # 前端静态资源（乐谱渲染等）
-├── Docs/                 # 项目文档（setup 安装指南 / requirements 需求）
+├── Docs/                 # 项目文档（setup 安装指南 / design 设计方案 / requirements 需求）
 ├── config.cfg            # 模型路径外置配置（[models] 段；相对路径基于上级系统根解析）
-├── DESIGN.md             # 详细设计方案 v2.0
 ├── requirements.txt      # Python 依赖
 ├── install.bat / install.sh
 ├── run.bat / run.sh
