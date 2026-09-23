@@ -1,6 +1,11 @@
 """Test script for queue manager."""
+import sys
 import time
 import threading
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
 from queue_manager import queue_manager, TaskType, TaskStatus, TaskCancelledError
 
 

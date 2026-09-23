@@ -1,9 +1,9 @@
-﻿#!/usr/bin/env python
+#!/usr/bin/env python
 """i18n 模块测试：验证 tr 回退、normalize_lang、EN_TABLE 完整性与 load_po_to_en 存在性"""
 import sys
 import os
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 from i18n import tr, normalize_lang, EN_TABLE, DEFAULT_LANG, load_po_to_en  # noqa
 

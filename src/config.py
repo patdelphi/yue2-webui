@@ -49,9 +49,9 @@ class GenerationParams:
         min_tokens=32, max_tokens=4096
     ))
     semantic_sampling: SamplingParams = field(default_factory=SamplingParams)
-    
-    model_gguf: str = "yue2-3b-q8_0.gguf"
-    vae_gguf: str = "yue2-vae-f16.gguf"
+
+    # 注：模型路径/文件名由项目根外置 config.cfg 配置（backend_gguf.load_model_config），
+    # 不再作为每次生成的参数。
     out_format: OutFormat = OutFormat.PCM16
 
 

@@ -15,7 +15,8 @@ from typing import Dict
 # 默认语言
 DEFAULT_LANG = "zh"
 
-LOCALES_ROOT = Path(__file__).parent / "locales"
+# locales 位于 webui 根目录（本模块已移至 src/，需向上一级）
+LOCALES_ROOT = Path(__file__).parent.parent / "locales"
 
 SUPPORTED_LANGS = ("zh", "en")
 
@@ -229,6 +230,16 @@ EN_TABLE: Dict[str, str] = {
     "转谱中...": "Transcribing...",
     "转谱失败": "Transcription failed",
     "转谱耗时": "Transcription time",
+    # —— backend_gguf 推理后端文案（generate/transcribe 的错误与进度，随任务语言）——
+    "已取消": "Cancelled",
+    "退出码": "exit code",
+    "生成完成但输出文件不存在": "Generation finished but the output file is missing",
+    "SheetSage2 模型未找到，请检查 config.cfg 中 sheetsage2_path 配置": "SheetSage2 model not found; check sheetsage2_path in config.cfg",
+    "转谱完成但未生成乐谱": "Transcription finished but no score was generated",
+    "转谱失败，退出码": "Transcription failed with exit code",
+    "无输出": "no output",
+    "加载 SheetSage2 模型...": "Loading SheetSage2 model...",
+    "转谱完成": "Transcription complete",
     "重新合成中...": "Resynthesizing...",
     "重新合成失败": "Resynthesis failed",
     "重新合成耗时": "Resynthesis time",
