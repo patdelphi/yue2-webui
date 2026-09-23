@@ -51,10 +51,13 @@ class Task:
 
     _progress_queue: deque = field(default_factory=deque, repr=False)
     _progress_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    # 最近一次进度（push 时同步记录），供状态快照只读展示，不影响 drain 消费流
+    last_progress: Optional[tuple] = field(default=None, repr=False)
 
     def push_progress(self, progress_val: float, desc: str):
         with self._progress_lock:
             self._progress_queue.append((progress_val, desc))
+            self.last_progress = (progress_val, desc)
 
     def drain_progress(self) -> list:
         with self._progress_lock:
@@ -73,6 +76,8 @@ class QueueManager:
         self._worker_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._wake_event = threading.Event()
+        # 最近完成任务环形缓冲（含失败/取消），供状态窗口展示
+        self._history: deque = deque(maxlen=5)
         self._start_worker()
 
     def _start_worker(self):
@@ -112,6 +117,14 @@ class QueueManager:
 
                 with self._lock:
                     self._current_task = None
+                    # 记入历史环形缓冲（含失败/取消，供状态窗口展示）
+                    self._history.append({
+                        "task_id": task.task_id,
+                        "task_type": task.task_type.value,
+                        "status": task.status.value,
+                        "elapsed": (task.completed_at or time.time()) - (task.started_at or time.time()),
+                        "error": task.error,
+                    })
             else:
                 self._wake_event.wait(timeout=1.0)
                 self._wake_event.clear()
@@ -180,6 +193,41 @@ class QueueManager:
                     }
                     for i, t in enumerate(self._queue)
                 ],
+            }
+
+    def get_queue_snapshot(self) -> dict:
+        """获取队列状态快照（只读，不清空 drain 进度流），供设置页状态窗口展示。
+
+        返回:
+            running: 运行中任务 {task_id, task_type, progress: (pct, desc)|None, elapsed} 或 None
+            queued:  排队任务列表 [{task_id, task_type, waited}]
+            recent:  最近完成/失败/取消任务（环形缓冲，最多 5 条）
+            worker_alive: worker 线程是否存活
+        """
+        with self._lock:
+            now = time.time()
+            running = None
+            if self._current_task is not None:
+                t = self._current_task
+                running = {
+                    "task_id": t.task_id,
+                    "task_type": t.task_type.value,
+                    "progress": t.last_progress,
+                    "elapsed": now - (t.started_at or now),
+                }
+            queued = [
+                {
+                    "task_id": t.task_id,
+                    "task_type": t.task_type.value,
+                    "waited": now - t.created_at,
+                }
+                for t in self._queue
+            ]
+            return {
+                "running": running,
+                "queued": queued,
+                "recent": list(self._history),
+                "worker_alive": self._worker_thread is not None and self._worker_thread.is_alive(),
             }
 
     def cancel_task(self, task: Task) -> bool:

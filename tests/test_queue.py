@@ -148,9 +148,42 @@ def test_failed():
     print("PASS: ValueError -> FAILED\n")
 
 
+def test_queue_snapshot():
+    """get_queue_snapshot：运行中/排队/最近历史三段快照（进度只读不清空 drain 流）。"""
+    print("=== Testing queue snapshot ===\n")
+    t1 = queue_manager.submit(TaskType.GENERATION, test_task, duration=1, name="Snap1")
+    t2 = queue_manager.submit(TaskType.TRANSCRIPTION, test_task, duration=0.6, name="Snap2")
+    time.sleep(0.4)  # t1 运行中、t2 排队
+
+    snap = queue_manager.get_queue_snapshot()
+    assert snap["running"] is not None, snap
+    assert snap["running"]["task_id"] == t1.task_id, snap
+    assert snap["running"]["progress"] is not None, snap  # last_progress 可读
+    assert len(snap["queued"]) == 1 and snap["queued"][0]["task_id"] == t2.task_id, snap
+    assert snap["worker_alive"] is True, snap
+    # 只读快照不应清空进度队列：t1 的 progress 仍可 drain 到
+    drained = t1.drain_progress()
+    assert drained, "snapshot 不应消费 drain 流"
+
+    # 等两个任务完成，验证历史段
+    for t in (t1, t2):
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if queue_manager.get_status(t)["status"] in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
+                break
+            time.sleep(0.2)
+    snap2 = queue_manager.get_queue_snapshot()
+    assert snap2["running"] is None and snap2["queued"] == [], snap2
+    ids = [h["task_id"] for h in snap2["recent"]]
+    assert t1.task_id in ids and t2.task_id in ids, snap2
+    assert all(h["status"] in ("completed", "failed", "cancelled") for h in snap2["recent"]), snap2
+    print("PASS: queue snapshot (running/queued/recent)\n")
+
+
 if __name__ == "__main__":
     test_queue()
     test_cancel_running()
     test_cancel_queued()
     test_failed()
+    test_queue_snapshot()
     print("=== All queue manager tests passed ===")

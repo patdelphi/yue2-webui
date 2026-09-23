@@ -1032,6 +1032,56 @@ def on_check_models():
     return "\n".join(lines)
 
 
+# 队列任务类型 → 展示名（中文原文走 tr 翻译）
+_QUEUE_TYPE_LABELS = {"generation": "生成", "transcription": "转谱"}
+
+
+def _queue_status_html():
+    """生成设置页「当前队列」状态 Markdown（运行中/排队中/最近任务，按当前语言渲染）。
+
+    数据来自 queue_manager.get_queue_snapshot()（只读快照，不消费 drain 进度流），
+    由 gr.Timer 周期刷新 + 语言切换时即时重渲染。
+    """
+    lang = _CUR_LANG
+    try:
+        snap = queue_manager.get_queue_snapshot()
+    except Exception as e:
+        logger.warning(f"队列快照获取失败: {e}")
+        return f"⚠️ {tr(lang, '队列 worker 线程异常，请重启服务')}"
+
+    lines = []
+    if not snap["worker_alive"]:
+        lines.append(f"⚠️ {tr(lang, '队列 worker 线程异常，请重启服务')}")
+
+    if snap["running"] is None and not snap["queued"]:
+        lines.append(f"🟢 {tr(lang, '空闲')} — {tr(lang, '无运行中或排队任务')}")
+    else:
+        r = snap["running"]
+        if r:
+            type_label = tr(lang, _QUEUE_TYPE_LABELS.get(r["task_type"], r["task_type"]))
+            pct, msg = r["progress"] or (None, "")
+            prog_str = f"{pct * 100:.0f}%" if pct is not None else "-"
+            msg = (msg or "")[:60]  # 进度描述截断，避免撑爆窗口
+            lines.append(
+                f"🔴 **{tr(lang, '运行中')}** · {type_label} · `{r['task_id']}` · "
+                f"{tr(lang, '进度')} {prog_str} · {msg} · {tr(lang, '已用时')} {r['elapsed']:.0f}{tr(lang, '秒')}"
+            )
+        for q in snap["queued"]:
+            type_label = tr(lang, _QUEUE_TYPE_LABELS.get(q["task_type"], q["task_type"]))
+            lines.append(f"🟡 {tr(lang, '排队中')} · {type_label} · `{q['task_id']}` · {tr(lang, '等待')} {q['waited']:.0f}{tr(lang, '秒')}")
+
+    if snap["recent"]:
+        icon_map = {"completed": "✅", "failed": "❌", "cancelled": "🚫"}
+        status_map = {"completed": tr(lang, "完成"), "failed": tr(lang, "失败"), "cancelled": tr(lang, "已取消")}
+        parts = []
+        for h in snap["recent"]:
+            type_label = tr(lang, _QUEUE_TYPE_LABELS.get(h["task_type"], h["task_type"]))
+            parts.append(f"{icon_map.get(h['status'], '•')} {status_map.get(h['status'], h['status'])} · {type_label} · {h['elapsed']:.1f}{tr(lang, '秒')}")
+        lines.append(f"\n**{tr(lang, '最近任务')}**: " + " | ".join(parts))
+
+    return "\n".join(lines)
+
+
 def on_lyrics_change(lyrics):
     """Return structure analysis HTML when lyrics change."""
     lang = _CUR_LANG
@@ -1760,6 +1810,15 @@ def build_ui():
                 check_models_btn = gr.Button(_t("检查模型"))
                 _reg(check_models_btn, lambda lang: gr.update(value=tr(lang, "检查模型")))
                 check_models_btn.click(fn=on_check_models, outputs=model_status)
+
+                # 当前队列状态窗口：Timer 每 2s 轮询只读快照（不影响任务进度流）
+                queue_md = gr.Markdown(_t("### 当前队列"))
+                _reg(queue_md, lambda lang: gr.update(value=tr(lang, "### 当前队列")))
+                queue_status_md = gr.Markdown(value=_queue_status_html())
+                # 切语言即时重渲染（apply_lang 先更新 _CUR_LANG 再执行 updater）
+                _reg(queue_status_md, lambda lang: gr.update(value=_queue_status_html()))
+                queue_timer = gr.Timer(2.0)
+                queue_timer.tick(fn=_queue_status_html, outputs=[queue_status_md])
 
                 presets_md = gr.Markdown(_t("### 参数预设"))
                 _reg(presets_md, lambda lang: gr.update(value=tr(lang, "### 参数预设")))
