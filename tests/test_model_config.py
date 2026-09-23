@@ -19,8 +19,10 @@ from backend_gguf import GGUFBackend, load_model_config, DEFAULT_MODEL_CONFIG
 
 
 def _write_cfg(root: Path, content: str) -> None:
-    """在项目根写一个测试用 config.cfg。"""
-    (root / "config.cfg").write_text(content, encoding="utf-8")
+    """在模拟项目根的 yue2-webui 子目录写测试用 config.cfg（与实际布局一致）。"""
+    webui_dir = root / "yue2-webui"
+    webui_dir.mkdir(parents=True, exist_ok=True)
+    (webui_dir / "config.cfg").write_text(content, encoding="utf-8")
 
 
 def test_default_when_no_cfg():
@@ -82,9 +84,16 @@ def test_broken_cfg_fallback():
     """cfg 语法损坏时不抛异常，回退全部默认值。"""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
-        (root / "config.cfg").write_bytes(b"\xff\xfe\x00binary garbage")
+        _write_cfg_bytes(root, b"\xff\xfe\x00binary garbage")
         cfg = load_model_config(root)
         assert cfg == load_model_config(Path(tempfile.mkdtemp())) or cfg["main_model"] == "yue2-3b-q8_0.gguf"
+
+
+def _write_cfg_bytes(root: Path, content: bytes) -> None:
+    """在 yue2-webui 子目录写二进制损坏 cfg（模拟文件损坏场景）。"""
+    webui_dir = root / "yue2-webui"
+    webui_dir.mkdir(parents=True, exist_ok=True)
+    (webui_dir / "config.cfg").write_bytes(content)
 
 
 def test_backend_uses_cfg_paths():

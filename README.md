@@ -122,6 +122,7 @@ yue2-webui/
 ├── logs/                 # 运行日志
 ├── static/               # 前端静态资源（乐谱渲染等）
 ├── Docs/                 # 项目文档（setup 安装指南 / requirements 需求）
+├── config.cfg            # 模型路径外置配置（[models] 段；相对路径基于上级系统根解析）
 ├── DESIGN.md             # 详细设计方案 v2.0
 ├── requirements.txt      # Python 依赖
 ├── install.bat / install.sh
@@ -129,8 +130,6 @@ yue2-webui/
 ├── history.json          # 历史记录数据
 ├── last_inputs.json      # 「使用上一次」记录（风格 / 歌词 / 最近生成的乐谱）
 └── lang_state.json       # 界面语言持久化（重启后恢复上次选择）
-
-../config.cfg             # 仓库根：模型路径外置配置（[models] 段）
 ```
 
 ---

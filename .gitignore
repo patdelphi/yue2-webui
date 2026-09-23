@@ -37,6 +37,7 @@ env/
 outputs/
 history.json
 last_inputs.json
+lang_state.json
 presets/*.json
 !presets/default.json
 

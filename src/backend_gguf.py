@@ -11,8 +11,59 @@ from typing import Optional, Callable
 from dataclasses import dataclass
 
 from config import GenerationParams, CotMode, OutFormat, TranscriptionResult
+from i18n import tr
 
 logger = logging.getLogger(__name__)
+
+# 模型路径默认值（config.cfg 缺失/损坏/缺项时的回退，保持与历史行为一致）
+DEFAULT_MODEL_CONFIG = {
+    "models_dir": "models",                                   # 主模型+VAE 目录（相对项目根）
+    "main_model": "yue2-3b-q8_0.gguf",                        # 主模型文件名
+    "vae_model": "yue2-vae-f16.gguf",                         # VAE 模型文件名
+    "sheetsage2_path": "audio-cpp/models/SheetSage2-GGUF/sheetsage2-orig.gguf",  # 转谱模型路径
+}
+
+
+def load_model_config(project_root: Path) -> dict:
+    """读取 yue2-webui 目录下外置 config.cfg 的 [models] 段，返回模型路径配置。
+
+    规则：
+    - cfg 不存在或解析异常时回退 DEFAULT_MODEL_CONFIG（不抛异常，保证可启动）
+    - 缺失的配置项回退默认值
+    - cfg 文件位于 <project_root>/yue2-webui/config.cfg（随 webui 项目走）；
+      相对路径（如 models、audio-cpp/...）仍基于 project_root（Yue2 系统根）解析；绝对路径直接使用
+    返回键: models_dir(Path) / main_model(str) / vae_model(str) / sheetsage2_path(Path)
+    """
+    cfg_path = Path(project_root) / "yue2-webui" / "config.cfg"
+    values = dict(DEFAULT_MODEL_CONFIG)
+    if cfg_path.exists():
+        try:
+            import configparser
+            parser = configparser.ConfigParser()
+            # 显式 utf-8 读取，兼容带中文注释的 cfg
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                parser.read_file(f)
+            if parser.has_section("models"):
+                for key in values:
+                    if parser.has_option("models", key):
+                        values[key] = parser.get("models", key).strip()
+        except Exception as e:
+            # cfg 损坏不阻断启动，回退默认并记录警告
+            logger.warning(f"config.cfg 解析失败，使用默认模型路径: {e}")
+
+    # 目录/路径类配置统一解析为 Path（相对路径基于项目根）
+    models_dir = Path(values["models_dir"])
+    if not models_dir.is_absolute():
+        models_dir = Path(project_root) / models_dir
+    sheetsage2_path = Path(values["sheetsage2_path"])
+    if not sheetsage2_path.is_absolute():
+        sheetsage2_path = Path(project_root) / sheetsage2_path
+    return {
+        "models_dir": models_dir,
+        "main_model": values["main_model"],
+        "vae_model": values["vae_model"],
+        "sheetsage2_path": sheetsage2_path,
+    }
 
 
 @dataclass
@@ -68,7 +119,12 @@ class GGUFBackend:
     def __init__(self, project_root: Path):
         self.project_root = Path(project_root)
         self.cli_path = self.project_root / "audio-cpp" / "audiocpp_cli.exe"
-        self.model_dir = self.project_root / "models"
+        # 模型路径统一由外置 config.cfg 决定（缺失时回退默认值）
+        _mcfg = load_model_config(self.project_root)
+        self.model_dir: Path = _mcfg["models_dir"]
+        self.main_model: str = _mcfg["main_model"]
+        self.vae_model: str = _mcfg["vae_model"]
+        self.sheetsage2_path: Path = _mcfg["sheetsage2_path"]
         self.backend = os.environ.get("YUE2_BACKEND", "cuda")
         self._current_process: Optional[subprocess.Popen] = None
     
@@ -79,7 +135,7 @@ class GGUFBackend:
             str(self.cli_path),
             "--task", "gen",
             "--family", "yue2",
-            "--model", str(self.model_dir / params.model_gguf),
+            "--model", str(self.model_dir / self.main_model),
             "--backend", self.backend,
             "--threads", "8",
         ]
@@ -110,8 +166,9 @@ class GGUFBackend:
             if val != getattr(sem_defaults, key):
                 cmd.extend(["--request-option", f"semantic_{key}={val}"])
         
-        cmd.extend(["--session-option", f"yue2.model_gguf={params.model_gguf}"])
-        cmd.extend(["--session-option", f"yue2.vae_gguf={params.vae_gguf}"])
+        # 模型文件名由外置 config.cfg 决定（系统级配置，非每次生成参数）
+        cmd.extend(["--session-option", f"yue2.model_gguf={self.main_model}"])
+        cmd.extend(["--session-option", f"yue2.vae_gguf={self.vae_model}"])
 
         if params.out_format != OutFormat.PCM16:
             cmd.extend(["--out-format", params.out_format.value])
@@ -126,7 +183,8 @@ class GGUFBackend:
     def generate(self, params: GenerationParams, output_dir: Path,
                  on_progress: Optional[Callable[[dict], None]] = None,
                  cancel_event: Optional[threading.Event] = None,
-                 output_name: Optional[str] = None) -> GenerationResult:
+                 output_name: Optional[str] = None,
+                 lang: str = "zh") -> GenerationResult:
         """Execute generation."""
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / f"{output_name or output_dir.name}.wav"
@@ -153,7 +211,7 @@ class GGUFBackend:
             for line in process.stdout:
                 if cancel_event and cancel_event.is_set():
                     process.kill()
-                    return GenerationResult(success=False, error_message="已取消")
+                    return GenerationResult(success=False, error_message=tr(lang, "已取消"))
 
                 output_lines.append(line)
                 progress = parser.parse_line(line)
@@ -167,7 +225,7 @@ class GGUFBackend:
                 logger.error(f"audiocpp_cli failed with exit code {process.returncode}")
                 return GenerationResult(
                     success=False,
-                    error_message=f"audiocpp_cli 退出码 {process.returncode}",
+                    error_message=f"audiocpp_cli {tr(lang, '退出码')} {process.returncode}",
                     generation_time_seconds=elapsed,
                 )
             
@@ -175,7 +233,7 @@ class GGUFBackend:
                 logger.error("Output file not found after generation")
                 return GenerationResult(
                     success=False,
-                    error_message="生成完成但输出文件不存在",
+                    error_message=tr(lang, "生成完成但输出文件不存在"),
                     generation_time_seconds=elapsed,
                 )
             
@@ -287,9 +345,9 @@ class GGUFBackend:
         return self.export_mp3(wav_path)
 
     def check_models(self) -> dict:
-        """Check if model files exist."""
-        model_path = self.model_dir / "yue2-3b-q8_0.gguf"
-        vae_path = self.model_dir / "yue2-vae-f16.gguf"
+        """Check if model files exist (paths from external config.cfg)."""
+        model_path = self.model_dir / self.main_model
+        vae_path = self.model_dir / self.vae_model
         
         return {
             "available": model_path.exists() and vae_path.exists(),
@@ -298,8 +356,8 @@ class GGUFBackend:
         }
 
     def check_sheetsage2(self) -> dict:
-        """Check if SheetSage2 model exists."""
-        model_path = self.project_root / "audio-cpp" / "models" / "SheetSage2-GGUF" / "sheetsage2-orig.gguf"
+        """Check if SheetSage2 model exists (path from external config.cfg)."""
+        model_path = self.sheetsage2_path
         return {
             "available": model_path.exists(),
             "model_path": str(model_path),
@@ -308,15 +366,16 @@ class GGUFBackend:
 
     def transcribe(self, audio_path: Path, output_dir: Path,
                    on_progress: Optional[Callable[[dict], None]] = None,
-                   cancel_event: Optional[threading.Event] = None) -> TranscriptionResult:
+                   cancel_event: Optional[threading.Event] = None,
+                   lang: str = "zh") -> TranscriptionResult:
         """Transcribe audio to ABC score using SheetSage2."""
         output_dir.mkdir(parents=True, exist_ok=True)
-        
-        sheetsage2_model = self.project_root / "audio-cpp" / "models" / "SheetSage2-GGUF" / "sheetsage2-orig.gguf"
+
+        sheetsage2_model = self.sheetsage2_path
         if not sheetsage2_model.exists():
             return TranscriptionResult(
                 success=False,
-                error_message="SheetSage2 模型未找到，请检查 audio-cpp/models/SheetSage2-GGUF/",
+                error_message=tr(lang, "SheetSage2 模型未找到，请检查 config.cfg 中 sheetsage2_path 配置"),
             )
         
         base_name = output_dir.name
@@ -405,29 +464,29 @@ class GGUFBackend:
             for line in process.stdout:
                 if cancel_event and cancel_event.is_set():
                     process.kill()
-                    return TranscriptionResult(success=False, error_message="已取消")
+                    return TranscriptionResult(success=False, error_message=tr(lang, "已取消"))
                 
                 line_stripped = line.strip()
                 output_lines.append(line_stripped)
                 logger.debug(f"SheetSage2: {line_stripped}")
                 if on_progress:
                     if "Loading model" in line_stripped or "model loaded" in line_stripped.lower():
-                        on_progress({"phase": "loading", "message": "加载 SheetSage2 模型..."})
+                        on_progress({"phase": "loading", "message": tr(lang, "加载 SheetSage2 模型...")})
                     elif "transcrib" in line_stripped.lower() or "decod" in line_stripped.lower():
-                        on_progress({"phase": "transcribing", "message": "转谱中..."})
+                        on_progress({"phase": "transcribing", "message": tr(lang, "转谱中...")})
                     elif "Total:" in line_stripped or "completed" in line_stripped.lower():
-                        on_progress({"phase": "done", "message": "转谱完成"})
+                        on_progress({"phase": "done", "message": tr(lang, "转谱完成")})
             
             process.wait()
             elapsed = time.time() - start_time
             
             if process.returncode != 0:
                 last_lines = [l for l in output_lines if l][-10:]
-                error_detail = "\n".join(last_lines) if last_lines else "无输出"
+                error_detail = "\n".join(last_lines) if last_lines else tr(lang, "无输出")
                 logger.error(f"SheetSage2 failed with exit code {process.returncode}:\n{error_detail}")
                 return TranscriptionResult(
                     success=False,
-                    error_message=f"转谱失败，退出码 {process.returncode}: {error_detail}",
+                    error_message=f"{tr(lang, '转谱失败，退出码')} {process.returncode}: {error_detail}",
                     transcription_time_seconds=elapsed,
                 )
             
@@ -438,7 +497,7 @@ class GGUFBackend:
             if not abc_score:
                 return TranscriptionResult(
                     success=False,
-                    error_message="转谱完成但未生成乐谱",
+                    error_message=tr(lang, "转谱完成但未生成乐谱"),
                     transcription_time_seconds=elapsed,
                 )
             

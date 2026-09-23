@@ -1163,7 +1163,11 @@ def on_preset_save(name, cot, steps, out_format, abc_temp, abc_top_p, abc_top_k,
 # 因此必须显式 width:auto 才能让 hint/dd 按内容收缩，否则各自撑满整行换行堆叠。
 _TITLE_ROW_CSS = """
 #title-row { align-items: center; gap: 8px; }
-#lang-hint { width: auto; display: flex; align-items: center; margin: 0; flex: 0 0 auto; }
+    /* GitHub 图标：随主题色，hover 亮起；flex 收缩避免撑满整行 */
+    #gh-icon { width: auto; flex: 0 0 auto; display: flex; align-items: center; margin: 0; }
+    #gh-link { display: inline-flex; align-items: center; color: var(--body-text-color); opacity: .65; transition: opacity .15s; }
+    #gh-link:hover { opacity: 1; }
+    #lang-hint { width: auto; display: flex; align-items: center; margin: 0; flex: 0 0 auto; }
 #lang-hint label { font-size: 13px; color: var(--body-text-color); opacity: .75; white-space: nowrap; }
 #lang-dd { width: auto; flex: 0 0 auto; margin: 0; }
 #lang-dd > div { display: flex; align-items: center; height: 26px; }
@@ -1232,6 +1236,13 @@ def build_ui():
         # 标题行：主标题+副标题 Markdown，右侧原生风格 "Lang/语言" 说明 + 紧凑下拉框
         with gr.Row(elem_id="title-row"):
             title_md = gr.Markdown("### YuE2 Music Studio · " + _t("AI音乐创作 — 输入歌词和风格，生成完整歌曲"))
+            # GitHub 图标：点击新窗口打开项目仓库（无文案，语言切换无需注册 updater）
+            gr.HTML(
+                '<a id="gh-link" href="https://github.com/patdelphi/yue2-webui" target="_blank" rel="noopener" title="GitHub">'
+                '<svg viewBox="0 0 16 16" width="17" height="17" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>'
+                '</a>',
+                elem_id="gh-icon", container=False,
+            )
             # 说明文字用原生 HTML label（无 Gradio block 底色）
             gr.HTML('<label>Lang/语言</label>', elem_id="lang-hint", container=False)
             lang_select = gr.Dropdown(

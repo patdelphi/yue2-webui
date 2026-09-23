@@ -16,12 +16,12 @@ Yue2/                          ← 仓库根（YuE2 主项目，pip 包名 yue2-
 ├── models/                    ← 主模型目录（需手动下载，见第 4 步）
 │   ├── yue2-3b-q8_0.gguf      ← 主模型（约 4.0GB）
 │   └── yue2-vae-f16.gguf      ← VAE 解码器（约 250MB）
-├── config.cfg                 ← 模型路径外置配置（见第 5 步）
 ├── .venv/                     ← 推荐的共享虚拟环境（主项目 + WebUI 共用）
 └── yue2-webui/                ← 本 WebUI（Gradio 应用）
     ├── app.py                 ← 启动入口（核心模块在同目录 src/ 下）
     ├── src/                   ← 核心模块（backend_gguf / config / i18n / 队列 / 历史等）
     ├── tests/                 ← 测试套件
+    ├── config.cfg             ← 模型路径外置配置（[models] 段，见第 5 步）
     └── requirements.txt       ← WebUI 依赖
 ```
 
@@ -99,11 +99,11 @@ huggingface-cli download patdelphi/yue2-gguf --local-dir models
 
 ### 步骤 6：配置 config.cfg（模型路径）
 
-仓库根目录的 `config.cfg` 决定所有模型路径（[models] 段）：
+`yue2-webui/config.cfg` 决定所有模型路径（[models] 段）：
 
 ```ini
 [models]
-models_dir = models                          ; 主模型 + VAE 目录（相对路径基于仓库根，也可填绝对路径）
+models_dir = models                          ; 主模型 + VAE 目录（相对路径基于 Yue2 系统根，也可填绝对路径）
 main_model = yue2-3b-q8_0.gguf               ; 主模型文件名
 vae_model = yue2-vae-f16.gguf                ; VAE 模型文件名
 sheetsage2_path = audio-cpp/models/SheetSage2-GGUF/sheetsage2-orig.gguf   ; 转谱模型路径
