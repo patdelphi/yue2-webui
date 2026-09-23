@@ -1,11 +1,13 @@
 """YuE2 Music Studio - Gradio WebUI for YuE2 Music Generation."""
 import gradio as gr
+import html
 import random
 import json
 import shutil
 import threading
 import time
 import logging
+from dataclasses import asdict
 from pathlib import Path
 from datetime import datetime
 from starlette.staticfiles import StaticFiles
@@ -26,6 +28,10 @@ from lyrics_templates import LYRICS_TEMPLATES
 from history import HistoryManager, HistoryRecord
 from postprocess import postprocess_audio
 from queue_manager import queue_manager, TaskType, TaskStatus, TaskCancelledError
+from i18n import tr, normalize_lang
+
+# 当前界面语言（运行时切换，不可通过重启进程生效则需手动切）
+_CUR_LANG = "zh"
 
 PROJECT_ROOT = Path(__file__).parent.parent
 WEBUI_ROOT = PROJECT_ROOT / "yue2-webui"
@@ -125,6 +131,8 @@ def on_generate(
 ):
     """Generate button callback - submits to queue and polls for results."""
     logger.info(f"on_generate: style={style!r}, cot={cot!r}, seed={seed!r}, cfg_scale={cfg_scale!r}, steps={num_inference_steps!r}, batch={batch_count!r}")
+    # 任务入队时快照当前界面语言，供 worker 线程内使用（运行时切换不影响已入队任务）
+    lang = _CUR_LANG
     
     # Handle None values from frontend (Gradio may send None for uninitialized sliders)
     cot = cot if cot is not None else "full"
@@ -166,14 +174,15 @@ def on_generate(
     # Validate inputs before queuing
     lyrics = strip_comment_lines(lyrics)
     if not style or not style.strip():
-        raise gr.Error("请输入风格描述")
+        raise gr.Error(tr(lang, "请输入风格描述"))
     if not lyrics or not lyrics.strip():
-        raise gr.Error("请输入歌词")
+        raise gr.Error(tr(lang, "请输入歌词"))
     
     # Submit to queue
     task = queue_manager.submit(
         TaskType.GENERATION,
         _generate_worker,
+        lang=lang,
         style=style, lyrics=lyrics, cot=cot, seeds=seeds, cfg_scale=cfg_scale,
         num_inference_steps=num_inference_steps, out_format=out_format, batch_count=batch_count,
         normalize=normalize, fade=fade, trim=trim, metadata=metadata, abc_text=abc_text,
@@ -196,17 +205,18 @@ def on_generate(
             
             if status == TaskStatus.QUEUED:
                 pos = status_info["position"]
-                progress(0, desc=f"排队中... 前面还有 {pos - 1} 个任务")
+                queue_ahead = tr(lang, "前面还有 {n} 个任务").replace("{n}", str(pos - 1))
+                progress(0, desc=f"{tr(lang, '排队中...')} {queue_ahead}")
             elif status == TaskStatus.RUNNING:
                 running_time = status_info.get("running_time", 0)
-                progress(0, desc=f"执行中... ({running_time:.0f}s)")
+                progress(0, desc=f"{tr(lang, '执行中...')} ({running_time:.0f}s)")
             elif status == TaskStatus.COMPLETED:
                 break
             elif status == TaskStatus.FAILED:
-                error_msg = status_info.get("error", "未知错误")
-                raise gr.Error(f"生成失败: {error_msg}")
+                error_msg = status_info.get("error", tr(lang, "未知错误"))
+                raise gr.Error(f"{tr(lang, '生成失败')}: {error_msg}")
             elif status == TaskStatus.CANCELLED:
-                raise gr.Error("任务已取消")
+                raise gr.Error(tr(lang, "任务已取消"))
             
             # Forward progress updates from worker
             for prog_val, desc in task.drain_progress():
@@ -235,6 +245,7 @@ def _generate_worker(
     normalize, fade, trim, metadata, abc_text,
     abc_temp, abc_top_p, abc_top_k, abc_rep_penalty, abc_pen_window, abc_min_tok, abc_max_tok,
     sem_temp, sem_top_p, sem_top_k, sem_rep_penalty, sem_pen_window, sem_min_tok, sem_max_tok,
+    lang="zh",
 ):
     """Worker function that runs in the queue thread. Returns the result tuple."""
 
@@ -259,7 +270,7 @@ def _generate_worker(
         ),
     )
 
-    error = validate_params(params)
+    error = validate_params(params, lang=lang)
     if error:
         raise ValueError(error)
 
@@ -273,14 +284,14 @@ def _generate_worker(
 
     def on_progress(p):
         phase_labels = {
-            "loading": "加载模型...",
-            "planning": "规划乐谱...",
-            "generating": "生成音乐...",
-            "synthesizing": "合成音频...",
-            "decoding": "解码音频...",
-            "done": "完成",
+            "loading": tr(lang, "加载模型..."),
+            "planning": tr(lang, "规划乐谱..."),
+            "generating": tr(lang, "生成音乐..."),
+            "synthesizing": tr(lang, "合成音频..."),
+            "decoding": tr(lang, "解码音频..."),
+            "done": tr(lang, "完成"),
         }
-        label = phase_labels.get(p.get("phase", ""), "处理中...")
+        label = phase_labels.get(p.get("phase", ""), tr(lang, "处理中..."))
         _task.push_progress(0, label)
 
     batch_count = int(batch_count)
@@ -297,7 +308,7 @@ def _generate_worker(
         variant_dir.mkdir(parents=True, exist_ok=True)
 
         params.seed = current_seed
-        _task.push_progress(0, f"生成变体 {i+1}/{batch_count} (seed={current_seed})...")
+        _task.push_progress(0, f"{tr(lang, '生成变体')} {i+1}/{batch_count} (seed={current_seed})...")
 
         result = backend.generate(
             params=params,
@@ -311,22 +322,35 @@ def _generate_worker(
     successful = [(tid, d, r, s) for tid, d, r, s in results if r.success]
     if not successful:
         if _task.cancel_event.is_set():
-            raise TaskCancelledError("任务已取消")
-        failed_msg = results[0][2].error_message if results else "未知错误"
-        raise ValueError(f"生成失败: {failed_msg}")
+            raise TaskCancelledError(tr(lang, "任务已取消"))
+        failed_msg = results[0][2].error_message if results else tr(lang, "未知错误")
+        raise ValueError(f"{tr(lang, '生成失败')}: {failed_msg}")
 
     format_label = FORMAT_LABELS.get(params.out_format.value, "PCM 16-bit")
 
     if any([normalize, fade, trim, metadata]):
-        for task_id, variant_dir, result, variant_seed in successful:
+        for idx, (task_id, variant_dir, result, variant_seed) in enumerate(successful):
             wav_path = Path(result.audio_path)
             if wav_path.exists():
-                _task.push_progress(0, "后处理音频...")
+                _task.push_progress(0, tr(lang, "后处理音频..."))
+                # 携带完整生成/采样参数写入 sidecar JSON（cfg/ODE/批量/采样等）
                 postprocess_audio(
                     wav_path,
                     normalize=normalize, fade=fade, trim=trim, metadata=metadata,
                     style=params.style, seed=variant_seed,
                     out_format=params.out_format.value,
+                    extra_meta={
+                        "cot": params.cot.value,
+                        "cfg_scale": params.cfg_scale if params.cfg_scale is not None else 0,
+                        "num_inference_steps": params.num_inference_steps,
+                        "batch_count": batch_count,
+                        "variant_index": idx + 1,
+                        "out_format": params.out_format.value,
+                        "model_gguf": params.model_gguf,
+                        "vae_gguf": params.vae_gguf,
+                        "abc_sampling": asdict(params.abc_sampling),
+                        "semantic_sampling": asdict(params.semantic_sampling),
+                    },
                 )
                 if result.mp3_path:
                     new_mp3 = backend.re_export_mp3(wav_path)
@@ -340,12 +364,13 @@ def _generate_worker(
     avg_duration = sum(r.audio_duration_seconds or 0 for _, _, r, _ in successful) / len(successful)
 
     if batch_count > 1:
-        duration_info = f"批量生成 **{len(successful)}/{batch_count}** 个变体 | 总耗时 **{total_time:.1f}s** | 平均音频时长 **{avg_duration:.1f}s** | {format_label}"
+        duration_info = f"{tr(lang, '批量生成')} **{len(successful)}/{batch_count}** {tr(lang, '个变体')} | {tr(lang, '总耗时')} **{total_time:.1f}s** | {tr(lang, '平均音频时长')} **{avg_duration:.1f}s** | {format_label}"
     else:
         r = successful[0][2]
-        duration_info = f"生成耗时 **{r.generation_time_seconds:.1f}s** | 音频时长 **{r.audio_duration_seconds:.1f}s** | {format_label}"
+        duration_info = f"{tr(lang, '生成耗时')} **{r.generation_time_seconds:.1f}s** | {tr(lang, '音频时长')} **{r.audio_duration_seconds:.1f}s** | {format_label}"
 
-    lyrics_data_html = f'<div class="gen-lyrics-data" style="display:none" data-lyrics=\'{json.dumps(params.lyrics, ensure_ascii=False)}\' data-duration="{avg_duration}"></div>'
+    _lyrics_json = html.escape(json.dumps(params.lyrics, ensure_ascii=False), quote=True)
+    lyrics_data_html = f'<div class="gen-lyrics-data" style="display:none" data-lyrics=\'{_lyrics_json}\' data-duration="{avg_duration}"></div>'
 
     for task_id, variant_dir, result, variant_seed in successful:
         abc_path = ""
@@ -376,7 +401,7 @@ def _generate_worker(
             out_format=params.out_format.value,
         )
         history_mgr.append(record)
-    history_mgr.auto_prune(max_entries=100)
+    history_mgr.auto_prune()
 
     first_result = successful[0][2]
     first_task_id = successful[0][0]
@@ -396,7 +421,7 @@ def _generate_worker(
         variants_payload = []
         for idx, (task_id, variant_dir, result, variant_seed) in enumerate(successful, start=1):
             variants_payload.append({
-                "label": f"变体{idx} (seed={variant_seed}, {result.audio_duration_seconds or 0:.1f}s)",
+                "label": f"{tr(lang, '变体')}{idx} (seed={variant_seed}, {result.audio_duration_seconds or 0:.1f}s)",
                 "task_id": task_id,
                 "audio_path": str(result.audio_path),
                 "abc_text": result.abc_score or "",
@@ -418,9 +443,7 @@ def _generate_worker(
 def on_restore_last(kind: str, current: str):
     """Fill an input box with the last-saved text of the same kind."""
     value = _load_last_inputs().get(kind, "")
-    if not value:
-        raise gr.Warning("暂无上一次内容")
-    return value
+    return value if value else (current or "")
 
 
 def on_variant_select(label, payload):
@@ -428,7 +451,9 @@ def on_variant_select(label, payload):
     for v in payload:
         if v["label"] == label:
             return v["audio_path"], v["abc_text"], v["abc_file"], v["mp3_file"]
-    raise gr.Error("变体不存在")
+    # Label/state desync (e.g. after a page reload or while the selector is
+    # being reset) — keep the current outputs instead of erroring.
+    return gr.update(), gr.update(), gr.update(), gr.update()
 
 
 def on_variant_finalize(label, payload):
@@ -443,10 +468,10 @@ def on_variant_keep_all(label, payload):
 
 def _finalize_variant(label, payload, keep_all):
     if not payload or not label:
-        raise gr.Error("没有可用的批量变体")
+        raise gr.Error(tr(_CUR_LANG, "没有可用的批量变体"))
     selected = next((v for v in payload if v["label"] == label), None)
     if not selected:
-        raise gr.Error("变体不存在")
+        raise gr.Error(tr(_CUR_LANG, "变体不存在"))
 
     history_mgr.set_status(selected["task_id"], "final")
     removed = 0
@@ -457,8 +482,12 @@ def _finalize_variant(label, payload, keep_all):
                 removed += 1
 
     h_rows, h_info, _ = refresh_history_full()
-    msg = f"🏆 已选定 **{label}** 为最终版"
-    msg += f"，已清理其余 {removed} 个变体" if removed else "，全部变体已保留"
+    lang = _CUR_LANG
+    msg = tr(lang, "🏆 已选定") + f" **{label}** " + tr(lang, "为最终版")
+    if removed:
+        msg += tr(lang, "，已清理其余") + f" {removed} " + tr(lang, "个变体")
+    else:
+        msg += tr(lang, "，全部变体已保留")
     if keep_all:
         return (
             msg, h_rows, h_info, 0,
@@ -477,8 +506,8 @@ def on_cancel():
     for task_id in task_ids:
         queue_manager.cancel_task_by_id(task_id)
     if task_ids:
-        return "正在取消..."
-    return "没有正在运行的任务"
+        return tr(_CUR_LANG, "正在取消...")
+    return tr(_CUR_LANG, "没有正在运行的任务")
 
 
 def on_resynthesize(
@@ -488,18 +517,20 @@ def on_resynthesize(
     progress=gr.Progress(track_tqdm=False),
 ):
     """Resynthesize with edited ABC score - submits to queue."""
+    lang = _CUR_LANG
     seed = seed if seed is not None else 831001
     cfg_scale = cfg_scale if cfg_scale is not None else 0
     num_inference_steps = num_inference_steps if num_inference_steps is not None else 8
 
     if not abc_text or not abc_text.strip():
-        raise gr.Error("ABC 乐谱不能为空")
+        raise gr.Error(tr(_CUR_LANG, "ABC 乐谱不能为空"))
 
     lyrics = strip_comment_lines(lyrics)
 
     task = queue_manager.submit(
         TaskType.GENERATION,
         _resynthesize_worker,
+        lang=lang,
         abc_text=abc_text, style=style, lyrics=lyrics, seed=seed,
         cfg_scale=cfg_scale, num_inference_steps=num_inference_steps, out_format=out_format,
         abc_temp=abc_temp, abc_top_p=abc_top_p, abc_top_k=abc_top_k,
@@ -520,17 +551,18 @@ def on_resynthesize(
 
             if status == TaskStatus.QUEUED:
                 pos = status_info["position"]
-                progress(0, desc=f"排队中... 前面还有 {pos - 1} 个任务")
+                queue_ahead = tr(lang, "前面还有 {n} 个任务").replace("{n}", str(pos - 1))
+                progress(0, desc=f"{tr(lang, '排队中...')} {queue_ahead}")
             elif status == TaskStatus.RUNNING:
                 running_time = status_info.get("running_time", 0)
-                progress(0, desc=f"重新合成中... ({running_time:.0f}s)")
+                progress(0, desc=f"{tr(lang, '重新合成中...')} ({running_time:.0f}s)")
             elif status == TaskStatus.COMPLETED:
                 break
             elif status == TaskStatus.FAILED:
-                error_msg = status_info.get("error", "未知错误")
-                raise gr.Error(f"重新合成失败: {error_msg}")
+                error_msg = status_info.get("error", tr(lang, "未知错误"))
+                raise gr.Error(f"{tr(lang, '重新合成失败')}: {error_msg}")
             elif status == TaskStatus.CANCELLED:
-                raise gr.Error("任务已取消")
+                raise gr.Error(tr(lang, "任务已取消"))
 
             for prog_val, desc in task.drain_progress():
                 progress(prog_val, desc=desc)
@@ -554,6 +586,7 @@ def _resynthesize_worker(
     _task, abc_text, style, lyrics, seed, cfg_scale, num_inference_steps, out_format,
     abc_temp, abc_top_p, abc_top_k, abc_rep_penalty, abc_pen_window, abc_min_tok, abc_max_tok,
     sem_temp, sem_top_p, sem_top_k, sem_rep_penalty, sem_pen_window, sem_min_tok, sem_max_tok,
+    lang="zh",
 ):
     """Worker function for resynthesis, runs in queue thread."""
 
@@ -578,7 +611,7 @@ def _resynthesize_worker(
         ),
     )
 
-    error = validate_params(params)
+    error = validate_params(params, lang=lang)
     if error:
         raise ValueError(error)
 
@@ -591,16 +624,16 @@ def _resynthesize_worker(
 
     def on_progress(p):
         phase_labels = {
-            "loading": "加载模型...",
-            "generating": "合成音乐...",
-            "synthesizing": "合成音频...",
-            "decoding": "解码音频...",
-            "done": "完成",
+            "loading": tr(lang, "加载模型..."),
+            "generating": tr(lang, "合成音乐..."),
+            "synthesizing": tr(lang, "合成音频..."),
+            "decoding": tr(lang, "解码音频..."),
+            "done": tr(lang, "完成"),
         }
-        label = phase_labels.get(p.get("phase", ""), "处理中...")
+        label = phase_labels.get(p.get("phase", ""), tr(lang, "处理中..."))
         _task.push_progress(0, label)
 
-    _task.push_progress(0, "开始重新合成...")
+    _task.push_progress(0, tr(lang, "开始重新合成..."))
 
     result = backend.generate(
         params=params,
@@ -611,14 +644,14 @@ def _resynthesize_worker(
 
     if result.success:
         format_label = FORMAT_LABELS.get(params.out_format.value, "PCM 16-bit")
-        duration_info = f"重新合成耗时 **{result.generation_time_seconds:.1f}s** | 音频时长 **{result.audio_duration_seconds:.1f}s** | {format_label}"
+        duration_info = f"{tr(lang, '重新合成耗时')} **{result.generation_time_seconds:.1f}s** | {tr(lang, '音频时长')} **{result.audio_duration_seconds:.1f}s** | {format_label}"
 
         record = HistoryRecord(
             task_id=task_id,
             created_at=datetime.now().isoformat(timespec="seconds"),
             style=params.style,
             lyrics=params.lyrics,
-            lyrics_preview="(重新合成)",
+            lyrics_preview=tr(lang, "重新合成"),
             cot="melody",
             seed=params.seed,
             cfg_scale=params.cfg_scale if params.cfg_scale is not None else 0,
@@ -632,37 +665,39 @@ def _resynthesize_worker(
             out_format=params.out_format.value,
         )
         history_mgr.append(record)
-        history_mgr.auto_prune(max_entries=100)
+        history_mgr.auto_prune()
 
         lyrics_file = output_dir / f"{output_dir.name}.txt"
         lyrics_file.write_text(params.lyrics, encoding="utf-8")
 
         abc_download = str(output_dir / f"{output_dir.name}.abc") if result.abc_score else None
         mp3_download = result.mp3_path
-        resynth_lyrics_data = f'<div class="gen-lyrics-data" style="display:none" data-lyrics=\'{json.dumps(params.lyrics, ensure_ascii=False)}\' data-duration="{result.audio_duration_seconds}"></div>'
+        resynth_lyrics_data = f'<div class="gen-lyrics-data" style="display:none" data-lyrics=\'{html.escape(json.dumps(params.lyrics, ensure_ascii=False), quote=True)}\' data-duration="{result.audio_duration_seconds}"></div>'
         return result.audio_path, duration_info, abc_download, mp3_download, resynth_lyrics_data
     else:
         if _task.cancel_event.is_set():
-            raise TaskCancelledError("任务已取消")
-        raise ValueError(f"重新合成失败：{result.error_message}")
+            raise TaskCancelledError(tr(lang, "任务已取消"))
+        raise ValueError(f"{tr(lang, '重新合成失败')}：{result.error_message}")
 
 
 def on_transcribe(audio_file, progress=gr.Progress(track_tqdm=False)):
     """Transcribe audio to ABC score using SheetSage2 - submits to queue."""
+    lang = _CUR_LANG
     if not audio_file:
-        raise gr.Error("请先上传音频文件")
+        raise gr.Error(tr(_CUR_LANG, "请先上传音频文件"))
     
     audio_path = Path(audio_file)
     if not audio_path.exists():
-        raise gr.Error("音频文件不存在")
+        raise gr.Error(tr(_CUR_LANG, "音频文件不存在"))
     
     supported_formats = {'.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac', '.wma'}
     if audio_path.suffix.lower() not in supported_formats:
-        raise gr.Error(f"不支持的音频格式：{audio_path.suffix}。支持的格式：{', '.join(sorted(supported_formats))}")
+        raise gr.Error(f"{tr(_CUR_LANG, '不支持的音频格式')}：{audio_path.suffix}。{tr(_CUR_LANG, '支持的格式')}：{', '.join(sorted(supported_formats))}")
     
     task = queue_manager.submit(
         TaskType.TRANSCRIPTION,
         _transcribe_worker,
+        lang=lang,
         audio_path=str(audio_path),
     )
     
@@ -676,17 +711,18 @@ def on_transcribe(audio_file, progress=gr.Progress(track_tqdm=False)):
 
             if status == TaskStatus.QUEUED:
                 pos = status_info["position"]
-                progress(0, desc=f"排队中... 前面还有 {pos - 1} 个任务")
+                queue_ahead = tr(lang, "前面还有 {n} 个任务").replace("{n}", str(pos - 1))
+                progress(0, desc=f"{tr(lang, '排队中...')} {queue_ahead}")
             elif status == TaskStatus.RUNNING:
                 running_time = status_info.get("running_time", 0)
-                progress(0, desc=f"转谱中... ({running_time:.0f}s)")
+                progress(0, desc=f"{tr(lang, '转谱中...')} ({running_time:.0f}s)")
             elif status == TaskStatus.COMPLETED:
                 break
             elif status == TaskStatus.FAILED:
-                error_msg = status_info.get("error", "未知错误")
-                raise gr.Error(f"转谱失败: {error_msg}")
+                error_msg = status_info.get("error", tr(lang, "未知错误"))
+                raise gr.Error(f"{tr(lang, '转谱失败')}: {error_msg}")
             elif status == TaskStatus.CANCELLED:
-                raise gr.Error("任务已取消")
+                raise gr.Error(tr(lang, "任务已取消"))
 
             for prog_val, desc in task.drain_progress():
                 progress(prog_val, desc=desc)
@@ -706,7 +742,7 @@ def on_transcribe(audio_file, progress=gr.Progress(track_tqdm=False)):
         _unregister_task("transcription", task.task_id)
 
 
-def _transcribe_worker(_task, audio_path):
+def _transcribe_worker(_task, audio_path, lang="zh"):
     """Worker function for transcription, runs in queue thread."""
     audio_path = Path(audio_path)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -722,20 +758,20 @@ def _transcribe_worker(_task, audio_path):
     if result.success:
         abc_score = result.abc_score or ""
         midi_path = result.midi_path
-        info = f"转谱耗时 **{result.transcription_time_seconds:.1f}s**"
+        info = f"{tr(lang, '转谱耗时')} **{result.transcription_time_seconds:.1f}s**"
         
         abc_file = output_dir / f"{output_dir.name}.abc"
         abc_file_path = str(abc_file.relative_to(WEBUI_ROOT)) if abc_file.exists() else ""
         
         return abc_score, info, abc_file_path, midi_path, task_id
     else:
-        raise ValueError(f"转谱失败：{result.error_message}")
+        raise ValueError(f"{tr(lang, '转谱失败')}：{result.error_message}")
 
 
 def on_send_to_generate(abc_text):
     """Send ABC score to generation tab via bridge."""
     if not abc_text or not abc_text.strip():
-        raise gr.Error("没有可发送的乐谱内容")
+        raise gr.Error(tr(_CUR_LANG, "没有可发送的乐谱内容"))
     return abc_text
 
 
@@ -804,13 +840,20 @@ def on_cot_change(cot_value):
 HISTORY_PAGE_SIZE = 10
 
 
+def _history_page_info_text(page, pages, total):
+    """按当前语言生成分页信息文案（整体句式，避免逐词翻译导致中英标点混杂）。"""
+    if _CUR_LANG == "en":
+        return f"Page {page} / {pages}, {total} entries"
+    return f"第 {page} / {pages} 页，共 {total} 条"
+
+
 def refresh_history():
     """Refresh history dataframe (first page)."""
     rows = history_mgr.to_dataframe_rows()
     page_rows = rows[:HISTORY_PAGE_SIZE]
     total = len(rows)
     pages = max(1, (total + HISTORY_PAGE_SIZE - 1) // HISTORY_PAGE_SIZE)
-    return page_rows, f"第 1 / {pages} 页，共 {total} 条"
+    return page_rows, _history_page_info_text(1, pages, total)
 
 
 def refresh_history_full():
@@ -827,7 +870,7 @@ def _get_history_page(page):
     page = max(0, min(int(page), pages - 1))
     start = page * HISTORY_PAGE_SIZE
     page_rows = rows[start:start + HISTORY_PAGE_SIZE]
-    return page_rows, f"第 {page + 1} / {pages} 页，共 {total} 条"
+    return page_rows, _history_page_info_text(page + 1, pages, total)
 
 
 def on_history_prev_page(current_page):
@@ -848,19 +891,20 @@ def _load_history_entry(row_index, current_state):
     """Load a history entry by row index. Returns state, audio, info, style, lyrics, abc, preview, lyrics_data, duration_data."""
     rows = history_mgr.to_dataframe_rows()
     if row_index < 0 or row_index >= len(rows):
-        return current_state, None, "请选择一条记录", "", "", "", "", "", ""
+        return current_state, None, tr(_CUR_LANG, "请选择一条记录"), "", "", "", "", "", ""
     task_id = rows[row_index][5]
     entry = history_mgr.get(task_id)
     if not entry:
-        return current_state, None, "记录不存在", "", "", "", "", "", ""
+        return current_state, None, tr(_CUR_LANG, "记录不存在"), "", "", "", "", "", ""
     audio_path = Path(entry.audio_path)
     abc_score = history_mgr.get_abc_score(task_id) or ""
     if audio_path.exists():
         lyrics = entry.lyrics or entry.lyrics_preview or ""
-        lyrics_data = f'<div class="history-lyrics-data" style="display:none" data-lyrics=\'{json.dumps(lyrics, ensure_ascii=False)}\' data-duration="{entry.audio_duration_seconds}"></div>'
+        _lyrics_json = html.escape(json.dumps(lyrics, ensure_ascii=False), quote=True)
+        lyrics_data = f'<div class="history-lyrics-data" style="display:none" data-lyrics=\'{_lyrics_json}\' data-duration="{entry.audio_duration_seconds}"></div>'
         abc_preview = '<div id="history-abc-preview-container" style="padding: 20px; border-radius: 8px; min-height: 200px;"><div id="history-abc-paper"></div><div id="history-abc-audio"></div></div>'
         return [task_id], str(audio_path), f"**{entry.task_id}**", entry.style, lyrics, abc_score, abc_preview, lyrics_data, f'<div class="history-duration-data" style="display:none" data-duration="{entry.audio_duration_seconds}"></div>'
-    return [task_id], None, "音频文件不存在", "", "", "", "", "", ""
+    return [task_id], None, tr(_CUR_LANG, "音频文件不存在"), "", "", "", "", "", ""
 
 
 def on_history_select(evt: gr.SelectData, current_state: list, current_page):
@@ -879,60 +923,62 @@ def on_history_delete(selected_state):
     """Delete the currently selected history entry."""
     if not selected_state:
         rows, info = refresh_history()
-        return rows, info, "请先点击选择要删除的记录", selected_state, 0
+        return rows, info, tr(_CUR_LANG, "请先点击选择要删除的记录"), selected_state, 0
     task_id = selected_state[0]
     if history_mgr.delete(task_id):
         rows, info = refresh_history()
-        return rows, info, f"已删除 {task_id}", [], 0
+        return rows, info, f"{tr(_CUR_LANG, '已删除')} {task_id}", [], 0
     rows, info = refresh_history()
-    return rows, info, "删除失败", selected_state, 0
+    return rows, info, tr(_CUR_LANG, "删除失败"), selected_state, 0
 
 
 def on_history_clear():
     """Clear all history."""
     history_mgr.clear()
     rows, info = refresh_history()
-    return rows, info, "已清空所有历史", [], 0
+    return rows, info, tr(_CUR_LANG, "已清空所有历史"), [], 0
 
 
 def on_check_models():
     """Check model files and return status."""
     checks = backend.check_models()
-    lines = ["### 模型状态\n"]
+    lang = _CUR_LANG
+    lines = [f"### {tr(lang, '模型状态')}\n"]
     if checks["available"]:
-        lines.append("✅ 所有模型文件就绪\n")
+        lines.append(f"{tr(lang, '✅ 所有模型文件就绪')}\n")
     else:
-        lines.append("❌ 模型文件缺失\n")
+        lines.append(f"{tr(lang, '❌ 模型文件缺失')}\n")
 
-    lines.append(f"- 主模型: {'✅' if checks['model_gguf']['exists'] else '❌'} `{checks['model_gguf']['path']}`")
+    lines.append(f"- {tr(lang, '主模型')}: {'✅' if checks['model_gguf']['exists'] else '❌'} `{checks['model_gguf']['path']}`")
     lines.append(f"- VAE: {'✅' if checks['vae_gguf']['exists'] else '❌'} `{checks['vae_gguf']['path']}`")
 
     sheetsage2 = backend.check_sheetsage2()
     ss_icon = "✅" if sheetsage2["exists"] else "❌"
-    ss_state = "就绪" if sheetsage2["exists"] else "缺失"
-    lines.append(f"- SheetSage2 (转谱): {ss_icon} {ss_state} `{sheetsage2['model_path']}`")
+    ss_state = tr(lang, "就绪") if sheetsage2["exists"] else tr(lang, "缺失")
+    lines.append(f"- SheetSage2 ({tr(lang, '转谱')}): {ss_icon} {ss_state} `{sheetsage2['model_path']}`")
 
     try:
         import torch
         if torch.cuda.is_available():
             gpu_name = torch.cuda.get_device_name(0)
             vram = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-            lines.append(f"\n### GPU 信息\n- 设备: {gpu_name}\n- 显存: {vram:.1f} GB")
+            lines.append(f"\n### {tr(lang, 'GPU 信息')}\n- {tr(lang, '设备')}: {gpu_name}\n- {tr(lang, '显存')}: {vram:.1f} GB")
         else:
-            lines.append("\n⚠️ CUDA 不可用")
+            lines.append(f"\n⚠️ {tr(lang, 'CUDA 不可用')}")
     except ImportError:
-        lines.append("\n⚠️ PyTorch 未安装")
+        lines.append(f"\n⚠️ {tr(lang, 'PyTorch 未安装')}")
 
     total, used, free = shutil.disk_usage(str(PROJECT_ROOT))
-    lines.append(f"\n### 磁盘\n- 剩余: {free / (1024**3):.1f} GB / {total / (1024**3):.1f} GB")
+    lines.append(f"\n### {tr(lang, '磁盘')}\n- {tr(lang, '剩余')}: {free / (1024**3):.1f} GB / {total / (1024**3):.1f} GB")
 
     return "\n".join(lines)
 
 
 def on_lyrics_change(lyrics):
     """Return structure analysis HTML when lyrics change."""
+    lang = _CUR_LANG
     if not lyrics or not lyrics.strip():
-        return '<div id="lyrics-structure" style="padding: 8px; color: #888;">输入歌词后显示结构分析</div>'
+        return '<div id="lyrics-structure" style="padding: 8px; color: #888;">' + tr(lang, "输入歌词后显示结构分析") + '</div>'
 
     segments = []
     current = {"name": "Intro", "lines": []}
@@ -955,7 +1001,7 @@ def on_lyrics_change(lyrics):
     }
 
     html = '<div id="lyrics-structure" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:8px;">'
-    html += '<span style="color:#888;font-size:12px;margin-right:4px;">结构:</span>'
+    html += f'<span style="color:#888;font-size:12px;margin-right:4px;">{tr(lang, "结构:")}</span>'
     for seg in segments:
         name_lower = seg["name"].lower().replace(" ", "-")
         color = colors.get(name_lower, "#666")
@@ -964,7 +1010,7 @@ def on_lyrics_change(lyrics):
             f'<span style="background:{color};color:white;padding:3px 10px;'
             f'border-radius:12px;font-size:12px;white-space:nowrap;">'
             f'{seg["name"]}'
-            f'<span style="opacity:0.7;margin-left:4px;">({line_count}行)</span>'
+            f'<span style="opacity:0.7;margin-left:4px;">({line_count}{tr(lang, "行")})</span>'
             f'</span>'
         )
     html += "</div>"
@@ -976,16 +1022,31 @@ def on_lyrics_change(lyrics):
     est_sec = est_seconds % 60
 
     html += '<div style="padding:4px 8px;font-size:12px;color:#888;">'
-    html += f"{len(segments)} 个段落 | {total_lines} 行歌词 | {char_count} 字符"
-    html += f' | 预估时长 ~{est_min}:{est_sec:02d}'
+    html += f"{len(segments)} {tr(lang, '个段落')} | {total_lines} {tr(lang, '行歌词')} | {char_count} {tr(lang, '字符')}"
+    html += f' | {tr(lang, "预估时长")} ~{est_min}:{est_sec:02d}'
     html += "</div>"
 
     return html
 
 
+def _preset_display_names(lang: str) -> list:
+    """预设下拉框显示名：内置预设名按语言翻译，用户自定义预设保持文件名原样。"""
+    names = [tr(lang, k) for k in BUILTIN_PRESETS]
+    user_dir = WEBUI_ROOT / "presets"
+    if user_dir.exists():
+        names += [p.stem for p in sorted(user_dir.glob("*.json"))]
+    return names
+
+
 def on_preset_load(name):
     """Load a preset and return param values."""
     preset = BUILTIN_PRESETS.get(name)
+    if not preset:
+        # 英文界面下选中翻译名（如 Default）时，反查回中文内置键
+        for k in BUILTIN_PRESETS:
+            if tr(_CUR_LANG, k) == name:
+                preset = BUILTIN_PRESETS[k]
+                break
     if not preset:
         preset_path = WEBUI_ROOT / "presets" / f"{name}.json"
         if preset_path.exists():
@@ -1019,7 +1080,7 @@ def on_preset_save(name, cot, steps, out_format, abc_temp, abc_top_p, abc_top_k,
                     sem_temp, sem_top_p, sem_top_k, sem_rep, sem_pen, sem_min, sem_max):
     """Save current params as a preset."""
     if not name or not name.strip():
-        return "请输入预设名称"
+        return tr(_CUR_LANG, "请输入预设名称")
     presets_dir = WEBUI_ROOT / "presets"
     presets_dir.mkdir(exist_ok=True)
     preset = {
@@ -1036,30 +1097,139 @@ def on_preset_save(name, cot, steps, out_format, abc_temp, abc_top_p, abc_top_k,
     }
     path = presets_dir / f"{name.strip()}.json"
     path.write_text(json.dumps(preset, ensure_ascii=False, indent=2), encoding="utf-8")
-    return f"已保存预设: {name}"
+    return f"{tr(_CUR_LANG, '已保存预设')}: {name}"
+
+
+# 标题行紧凑样式：语言下拉框伪装为原生控件（无组件外框），配色用主题变量自动适配明暗
+# 关键点：Gradio 给 .block 设了 width:100%，而 flex-basis:auto 会回退读 width，
+# 因此必须显式 width:auto 才能让 hint/dd 按内容收缩，否则各自撑满整行换行堆叠。
+_TITLE_ROW_CSS = """
+#title-row { align-items: center; gap: 8px; }
+#lang-hint { width: auto; display: flex; align-items: center; margin: 0; flex: 0 0 auto; }
+#lang-hint label { font-size: 13px; color: var(--body-text-color); opacity: .75; white-space: nowrap; }
+#lang-dd { width: auto; flex: 0 0 auto; margin: 0; }
+#lang-dd > div { display: flex; align-items: center; height: 26px; }
+#lang-dd .wrap { border: 1px solid var(--border-color-primary); border-radius: 6px; background: var(--background-fill-primary); box-shadow: none; min-height: 26px; padding: 0 2px 0 8px; }
+#lang-dd .wrap-inner, #lang-dd .secondary-wrap { min-height: 24px; }
+#lang-dd input { font-size: 12px; min-height: 24px; height: 24px; width: 80px; }
+#lang-dd .icon-wrap { padding: 0 4px; }
+#lang-dd .icon-wrap svg { width: 12px; height: 12px; }
+#lang-signal { display: none; }
+"""
+
+# Gradio 内置文案（上传组件"将音频拖放到此处/点击上传"、页脚等）跟随浏览器 locale，
+# 后端无参数可控制。此处通过隐藏信号组件 #lang-signal（值=zh/en，CSS display:none
+# 隐藏而非 visible=False——后者不渲染 DOM，前端将无法监听）+ 本脚本联动：
+# 轮询等待信号组件渲染 -> 调用 Gradio 前端内部 changeLocale 切换其内置文案语言。
+# core-*.js 文件名带构建 hash，运行时从 <script> 标签或 performance 资源记录动态
+# 获取（Gradio 模块多为动态 import，不一定存在于 script 标签），避免硬编码。
+_LOCALE_SYNC_JS = """
+(function () {
+    var GRADIO_LOCALE = { zh: "zh-CN", en: "en" };
+    function findCoreModuleUrl() {
+        var s = document.querySelector('script[src*="/core-"]');
+        if (s) return s.src;
+        var res = performance.getEntriesByType('resource').map(function (e) { return e.name; });
+        for (var i = 0; i < res.length; i++) {
+            if (/\\/core-[^/]+\\.js$/.test(res[i])) return res[i];
+        }
+        return null;
+    }
+    function applyGradioLocale(node) {
+        var lang = (node.textContent || "").trim();
+        var locale = GRADIO_LOCALE[lang];
+        if (!locale) return;
+        var coreUrl = findCoreModuleUrl();
+        if (!coreUrl) return;
+        import(coreUrl).then(function (m) {
+            if (m && m.changeLocale) m.changeLocale(locale);
+        }).catch(function () {});
+    }
+    // 轮询等待信号组件渲染（最长约 30 秒），出现后先做初始同步，再持续监听语言变化
+    var tries = 0;
+    var timer = setInterval(function () {
+        var node = document.querySelector("#lang-signal");
+        tries += 1;
+        if (node) {
+            clearInterval(timer);
+            applyGradioLocale(node);
+            new MutationObserver(function () { applyGradioLocale(node); })
+                .observe(node, { childList: true, characterData: true, subtree: true });
+        } else if (tries > 150) {
+            clearInterval(timer);
+        }
+    }, 200);
+})();
+"""
 
 
 def build_ui():
     """Build the Gradio UI."""
     with gr.Blocks(title="YuE2 Music Studio") as demo:
-        gr.Markdown("# YuE2 Music Studio")
-        gr.Markdown("AI音乐创作 — 输入歌词和风格，生成完整歌曲")
+
+        def _t(s: str) -> str:
+            """按当前界面语言翻译单条文案（zh 直接返回原文）。"""
+            return tr(_CUR_LANG, s)
+
+        # 标题行：主标题+副标题 Markdown，右侧原生风格 "Lang/语言" 说明 + 紧凑下拉框
+        with gr.Row(elem_id="title-row"):
+            title_md = gr.Markdown("### YuE2 Music Studio · " + _t("AI音乐创作 — 输入歌词和风格，生成完整歌曲"))
+            # 说明文字用原生 HTML label（无 Gradio block 底色）
+            gr.HTML('<label>Lang/语言</label>', elem_id="lang-hint", container=False)
+            lang_select = gr.Dropdown(
+                choices=["中文", "English"], value="中文",
+                show_label=False, container=False,
+                elem_id="lang-dd", scale=0, min_width=90,
+            )
+        # 语言即时切换控件：下拉框选择中文/English，State 保存归一化语言标识。
+        # translatables/_updaters 一一对应（同一组件各占一位），保证 apply_lang
+        # 返回值数量与 outputs=[lang_state]+translatables 完全一致。
+        lang_state = gr.State("zh")
+        translatables: list = []
+        _updaters: list = []
+
+        def _reg(comp, updater):
+            """注册一个可切换语言组件：comp 进 outputs，updater 生成对应 gr.update。"""
+            translatables.append(comp)
+            _updaters.append(updater)
+
+        def apply_lang(lang):
+            """语言切换回调：全局更新 _CUR_LANG 并为每个 translatable 生成 gr.update。"""
+            global _CUR_LANG
+            nlang = normalize_lang(lang)
+            _CUR_LANG = nlang
+            return [nlang] + [u(nlang) for u in _updaters]
+
+        _reg(title_md, lambda lang: gr.update(value="### YuE2 Music Studio · " + tr(lang, "AI音乐创作 — 输入歌词和风格，生成完整歌曲")))
+
+        # 语言信号组件（CSS display:none 隐藏，visible=False 不渲染 DOM 会导致前端无法监听）：
+        # 值=当前语言(zh/en)。前端 _LOCALE_SYNC_JS 脚本监听其变化并调用 Gradio 内部
+        # changeLocale，同步上传组件/页脚等 Gradio 内置文案语言。
+        lang_signal = gr.HTML(value=_CUR_LANG, elem_id="lang-signal")
+        _reg(lang_signal, lambda lang: gr.update(value=lang))
 
         with gr.Tabs():
-            with gr.Tab("创作"):
+            tab_create = gr.Tab(_t("创作"))
+            _reg(tab_create, lambda lang: gr.update(label=tr(lang, "创作")))
+            with tab_create:
                 with gr.Row():
                     with gr.Column(scale=1):
                         style_input = gr.Textbox(
-                            label="风格描述",
+                            label=_t("风格描述"),
                             placeholder="English, warm piano pop, expressive female voice, acoustic piano, 88 BPM",
                             lines=2,
-                            info="语言 + 流派 + 乐器 + 人声 + 速度",
+                            info=_t("语言 + 流派 + 乐器 + 人声 + 速度"),
                         )
+                        _reg(style_input, lambda lang: gr.update(label=tr(lang, "风格描述"), info=tr(lang, "语言 + 流派 + 乐器 + 人声 + 速度")))
                         with gr.Row(elem_classes="last-btn-row"):
-                            last_style_btn = gr.Button("使用上一次", size="sm", scale=0, min_width=110)
+                            last_style_btn = gr.Button(_t("使用上一次"), size="sm", scale=0, min_width=110)
+                            _reg(last_style_btn, lambda lang: gr.update(value=tr(lang, "使用上一次")))
 
-                        with gr.Accordion("风格标签", open=False):
-                            gr.Markdown("#### 风格快捷标签")
+                        style_tag_acc = gr.Accordion(_t("风格标签"), open=False)
+                        _reg(style_tag_acc, lambda lang: gr.update(label=tr(lang, "风格标签")))
+                        with style_tag_acc:
+                            quick_tags_md = gr.Markdown(_t("#### 风格快捷标签"))
+                            _reg(quick_tags_md, lambda lang: gr.update(value=tr(lang, "#### 风格快捷标签")))
                             preset_names = list(STYLE_PRESETS.keys())
                             half = len(preset_names) // 2
                             with gr.Row():
@@ -1071,7 +1241,9 @@ def build_ui():
                                     btn = gr.Button(name, size="sm")
                                     btn.click(fn=lambda n=name: on_style_preset(n), outputs=style_input)
 
-                            with gr.Accordion("人声标签", open=False):
+                            vocal_acc = gr.Accordion(_t("人声标签"), open=False)
+                            _reg(vocal_acc, lambda lang: gr.update(label=tr(lang, "人声标签")))
+                            with vocal_acc:
                                 vocal_names = list(VOCAL_PRESETS.keys())
                                 half_vocal = len(vocal_names) // 2
                                 with gr.Row():
@@ -1083,7 +1255,9 @@ def build_ui():
                                         btn = gr.Button(name, size="sm")
                                         btn.click(fn=lambda current, n=name: on_vocal_preset(current, n), inputs=style_input, outputs=style_input)
 
-                            with gr.Accordion("乐器标签", open=False):
+                            inst_acc = gr.Accordion(_t("乐器标签"), open=False)
+                            _reg(inst_acc, lambda lang: gr.update(label=tr(lang, "乐器标签")))
+                            with inst_acc:
                                 inst_names = list(INSTRUMENT_PRESETS.keys())
                                 half_inst = len(inst_names) // 2
                                 with gr.Row():
@@ -1095,7 +1269,9 @@ def build_ui():
                                         btn = gr.Button(name, size="sm")
                                         btn.click(fn=lambda current, n=name: on_instrument_preset(current, n), inputs=style_input, outputs=style_input)
 
-                            with gr.Accordion("情绪标签", open=False):
+                            mood_acc = gr.Accordion(_t("情绪标签"), open=False)
+                            _reg(mood_acc, lambda lang: gr.update(label=tr(lang, "情绪标签")))
+                            with mood_acc:
                                 mood_names = list(MOOD_PRESETS.keys())
                                 half_mood = len(mood_names) // 2
                                 with gr.Row():
@@ -1107,7 +1283,9 @@ def build_ui():
                                         btn = gr.Button(name, size="sm")
                                         btn.click(fn=lambda current, n=name: on_mood_preset(current, n), inputs=style_input, outputs=style_input)
 
-                            with gr.Accordion("语言标签", open=False):
+                            lang_tag_acc = gr.Accordion(_t("语言标签"), open=False)
+                            _reg(lang_tag_acc, lambda lang: gr.update(label=tr(lang, "语言标签")))
+                            with lang_tag_acc:
                                 lang_names = list(LANGUAGE_PRESETS.keys())
                                 half_lang = len(lang_names) // 2
                                 with gr.Row():
@@ -1119,7 +1297,9 @@ def build_ui():
                                         btn = gr.Button(name, size="sm")
                                         btn.click(fn=lambda current, n=name: on_language_preset(current, n), inputs=style_input, outputs=style_input)
 
-                            with gr.Accordion("流派标签", open=False):
+                            genre_acc = gr.Accordion(_t("流派标签"), open=False)
+                            _reg(genre_acc, lambda lang: gr.update(label=tr(lang, "流派标签")))
+                            with genre_acc:
                                 genre_names = list(GENRE_PRESETS.keys())
                                 half_genre = len(genre_names) // 2
                                 with gr.Row():
@@ -1132,15 +1312,19 @@ def build_ui():
                                         btn.click(fn=lambda current, n=name: on_genre_preset(current, n), inputs=style_input, outputs=style_input)
 
                         lyrics_input = gr.Textbox(
-                            label="歌词",
-                            placeholder="[Verse]\n在这里输入歌词...\n\n[Chorus]\n副歌歌词...",
+                            label=_t("歌词"),
+                            placeholder=f"[Verse]\n{_t('在这里输入歌词...')}\n\n[Chorus]\n{_t('副歌歌词...')}",
                             lines=10,
-                            info="支持 [Verse] [Chorus] [Bridge] 段落标记，可拖拽排序",
+                            info=_t("支持 [Verse] [Chorus] [Bridge] 段落标记，可拖拽排序"),
                         )
+                        _reg(lyrics_input, lambda lang: gr.update(label=tr(lang, "歌词"), placeholder=f"[Verse]\n{tr(lang, '在这里输入歌词...')}\n\n[Chorus]\n{tr(lang, '副歌歌词...')}", info=tr(lang, "支持 [Verse] [Chorus] [Bridge] 段落标记，可拖拽排序")))
                         with gr.Row(elem_classes="last-btn-row"):
-                            last_lyrics_btn = gr.Button("使用上一次", size="sm", scale=0, min_width=110)
+                            last_lyrics_btn = gr.Button(_t("使用上一次"), size="sm", scale=0, min_width=110)
+                            _reg(last_lyrics_btn, lambda lang: gr.update(value=tr(lang, "使用上一次")))
 
-                        with gr.Accordion("歌词工具", open=False):
+                        lyrics_tools_acc = gr.Accordion(_t("歌词工具"), open=False)
+                        _reg(lyrics_tools_acc, lambda lang: gr.update(label=tr(lang, "歌词工具")))
+                        with lyrics_tools_acc:
                             with gr.Row():
                                 gr.Button("+ Verse", size="sm")
                                 gr.Button("+ Chorus", size="sm")
@@ -1149,20 +1333,26 @@ def build_ui():
                                 gr.Button("+ Outro", size="sm")
                                 gr.Button("+ Pre-Chorus", size="sm")
 
-                            gr.Markdown(
-                                "#### 段落标记说明\n"
-                                "| 标记 | 用途 |\n"
-                                "| --- | --- |\n"
-                                "| [Intro] | 前奏/器乐引入 |\n"
-                                "| [Verse] | 主歌段落 |\n"
-                                "| [Pre-Chorus] | 预副歌，制造期待感 |\n"
-                                "| [Chorus] | 副歌，全曲最抓耳的部分 |\n"
-                                "| [Bridge] | 桥段，打破重复，情感转折 |\n"
-                                "| [Outro] | 尾声/渐弱收尾 |\n\n"
-                                "注释行：以 `//` 或 `**` 开头的行视为注释，不会送入模型生成。"
-                            )
+                            # 段落标记说明表格：按语言组装，切语言时由 _reg 重新生成
+                            def _section_notes_md(t):
+                                return (
+                                    f"{t('#### 段落标记说明')}\n"
+                                    f"| {t('标记')} | {t('用途')} |\n"
+                                    "| --- | --- |\n"
+                                    f"| [Intro] | {t('前奏/器乐引入')} |\n"
+                                    f"| [Verse] | {t('主歌段落')} |\n"
+                                    f"| [Pre-Chorus] | {t('预副歌，制造期待感')} |\n"
+                                    f"| [Chorus] | {t('副歌，全曲最抓耳的部分')} |\n"
+                                    f"| [Bridge] | {t('桥段，打破重复，情感转折')} |\n"
+                                    f"| [Outro] | {t('尾声/渐弱收尾')} |\n\n"
+                                    f"{t('注释行：以 `//` 或 `**` 开头的行视为注释，不会送入模型生成。')}"
+                                )
 
-                            gr.Markdown("#### 歌曲结构模板")
+                            section_notes_md = gr.Markdown(_section_notes_md(_t))
+                            _reg(section_notes_md, lambda lang: gr.update(value=_section_notes_md(lambda k: tr(lang, k))))
+
+                            structure_tpl_md = gr.Markdown(_t("#### 歌曲结构模板"))
+                            _reg(structure_tpl_md, lambda lang: gr.update(value=tr(lang, "#### 歌曲结构模板")))
                             with gr.Row():
                                 gr.Button("Verse-Chorus", size="sm")
                                 gr.Button("V-C-V-C", size="sm")
@@ -1171,42 +1361,48 @@ def build_ui():
                                 gr.Button("A-A-B-A", size="sm")
 
                             segment_cards = gr.HTML(
-                                label="段落拖拽排序",
+                                label=_t("段落拖拽排序"),
                                 value='<div id="segment-cards" style="padding:4px 0;"></div>',
                             )
                             structure_analysis = gr.HTML(
-                                label="结构分析",
-                                value='<div id="lyrics-structure" style="padding:4px 8px;color:#888;">输入歌词后显示结构分析</div>',
+                                label=_t("结构分析"),
+                                value=f'<div id="lyrics-structure" style="padding:4px 8px;color:#888;">{_t("输入歌词后显示结构分析")}</div>',
                             )
+                            _reg(structure_analysis, lambda lang: gr.update(value=f'<div id="lyrics-structure" style="padding:4px 8px;color:#888;">{tr(lang, "输入歌词后显示结构分析")}</div>'))
 
                             template_dropdown = gr.Dropdown(
-                                label="歌词模板 (内容)",
+                                label=_t("歌词模板 (内容)"),
                                 choices=list(LYRICS_TEMPLATES.keys()),
                                 value=None,
-                                info="选择模板将填充歌词内容（覆盖现有内容）",
+                                info=_t("选择模板将填充歌词内容（覆盖现有内容）"),
                             )
+                            _reg(template_dropdown, lambda lang: gr.update(label=tr(lang, "歌词模板 (内容)"), info=tr(lang, "选择模板将填充歌词内容（覆盖现有内容）")))
                             template_dropdown.change(fn=on_lyrics_template, inputs=template_dropdown, outputs=lyrics_input)
 
-                        gr.Markdown("### 工作模式")
+                        workmode_md = gr.Markdown(_t("### 工作模式"))
+                        _reg(workmode_md, lambda lang: gr.update(value=tr(lang, "### 工作模式")))
                         cot_input = gr.Radio(
-                            label="Mode",
+                            label=_t("模式"),
                             choices=[
-                                ("完整创作 (生成乐谱+和弦)", "full"),
-                                ("旋律创作 (仅旋律，适合翻唱)", "melody"),
-                                ("直接生成 (跳过乐谱，最快)", "off"),
+                                (_t("完整创作 (生成乐谱+和弦)"), "full"),
+                                (_t("旋律创作 (仅旋律，适合翻唱)"), "melody"),
+                                (_t("直接生成 (跳过乐谱，最快)"), "off"),
                             ],
                             value="full",
                         )
+                        _reg(cot_input, lambda lang: gr.update(label=tr(lang, "模式"), choices=[(tr(lang, "完整创作 (生成乐谱+和弦)"), "full"), (tr(lang, "旋律创作 (仅旋律，适合翻唱)"), "melody"), (tr(lang, "直接生成 (跳过乐谱，最快)"), "off")]))
 
                         abc_input = gr.Textbox(
-                            label="ABC 乐谱 (外部输入)",
+                            label=_t("ABC 乐谱 (外部输入)"),
                             placeholder="X:1\nM:4/4\nL:1/16\nK:C\n...",
                             lines=8,
                             visible=True,
-                            info="提供外部ABC乐谱文本。仅在 full/melody 模式下生效。留空则自动生成。",
+                            info=_t("提供外部ABC乐谱文本。仅在 full/melody 模式下生效。留空则自动生成。"),
                         )
+                        _reg(abc_input, lambda lang: gr.update(label=tr(lang, "ABC 乐谱 (外部输入)"), info=tr(lang, "提供外部ABC乐谱文本。仅在 full/melody 模式下生效。留空则自动生成。")))
                         with gr.Row(elem_classes="last-btn-row"):
-                            last_abc_btn = gr.Button("使用上一次", size="sm", scale=0, min_width=110)
+                            last_abc_btn = gr.Button(_t("使用上一次"), size="sm", scale=0, min_width=110)
+                            _reg(last_abc_btn, lambda lang: gr.update(value=tr(lang, "使用上一次")))
                         cot_input.change(fn=on_cot_change, inputs=cot_input, outputs=[abc_input, last_abc_btn])
 
                         last_style_btn.click(fn=lambda cur: on_restore_last("style", cur), inputs=style_input, outputs=style_input)
@@ -1214,148 +1410,216 @@ def build_ui():
                         last_abc_btn.click(fn=lambda cur: on_restore_last("abc", cur), inputs=abc_input, outputs=abc_input)
 
                         with gr.Row():
-                            seed_input = gr.Number(label="随机种子", value=831001, precision=0, info="勾选「随机种子变化」时每次生成自动换新，此处显示实际使用的种子")
-                            random_seed_btn = gr.Button("🎲 随机", size="sm")
-                        random_seed_checkbox = gr.Checkbox(label="随机种子变化", value=True, info="勾选: 每次点击「生成歌曲」自动换新种子; 取消勾选: 使用上方固定种子")
+                            seed_input = gr.Number(label=_t("随机种子"), value=831001, precision=0, info=_t("勾选「随机种子变化」时每次生成自动换新，此处显示实际使用的种子"))
+                            _reg(seed_input, lambda lang: gr.update(label=tr(lang, "随机种子"), info=tr(lang, "勾选「随机种子变化」时每次生成自动换新，此处显示实际使用的种子")))
+                            random_seed_btn = gr.Button(_t("🎲 随机"), size="sm")
+                            _reg(random_seed_btn, lambda lang: gr.update(value=tr(lang, "🎲 随机")))
+                        random_seed_checkbox = gr.Checkbox(label=_t("随机种子变化"), value=True, info=_t("勾选: 每次点击「生成歌曲」自动换新种子; 取消勾选: 使用上方固定种子"))
+                        _reg(random_seed_checkbox, lambda lang: gr.update(label=tr(lang, "随机种子变化"), info=tr(lang, "勾选: 每次点击「生成歌曲」自动换新种子; 取消勾选: 使用上方固定种子")))
 
                         cfg_input = gr.Slider(
-                            label="CFG 引导强度",
+                            label=_t("CFG 引导强度"),
                             minimum=0, maximum=20, step=0.1, value=0,
-                            info="0=Auto (off模式=1.01, 其他=1.0)",
+                            info=_t("0=Auto (off模式=1.01, 其他=1.0)"),
                         )
+                        _reg(cfg_input, lambda lang: gr.update(label=tr(lang, "CFG 引导强度"), info=tr(lang, "0=Auto (off模式=1.01, 其他=1.0)")))
 
                         steps_input = gr.Slider(
-                            label="ODE 求解步数",
+                            label=_t("ODE 求解步数"),
                             minimum=1, maximum=64, step=1, value=8,
-                            info="8=快速, 16=标准, 32=高质量",
+                            info=_t("8=快速, 16=标准, 32=高质量"),
                         )
+                        _reg(steps_input, lambda lang: gr.update(label=tr(lang, "ODE 求解步数"), info=tr(lang, "8=快速, 16=标准, 32=高质量")))
 
                         out_format_input = gr.Dropdown(
-                            label="输出格式",
+                            label=_t("输出格式"),
                             choices=[
-                                ("PCM 16-bit (标准)", "pcm16"),
-                                ("PCM 24-bit (高动态)", "pcm24"),
-                                ("Float 32-bit (最大动态)", "float32"),
+                                (_t("PCM 16-bit (标准)"), "pcm16"),
+                                (_t("PCM 24-bit (高动态)"), "pcm24"),
+                                (_t("Float 32-bit (最大动态)"), "float32"),
                             ],
                             value="pcm16",
-                            info="PCM16=标准质量, PCM24=更高动态范围, Float32=最大动态范围(文件更大)",
+                            info=_t("PCM16=标准质量, PCM24=更高动态范围, Float32=最大动态范围(文件更大)"),
                         )
+                        _reg(out_format_input, lambda lang: gr.update(label=tr(lang, "输出格式"), choices=[(tr(lang, "PCM 16-bit (标准)"), "pcm16"), (tr(lang, "PCM 24-bit (高动态)"), "pcm24"), (tr(lang, "Float 32-bit (最大动态)"), "float32")], info=tr(lang, "PCM16=标准质量, PCM24=更高动态范围, Float32=最大动态范围(文件更大)")))
 
                         batch_count_input = gr.Slider(
-                            label="批量生成数量",
+                            label=_t("批量生成数量"),
                             minimum=1, maximum=10, step=1, value=1,
-                            info="一次生成多个变体 (每个变体使用独立随机种子)",
+                            info=_t("一次生成多个变体 (每个变体使用独立随机种子)"),
                         )
+                        _reg(batch_count_input, lambda lang: gr.update(label=tr(lang, "批量生成数量"), info=tr(lang, "一次生成多个变体 (每个变体使用独立随机种子)")))
 
-                        with gr.Accordion("音频后处理", open=False):
-                            gr.Markdown("#### 后处理选项")
+                        postprocess_acc = gr.Accordion(_t("音频后处理"), open=False)
+                        _reg(postprocess_acc, lambda lang: gr.update(label=tr(lang, "音频后处理")))
+                        with postprocess_acc:
+                            postopt_md = gr.Markdown(_t("#### 后处理选项"))
+                            _reg(postopt_md, lambda lang: gr.update(value=tr(lang, "#### 后处理选项")))
                             with gr.Row():
-                                normalize_checkbox = gr.Checkbox(label="音量标准化", value=True, info="归一化到 -1dB")
-                                fade_checkbox = gr.Checkbox(label="淡入淡出", value=True, info="首尾各 0.5 秒")
-                                trim_checkbox = gr.Checkbox(label="裁剪静音", value=False, info="移除首尾静音 (< -40dB)")
+                                normalize_checkbox = gr.Checkbox(label=_t("音量标准化"), value=True, info=_t("归一化到 -1dB"))
+                                _reg(normalize_checkbox, lambda lang: gr.update(label=tr(lang, "音量标准化"), info=tr(lang, "归一化到 -1dB")))
+                                fade_checkbox = gr.Checkbox(label=_t("淡入淡出"), value=True, info=_t("首尾各 0.5 秒"))
+                                _reg(fade_checkbox, lambda lang: gr.update(label=tr(lang, "淡入淡出"), info=tr(lang, "首尾各 0.5 秒")))
+                                trim_checkbox = gr.Checkbox(label=_t("裁剪静音"), value=False, info=_t("移除首尾静音 (< -40dB)"))
+                                _reg(trim_checkbox, lambda lang: gr.update(label=tr(lang, "裁剪静音"), info=tr(lang, "移除首尾静音 (< -40dB)")))
                             with gr.Row():
-                                metadata_checkbox = gr.Checkbox(label="嵌入元数据", value=True, info="标题/风格/种子")
+                                metadata_checkbox = gr.Checkbox(label=_t("嵌入元数据"), value=True, info=_t("标题/风格/种子"))
+                                _reg(metadata_checkbox, lambda lang: gr.update(label=tr(lang, "嵌入元数据"), info=tr(lang, "标题/风格/种子")))
 
-                        with gr.Accordion("高级采样参数", open=True):
-                            gr.Markdown("#### ABC 乐谱采样 (Stage 1)")
+                        advanced_acc = gr.Accordion(_t("高级采样参数"), open=True)
+                        _reg(advanced_acc, lambda lang: gr.update(label=tr(lang, "高级采样参数")))
+                        with advanced_acc:
+                            abc_stage1_md = gr.Markdown(_t("#### ABC 乐谱采样 (Stage 1)"))
+                            _reg(abc_stage1_md, lambda lang: gr.update(value=tr(lang, "#### ABC 乐谱采样 (Stage 1)")))
                             with gr.Row():
-                                abc_temp_input = gr.Slider(label="ABC 温度", minimum=0, maximum=5, step=0.1, value=0.7)
+                                abc_temp_input = gr.Slider(label=_t("ABC 温度"), minimum=0, maximum=5, step=0.1, value=0.7)
                                 abc_top_p_input = gr.Slider(label="ABC Top-P", minimum=0, maximum=1, step=0.01, value=0.9)
                                 abc_top_k_input = gr.Slider(label="ABC Top-K", minimum=1, maximum=500, step=1, value=30)
                             with gr.Row():
-                                abc_rep_input = gr.Slider(label="ABC 重复惩罚", minimum=0.001, maximum=3, step=0.001, value=1.005)
-                                abc_pen_window_input = gr.Slider(label="ABC 惩罚窗口", minimum=1, maximum=100, step=1, value=100)
+                                abc_rep_input = gr.Slider(label=_t("ABC 重复惩罚"), minimum=0.001, maximum=3, step=0.001, value=1.005)
+                                abc_pen_window_input = gr.Slider(label=_t("ABC 惩罚窗口"), minimum=1, maximum=100, step=1, value=100)
                             with gr.Row():
                                 abc_min_tok_input = gr.Slider(label="ABC Min Tokens", minimum=0, maximum=8192, step=1, value=32)
                                 abc_max_tok_input = gr.Slider(label="ABC Max Tokens", minimum=1, maximum=8192, step=1, value=4096)
+                            _reg(abc_temp_input, lambda lang: gr.update(label=tr(lang, "ABC 温度")))
+                            _reg(abc_rep_input, lambda lang: gr.update(label=tr(lang, "ABC 重复惩罚")))
+                            _reg(abc_pen_window_input, lambda lang: gr.update(label=tr(lang, "ABC 惩罚窗口")))
 
-                            gr.Markdown("#### 语义 Token 采样 (Stage 2)")
+                            sem_stage2_md = gr.Markdown(_t("#### 语义 Token 采样 (Stage 2)"))
+                            _reg(sem_stage2_md, lambda lang: gr.update(value=tr(lang, "#### 语义 Token 采样 (Stage 2)")))
                             with gr.Row():
-                                sem_temp_input = gr.Slider(label="语义 温度", minimum=0, maximum=5, step=0.1, value=1.0)
-                                sem_top_p_input = gr.Slider(label="语义 Top-P", minimum=0, maximum=1, step=0.01, value=0.95)
-                                sem_top_k_input = gr.Slider(label="语义 Top-K", minimum=1, maximum=500, step=1, value=100)
+                                sem_temp_input = gr.Slider(label=_t("语义 温度"), minimum=0, maximum=5, step=0.1, value=1.0)
+                                sem_top_p_input = gr.Slider(label=_t("语义 Top-P"), minimum=0, maximum=1, step=0.01, value=0.95)
+                                sem_top_k_input = gr.Slider(label=_t("语义 Top-K"), minimum=1, maximum=500, step=1, value=100)
                             with gr.Row():
-                                sem_rep_input = gr.Slider(label="语义 重复惩罚", minimum=0.001, maximum=3, step=0.01, value=1.2)
-                                sem_pen_window_input = gr.Slider(label="语义 惩罚窗口", minimum=1, maximum=100, step=1, value=50)
+                                sem_rep_input = gr.Slider(label=_t("语义 重复惩罚"), minimum=0.001, maximum=3, step=0.01, value=1.2)
+                                sem_pen_window_input = gr.Slider(label=_t("语义 惩罚窗口"), minimum=1, maximum=100, step=1, value=50)
                             with gr.Row():
-                                sem_min_tok_input = gr.Slider(label="语义 Min Tokens", minimum=0, maximum=9000, step=1, value=200)
-                                sem_max_tok_input = gr.Slider(label="语义 Max Tokens", minimum=1, maximum=9000, step=1, value=9000)
+                                sem_min_tok_input = gr.Slider(label=_t("语义 Min Tokens"), minimum=0, maximum=9000, step=1, value=200)
+                                sem_max_tok_input = gr.Slider(label=_t("语义 Max Tokens"), minimum=1, maximum=9000, step=1, value=9000)
+                            _reg(sem_temp_input, lambda lang: gr.update(label=tr(lang, "语义 温度")))
+                            _reg(sem_top_p_input, lambda lang: gr.update(label=tr(lang, "语义 Top-P")))
+                            _reg(sem_top_k_input, lambda lang: gr.update(label=tr(lang, "语义 Top-K")))
+                            _reg(sem_rep_input, lambda lang: gr.update(label=tr(lang, "语义 重复惩罚")))
+                            _reg(sem_pen_window_input, lambda lang: gr.update(label=tr(lang, "语义 惩罚窗口")))
+                            _reg(sem_min_tok_input, lambda lang: gr.update(label=tr(lang, "语义 Min Tokens")))
+                            _reg(sem_max_tok_input, lambda lang: gr.update(label=tr(lang, "语义 Max Tokens")))
 
                     with gr.Column(scale=1):
                         with gr.Row():
-                            generate_btn = gr.Button("🎵 生成歌曲", variant="primary", size="lg")
-                            cancel_btn = gr.Button("取消", size="lg")
-                        gr.Markdown("### 输出")
-                        audio_output = gr.Audio(label="生成的歌曲", type="filepath", elem_id="gen-audio")
+                            generate_btn = gr.Button(_t("🎵 生成歌曲"), variant="primary", size="lg")
+                            _reg(generate_btn, lambda lang: gr.update(value=tr(lang, "🎵 生成歌曲")))
+                            cancel_btn = gr.Button(_t("取消"), size="lg")
+                            _reg(cancel_btn, lambda lang: gr.update(value=tr(lang, "取消")))
+                        output_md = gr.Markdown(_t("### 输出"))
+                        _reg(output_md, lambda lang: gr.update(value=tr(lang, "### 输出")))
+                        audio_output = gr.Audio(label=_t("生成的歌曲"), type="filepath", elem_id="gen-audio")
+                        _reg(audio_output, lambda lang: gr.update(label=tr(lang, "生成的歌曲")))
                         info_output = gr.Markdown()
 
                         with gr.Group(visible=False) as variant_group:
-                            variant_selector = gr.Radio(label="批量变体选择", choices=[], interactive=True)
+                            variant_selector = gr.Radio(label=_t("批量变体选择"), choices=[], interactive=True)
+                            _reg(variant_selector, lambda lang: gr.update(label=tr(lang, "批量变体选择")))
                             with gr.Row():
-                                variant_finalize_btn = gr.Button("✅ 选定为最终版", variant="primary", size="sm")
-                                variant_keep_btn = gr.Button("保留全部变体", size="sm")
+                                variant_finalize_btn = gr.Button(_t("✅ 选定为最终版"), variant="primary", size="sm")
+                                _reg(variant_finalize_btn, lambda lang: gr.update(value=tr(lang, "✅ 选定为最终版")))
+                                variant_keep_btn = gr.Button(_t("保留全部变体"), size="sm")
+                                _reg(variant_keep_btn, lambda lang: gr.update(value=tr(lang, "保留全部变体")))
                         variant_state = gr.State([])
 
-                        gr.Markdown("### ABC 乐谱")
-                        with gr.Accordion("生成的乐谱 (可编辑)", open=False):
+                        abc_md = gr.Markdown(_t("### ABC 乐谱"))
+                        _reg(abc_md, lambda lang: gr.update(value=tr(lang, "### ABC 乐谱")))
+                        gen_abc_acc = gr.Accordion(_t("生成的乐谱 (可编辑)"), open=False)
+                        _reg(gen_abc_acc, lambda lang: gr.update(label=tr(lang, "生成的乐谱 (可编辑)")))
+                        with gen_abc_acc:
                             abc_output = gr.Textbox(
-                                label="ABC 乐谱文本",
+                                label=_t("ABC 乐谱文本"),
                                 placeholder="X:1",
                                 lines=10,
                                 interactive=True,
                                 elem_id="gen-abc-output",
-                                info="生成后可编辑乐谱，点击「重新合成」使用修改后的乐谱生成新音频",
+                                info=_t("生成后可编辑乐谱，点击「重新合成」使用修改后的乐谱生成新音频"),
                             )
-                        gr.Markdown("#### 乐谱预览")
-                        gr.HTML(
-                            value='<div id="abc-preview-container" style="padding: 20px; border-radius: 8px; min-height: 200px; border: 1px dashed rgba(255,255,255,0.15);"><div style="text-align:center;color:#666;margin-bottom:12px;">生成歌曲后乐谱将在此处渲染</div><div id="abc-paper"></div><div id="abc-audio"></div></div>',
+                            _reg(abc_output, lambda lang: gr.update(label=tr(lang, "ABC 乐谱文本"), info=tr(lang, "生成后可编辑乐谱，点击「重新合成」使用修改后的乐谱生成新音频")))
+                        preview_md = gr.Markdown(_t("#### 乐谱预览"))
+                        _reg(preview_md, lambda lang: gr.update(value=tr(lang, "#### 乐谱预览")))
+                        # 乐谱预览占位容器：提示文案按语言翻译，切语言时更新
+                        def _abc_preview_html(container_id, paper_id, audio_id, msg):
+                            return (
+                                f'<div id="{container_id}" style="padding: 20px; border-radius: 8px; min-height: 200px; '
+                                f'border: 1px dashed rgba(255,255,255,0.15);">'
+                                f'<div style="text-align:center;color:#666;margin-bottom:12px;">{msg}</div>'
+                                f'<div id="{paper_id}"></div><div id="{audio_id}"></div></div>'
+                            )
+
+                        gen_abc_preview = gr.HTML(
+                            value=_abc_preview_html("abc-preview-container", "abc-paper", "abc-audio", _t("生成歌曲后乐谱将在此处渲染")),
                         )
+                        _reg(gen_abc_preview, lambda lang: gr.update(value=_abc_preview_html("abc-preview-container", "abc-paper", "abc-audio", tr(lang, "生成歌曲后乐谱将在此处渲染"))))
                         with gr.Row():
-                            gr.Button("导出 MIDI", size="sm")
-                            gr.Button("导出 PNG", size="sm")
-                        abc_file_output = gr.File(label="下载乐谱")
-                        flac_file_output = gr.File(label="下载 MP3")
+                            export_midi_btn = gr.Button(_t("导出 MIDI"), size="sm")
+                            _reg(export_midi_btn, lambda lang: gr.update(value=tr(lang, "导出 MIDI")))
+                            export_png_btn = gr.Button(_t("导出 PNG"), size="sm")
+                            _reg(export_png_btn, lambda lang: gr.update(value=tr(lang, "导出 PNG")))
+                        abc_file_output = gr.File(label=_t("下载乐谱"))
+                        _reg(abc_file_output, lambda lang: gr.update(label=tr(lang, "下载乐谱")))
+                        flac_file_output = gr.File(label=_t("下载 MP3"))
+                        _reg(flac_file_output, lambda lang: gr.update(label=tr(lang, "下载 MP3")))
                         lyrics_sync_data = gr.HTML(value="", visible=False)
                         with gr.Row():
-                            resynthesize_btn = gr.Button("重新合成", variant="secondary")
+                            resynthesize_btn = gr.Button(_t("重新合成"), variant="secondary")
+                            _reg(resynthesize_btn, lambda lang: gr.update(value=tr(lang, "重新合成")))
 
-            with gr.Tab("音频转谱"):
-                gr.Markdown("### 音频转乐谱")
-                gr.Markdown("上传音频文件，使用 SheetSage2 模型自动转写为 ABC 乐谱")
+            with gr.Tab(_t("音频转谱")) as tab_transcribe:
+                _reg(tab_transcribe, lambda lang: gr.update(label=tr(lang, "音频转谱")))
+                transcribe_md = gr.Markdown(_t("### 音频转乐谱"))
+                _reg(transcribe_md, lambda lang: gr.update(value=tr(lang, "### 音频转乐谱")))
+                transcribe_intro_md = gr.Markdown(_t("上传音频文件，使用 SheetSage2 模型自动转写为 ABC 乐谱"))
+                _reg(transcribe_intro_md, lambda lang: gr.update(value=tr(lang, "上传音频文件，使用 SheetSage2 模型自动转写为 ABC 乐谱")))
                 
                 with gr.Row():
                     with gr.Column():
-                        transcribe_audio_input = gr.Audio(label="上传音频 (支持 WAV/MP3/FLAC/OGG/M4A 等)", type="filepath", elem_id="transcribe-audio-input")
+                        transcribe_audio_input = gr.Audio(label=_t("上传音频 (支持 WAV/MP3/FLAC/OGG/M4A 等)"), type="filepath", elem_id="transcribe-audio-input")
+                        _reg(transcribe_audio_input, lambda lang: gr.update(label=tr(lang, "上传音频 (支持 WAV/MP3/FLAC/OGG/M4A 等)")))
                         with gr.Row():
-                            transcribe_btn = gr.Button("开始转谱", variant="primary")
-                            transcribe_send_btn = gr.Button("→ 发送到生成页", variant="secondary")
+                            transcribe_btn = gr.Button(_t("开始转谱"), variant="primary")
+                            _reg(transcribe_btn, lambda lang: gr.update(value=tr(lang, "开始转谱")))
+                            transcribe_send_btn = gr.Button(_t("→ 发送到生成页"), variant="secondary")
+                            _reg(transcribe_send_btn, lambda lang: gr.update(value=tr(lang, "→ 发送到生成页")))
                         transcribe_info = gr.Markdown()
                     
                     with gr.Column():
                         transcribe_abc_output = gr.Textbox(
-                            label="ABC 乐谱 (可编辑)",
-                            placeholder="转谱完成后乐谱将显示在这里...",
+                            label=_t("ABC 乐谱 (可编辑)"),
+                            placeholder=_t("转谱完成后乐谱将显示在这里..."),
                             lines=10,
                         )
+                        _reg(transcribe_abc_output, lambda lang: gr.update(label=tr(lang, "ABC 乐谱 (可编辑)"), placeholder=tr(lang, "转谱完成后乐谱将显示在这里...")))
                         transcribe_abc_preview = gr.HTML(
-                            label="乐谱预览",
-                            value='<div id="transcribe-abc-preview-container" style="padding: 20px; border-radius: 8px; min-height: 200px; border: 1px dashed rgba(255,255,255,0.15);"><div style="text-align:center;color:#666;">转谱后乐谱预览将在此处显示</div><div id="transcribe-abc-paper"></div><div id="transcribe-abc-audio"></div></div>',
+                            label=_t("乐谱预览"),
+                            value=f'<div id="transcribe-abc-preview-container" style="padding: 20px; border-radius: 8px; min-height: 200px; border: 1px dashed rgba(255,255,255,0.15);"><div style="text-align:center;color:#666;">{_t("转谱后乐谱预览将在此处显示")}</div><div id="transcribe-abc-paper"></div><div id="transcribe-abc-audio"></div></div>',
                         )
+                        _reg(transcribe_abc_preview, lambda lang: gr.update(label=tr(lang, "乐谱预览"), value=f'<div id="transcribe-abc-preview-container" style="padding: 20px; border-radius: 8px; min-height: 200px; border: 1px dashed rgba(255,255,255,0.15);"><div style="text-align:center;color:#666;">{tr(lang, "转谱后乐谱预览将在此处显示")}</div><div id="transcribe-abc-paper"></div><div id="transcribe-abc-audio"></div></div>'))
                         
                         with gr.Row():
-                            transcribe_abc_download = gr.File(label="下载 ABC")
-                            transcribe_midi_download = gr.File(label="下载 MIDI")
-                
+                            transcribe_abc_download = gr.File(label=_t("下载 ABC"))
+                            _reg(transcribe_abc_download, lambda lang: gr.update(label=tr(lang, "下载 ABC")))
+                            transcribe_midi_download = gr.File(label=_t("下载 MIDI"))
+                            _reg(transcribe_midi_download, lambda lang: gr.update(label=tr(lang, "下载 MIDI")))
+
                 transcribe_task_id = gr.State(value="")
                 transcribe_abc_bridge = gr.Textbox(elem_id="abc-bridge", label="")
 
-            with gr.Tab("历史") as history_tab:
-                gr.Markdown("### 生成历史")
+            with gr.Tab(_t("历史")) as tab_history:
+                _reg(tab_history, lambda lang: gr.update(label=tr(lang, "历史")))
+                history_md = gr.Markdown(_t("### 生成历史"))
+                _reg(history_md, lambda lang: gr.update(value=tr(lang, "### 生成历史")))
                 history_state = gr.State(value=[])
                 history_page = gr.State(value=0)
                 history_row_trigger = gr.Number(visible=True, value=-1, elem_id="history-row-trigger", label="")
                 history_df = gr.Dataframe(
-                    headers=["时间", "风格", "模式", "音频时长", "生成耗时", "Task ID"],
+                    # 列头采用中英双语（Gradio 静态表格的 headers 不支持运行时切换）
+                    headers=["时间 Time", "风格 Style", "模式 Mode", "音频时长 Duration", "生成耗时 Elapsed", "Task ID"],
                     datatype=["str", "str", "str", "str", "str", "str"],
                     col_count=6,
                     max_height=500,
@@ -1364,31 +1628,42 @@ def build_ui():
                     elem_id="history-table",
                 )
                 with gr.Row():
-                    history_prev_btn = gr.Button("上一页", size="sm")
+                    history_prev_btn = gr.Button(_t("上一页"), size="sm")
+                    _reg(history_prev_btn, lambda lang: gr.update(value=tr(lang, "上一页")))
                     history_page_info = gr.Markdown(value=refresh_history()[1], elem_id="history-page-info")
-                    history_next_btn = gr.Button("下一页", size="sm")
-                history_audio = gr.Audio(label="试听", type="filepath", elem_id="history-audio")
+                    history_next_btn = gr.Button(_t("下一页"), size="sm")
+                    _reg(history_next_btn, lambda lang: gr.update(value=tr(lang, "下一页")))
+                history_audio = gr.Audio(label=_t("试听"), type="filepath", elem_id="history-audio")
+                _reg(history_audio, lambda lang: gr.update(label=tr(lang, "试听")))
                 history_info = gr.Markdown()
                 with gr.Row():
                     with gr.Column(scale=1):
-                        history_lyrics = gr.Textbox(label="歌词", lines=10, interactive=False)
+                        history_lyrics = gr.Textbox(label=_t("歌词"), lines=10, interactive=False)
+                        _reg(history_lyrics, lambda lang: gr.update(label=tr(lang, "歌词")))
                         history_lyric_sync = gr.HTML(
-                            label="歌词同步",
+                            label=_t("歌词同步"),
                             value='<div id="history-lyric-sync" style="padding: 12px; min-height: 100px; border-radius: 8px;"></div>',
                         )
+                        _reg(history_lyric_sync, lambda lang: gr.update(label=tr(lang, "歌词同步")))
                     with gr.Column(scale=1):
                         history_abc_preview = gr.HTML(
-                            label="乐谱预览",
-                            value='<div id="history-abc-preview-container" style="padding: 20px; border-radius: 8px; min-height: 200px; border: 1px dashed rgba(255,255,255,0.15);"><div style="text-align:center;color:#666;margin-bottom:12px;">点击历史记录后乐谱将在此处渲染</div><div id="history-abc-paper"></div><div id="history-abc-audio"></div></div>',
+                            label=_t("乐谱预览"),
+                            value=f'<div id="history-abc-preview-container" style="padding: 20px; border-radius: 8px; min-height: 200px; border: 1px dashed rgba(255,255,255,0.15);"><div style="text-align:center;color:#666;margin-bottom:12px;">{_t("点击历史记录后乐谱将在此处渲染")}</div><div id="history-abc-paper"></div><div id="history-abc-audio"></div></div>',
                         )
-                        history_abc = gr.Textbox(label="ABC 乐谱文本", lines=6, interactive=False, elem_id="history-abc")
+                        _reg(history_abc_preview, lambda lang: gr.update(label=tr(lang, "乐谱预览"), value=f'<div id="history-abc-preview-container" style="padding: 20px; border-radius: 8px; min-height: 200px; border: 1px dashed rgba(255,255,255,0.15);"><div style="text-align:center;color:#666;margin-bottom:12px;">{tr(lang, "点击历史记录后乐谱将在此处渲染")}</div><div id="history-abc-paper"></div><div id="history-abc-audio"></div></div>'))
+                        history_abc = gr.Textbox(label=_t("ABC 乐谱文本"), lines=6, interactive=False, elem_id="history-abc")
+                        _reg(history_abc, lambda lang: gr.update(label=tr(lang, "ABC 乐谱文本")))
                 history_lyrics_data = gr.HTML(value="", visible=False)
                 history_duration_data = gr.HTML(value="", visible=False)
-                history_style = gr.Markdown(label="风格描述")
+                history_style = gr.Markdown(label=_t("风格描述"))
+                _reg(history_style, lambda lang: gr.update(label=tr(lang, "风格描述")))
                 with gr.Row():
-                    history_refresh_btn = gr.Button("刷新")
-                    history_delete_btn = gr.Button("删除选中")
-                    history_clear_btn = gr.Button("清空历史")
+                    history_refresh_btn = gr.Button(_t("刷新"))
+                    _reg(history_refresh_btn, lambda lang: gr.update(value=tr(lang, "刷新")))
+                    history_delete_btn = gr.Button(_t("删除选中"))
+                    _reg(history_delete_btn, lambda lang: gr.update(value=tr(lang, "删除选中")))
+                    history_clear_btn = gr.Button(_t("清空历史"))
+                    _reg(history_clear_btn, lambda lang: gr.update(value=tr(lang, "清空历史")))
 
                 history_df.select(fn=on_history_select, inputs=[history_state, history_page], outputs=[history_state, history_audio, history_info, history_style, history_lyrics, history_abc, history_abc_preview, history_lyrics_data, history_duration_data])
                 history_row_trigger.change(fn=on_history_row_click, inputs=[history_row_trigger, history_state, history_page], outputs=[history_state, history_audio, history_info, history_style, history_lyrics, history_abc, history_abc_preview, history_lyrics_data, history_duration_data])
@@ -1399,22 +1674,32 @@ def build_ui():
                 history_next_btn.click(fn=on_history_next_page, inputs=history_page, outputs=[history_df, history_page_info, history_page])
                 demo.load(fn=refresh_history_full, outputs=[history_df, history_page_info, history_page])
 
-            with gr.Tab("设置"):
-                gr.Markdown("### 系统状态")
+            with gr.Tab(_t("设置")) as tab_settings:
+                _reg(tab_settings, lambda lang: gr.update(label=tr(lang, "设置")))
+                sysstatus_md = gr.Markdown(_t("### 系统状态"))
+                _reg(sysstatus_md, lambda lang: gr.update(value=tr(lang, "### 系统状态")))
                 model_status = gr.Markdown(value=on_check_models())
-                check_models_btn = gr.Button("检查模型")
+                # 切语言时重新渲染模型状态（apply_lang 先更新 _CUR_LANG 再执行 updater）
+                _reg(model_status, lambda lang: gr.update(value=on_check_models()))
+                check_models_btn = gr.Button(_t("检查模型"))
+                _reg(check_models_btn, lambda lang: gr.update(value=tr(lang, "检查模型")))
                 check_models_btn.click(fn=on_check_models, outputs=model_status)
 
-                gr.Markdown("### 参数预设")
+                presets_md = gr.Markdown(_t("### 参数预设"))
+                _reg(presets_md, lambda lang: gr.update(value=tr(lang, "### 参数预设")))
                 preset_dropdown = gr.Dropdown(
-                    label="加载预设",
-                    choices=list(BUILTIN_PRESETS.keys()),
+                    label=_t("加载预设"),
+                    choices=_preset_display_names(_CUR_LANG),
                     value=None,
                 )
-                preset_name_input = gr.Textbox(label="保存预设名称", placeholder="我的预设")
+                _reg(preset_dropdown, lambda lang: gr.update(label=tr(lang, "加载预设"), choices=_preset_display_names(lang)))
+                preset_name_input = gr.Textbox(label=_t("保存预设名称"), placeholder=_t("我的预设"))
+                _reg(preset_name_input, lambda lang: gr.update(label=tr(lang, "保存预设名称"), placeholder=tr(lang, "我的预设")))
                 with gr.Row():
-                    preset_load_btn = gr.Button("加载")
-                    preset_save_btn = gr.Button("保存当前参数")
+                    preset_load_btn = gr.Button(_t("加载"))
+                    _reg(preset_load_btn, lambda lang: gr.update(value=tr(lang, "加载")))
+                    preset_save_btn = gr.Button(_t("保存当前参数"))
+                    _reg(preset_save_btn, lambda lang: gr.update(value=tr(lang, "保存当前参数")))
                 preset_info = gr.Markdown()
 
         lyrics_input.change(fn=on_lyrics_change, inputs=lyrics_input, outputs=structure_analysis)
@@ -1492,6 +1777,21 @@ def build_ui():
             outputs=preset_info,
         )
 
+        # 语言即时切换：lang_select.change -> apply_lang -> 更新 lang_state + 所有 translatable 组件
+        lang_select.change(
+            fn=apply_lang,
+            inputs=lang_select,
+            outputs=[lang_state] + translatables,
+        )
+        # 历史页翻页信息是动态文案（含当前页码），无法静态注册 updater；
+        # 追加第二个 change 绑定，按当前页重新生成。本绑定注册在 apply_lang 之后，
+        # 执行时 _CUR_LANG 已更新为新语言，故直接复用 _get_history_page。
+        lang_select.change(
+            fn=lambda page: _get_history_page(page)[1],
+            inputs=history_page,
+            outputs=history_page_info,
+        )
+
     return demo
 
 
@@ -1566,4 +1866,7 @@ if __name__ == "__main__":
         server_port=9898,
         share=False,
         show_error=True,
+        # Gradio 6.0 起 css/js 从 Blocks 构造器移至 launch()（5.x 两者兼容，按新规范统一放此处）
+        css=_TITLE_ROW_CSS,
+        js=_LOCALE_SYNC_JS,
     )

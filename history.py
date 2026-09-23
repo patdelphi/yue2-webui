@@ -1,11 +1,78 @@
 """Generation history manager with JSON persistence."""
 import json
-import shutil
+import sys
 import threading
 from pathlib import Path
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from typing import Optional
+
+# 历史记录最多保留条数，超出后自动删除最旧记录（auto_prune 使用）
+HISTORY_MAX_ENTRIES = 100
+
+
+def _delete_to_recycle(path: Path) -> bool:
+    """将单个文件移入系统回收站（Windows）。成功返回 True，否则返回 False。"""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        FO_DELETE = 3
+        FOF_ALLOWUNDO = 0x40
+        FOF_NOCONFIRMATION = 0x10
+        FOF_SILENT = 0x4
+
+        class SHFILEOPSTRUCTW(ctypes.Structure):
+            _fields_ = [
+                ("hwnd", wintypes.HWND),
+                ("wFunc", ctypes.c_uint),
+                ("pFrom", wintypes.LPCWSTR),
+                ("pTo", wintypes.LPCWSTR),
+                ("fFlags", ctypes.c_ushort),
+                ("fAnyOperationsAborted", ctypes.c_int),
+                ("hNameMappings", ctypes.c_void_p),
+                ("lpszProgressTitle", wintypes.LPCWSTR),
+            ]
+
+        op = SHFILEOPSTRUCTW()
+        op.hwnd = None
+        op.wFunc = FO_DELETE
+        op.pFrom = str(path) + "\0\0"
+        op.pTo = None
+        op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT
+        result = ctypes.windll.shell32.SHFILEOperationW(ctypes.byref(op))
+        return result == 0 and not op.fAnyOperationsAborted
+    except Exception:
+        return False
+
+
+def delete_files_to_recycle(files: list) -> int:
+    """文件级删除：优先把存在的文件移入系统回收站，失败或非 Windows 时回退为直接删除。"""
+    removed = 0
+    paths = [f for f in files if Path(f).exists()]
+    if not paths:
+        return 0
+
+    if sys.platform == "win32":
+        for p in paths:
+            if _delete_to_recycle(p):
+                removed += 1
+            else:
+                # 回收站失败则回退为直接删除，避免残留
+                try:
+                    Path(p).unlink()
+                    removed += 1
+                except OSError:
+                    pass
+        return removed
+
+    for p in paths:
+        try:
+            Path(p).unlink()
+            removed += 1
+        except OSError:
+            pass
+    return removed
 
 
 @dataclass
@@ -116,32 +183,46 @@ class HistoryManager:
             self._save()
             return True
 
+    def _files_for(self, entry) -> list:
+        """收集一条记录关联的产出文件（音频 / MP3 / 乐谱 / 歌词 / 元数据）。"""
+        files = []
+        wav = Path(entry.audio_path)
+        if wav.exists():
+            files.append(wav)
+        for suffix in (".mp3", ".abc", ".txt", ".json"):
+            candidate = wav.with_suffix(suffix)
+            if candidate.exists():
+                files.append(candidate)
+
+        # 兼容乐谱存于独立目录的旧记录（abc_path 为相对 WEBUI_ROOT 的路径）
+        if entry.abc_path:
+            abc = self.outputs_root.parent / entry.abc_path
+            if abc.exists() and abc not in files:
+                files.append(abc)
+        return files
+
     def delete(self, task_id: str) -> bool:
-        """Delete a history entry and its output directory."""
+        """删除一条历史记录及其产出文件（文件级删除，移入系统回收站）。"""
         with self._lock:
             entry = self.get(task_id)
             if not entry:
                 return False
 
-            output_path = self.outputs_root.parent / entry.output_dir
-            if output_path.exists():
-                shutil.rmtree(output_path, ignore_errors=True)
+            delete_files_to_recycle(self._files_for(entry))
 
             self._entries = [e for e in self._entries if e.task_id != task_id]
             self._save()
             return True
 
     def clear(self):
-        """Clear all history entries and output directories."""
+        """Clear all history entries and remove their output files."""
         with self._lock:
             for entry in self._entries:
-                output_path = self.outputs_root.parent / entry.output_dir
-                if output_path.exists():
-                    shutil.rmtree(output_path, ignore_errors=True)
+                delete_files_to_recycle(self._files_for(entry))
             self._entries = []
             self._save()
 
-    def auto_prune(self, max_entries: int = 100):
+    def auto_prune(self, max_entries: int = HISTORY_MAX_ENTRIES):
         """Remove oldest entries if over the limit."""
         with self._lock:
             if len(self._entries) <= max_entries:
@@ -151,9 +232,7 @@ class HistoryManager:
             self._entries = self._entries[:max_entries]
 
             for entry in to_remove:
-                output_path = self.outputs_root.parent / entry.output_dir
-                if output_path.exists():
-                    shutil.rmtree(output_path, ignore_errors=True)
+                delete_files_to_recycle(self._files_for(entry))
 
             self._save()
 

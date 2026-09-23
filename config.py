@@ -2,6 +2,7 @@
 from dataclasses import dataclass, field
 from typing import Optional
 from enum import Enum
+from i18n import tr
 
 
 class CotMode(str, Enum):
@@ -64,16 +65,16 @@ class TranscriptionResult:
     transcription_time_seconds: Optional[float] = None
 
 
-def validate_params(params: GenerationParams) -> Optional[str]:
+def validate_params(params: GenerationParams, lang: str = "zh") -> Optional[str]:
     """Validate parameters, return error message if invalid."""
     if not params.style or not params.style.strip():
-        return "风格描述不能为空"
+        return tr(lang, "风格描述不能为空")
     if not params.lyrics or not params.lyrics.strip():
-        return "歌词不能为空"
+        return tr(lang, "歌词不能为空")
     if params.seed is None or params.seed < 0:
-        return "种子必须为非负整数"
+        return tr(lang, "种子必须为非负整数")
     if params.cfg_scale is not None and (params.cfg_scale < 0 or params.cfg_scale > 20):
-        return "CFG强度必须在0-20之间"
+        return tr(lang, "CFG强度必须在0-20之间")
     if params.num_inference_steps is None or params.num_inference_steps < 1 or params.num_inference_steps > 64:
-        return "ODE步数必须在1-64之间"
+        return tr(lang, "ODE步数必须在1-64之间")
     return None

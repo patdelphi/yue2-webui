@@ -4,3 +4,6 @@ soundfile>=0.12.1
 torch>=2.0.0
 tqdm>=4.65.0
 mutagen>=1.47.0
+# 多语言归档（运行时用 i18n.load_po_to_en 读 .po，缺装则静默回退内置 EN_TABLE）
+polib>=1.2.0
+Babel>=2.14.0
