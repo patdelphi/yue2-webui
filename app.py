@@ -1147,7 +1147,12 @@ def _preset_display_names(lang: str) -> list:
 
 
 def on_preset_load(name):
-    """Load a preset and return param values."""
+    """Load a preset and return param values.
+
+    返回 23 个字段（17 旧字段 + CFG/批量 + 4 个后处理开关）。
+    预设中缺失的字段返回 gr.update()（前端保持当前值），保证旧格式
+    预设文件与仅覆盖部分字段的内置预设（如「快速demo」）不被默认值覆盖。
+    """
     preset = BUILTIN_PRESETS.get(name)
     if not preset:
         # 英文界面下选中翻译名（如 Default）时，反查回中文内置键
@@ -1160,33 +1165,31 @@ def on_preset_load(name):
         if preset_path.exists():
             preset = json.loads(preset_path.read_text(encoding="utf-8"))
         else:
-            return [gr.update() for _ in range(17)]
+            return [gr.update() for _ in range(23)]
 
     p = preset.get("params", {})
+
+    def _pv(key):
+        """声明字段返回存储值，缺失字段返回 gr.update()（保持当前值）。"""
+        return p[key] if key in p else gr.update()
+
     return [
-        p.get("cot", "full"),
+        _pv("cot") if "cot" in p else "full",
         p.get("num_inference_steps", 8),
         p.get("out_format", "pcm16"),
-        p.get("abc_temp", 0.7),
-        p.get("abc_top_p", 0.9),
-        p.get("abc_top_k", 30),
-        p.get("abc_rep_penalty", 1.005),
-        p.get("abc_pen_window", 100),
-        p.get("abc_min_tok", 32),
-        p.get("abc_max_tok", 4096),
-        p.get("sem_temp", 1.0),
-        p.get("sem_top_p", 0.95),
-        p.get("sem_top_k", 100),
-        p.get("sem_rep_penalty", 1.2),
-        p.get("sem_pen_window", 50),
-        p.get("sem_min_tok", 200),
-        p.get("sem_max_tok", 9000),
+        _pv("abc_temp"), _pv("abc_top_p"), _pv("abc_top_k"),
+        _pv("abc_rep_penalty"), _pv("abc_pen_window"), _pv("abc_min_tok"), _pv("abc_max_tok"),
+        _pv("sem_temp"), _pv("sem_top_p"), _pv("sem_top_k"),
+        _pv("sem_rep_penalty"), _pv("sem_pen_window"), _pv("sem_min_tok"), _pv("sem_max_tok"),
+        _pv("cfg_scale"), _pv("batch_count"),
+        _pv("pp_normalize"), _pv("pp_fade"), _pv("pp_trim"), _pv("pp_metadata"),
     ]
 
 
 def on_preset_save(name, cot, steps, out_format, abc_temp, abc_top_p, abc_top_k, abc_rep, abc_pen, abc_min, abc_max,
-                    sem_temp, sem_top_p, sem_top_k, sem_rep, sem_pen, sem_min, sem_max):
-    """Save current params as a preset."""
+                    sem_temp, sem_top_p, sem_top_k, sem_rep, sem_pen, sem_min, sem_max,
+                    cfg_scale, batch_count, pp_normalize, pp_fade, pp_trim, pp_metadata):
+    """Save current params as a preset（含 CFG/批量数量/后处理开关等全部生成参数）。"""
     if not name or not name.strip():
         return tr(_CUR_LANG, "请输入预设名称")
     presets_dir = WEBUI_ROOT / "presets"
@@ -1201,6 +1204,9 @@ def on_preset_save(name, cot, steps, out_format, abc_temp, abc_top_p, abc_top_k,
             "sem_temp": sem_temp, "sem_top_p": sem_top_p, "sem_top_k": sem_top_k,
             "sem_rep_penalty": sem_rep, "sem_pen_window": sem_pen,
             "sem_min_tok": sem_min, "sem_max_tok": sem_max,
+            "cfg_scale": cfg_scale, "batch_count": batch_count,
+            "pp_normalize": pp_normalize, "pp_fade": pp_fade,
+            "pp_trim": pp_trim, "pp_metadata": pp_metadata,
         },
     }
     path = presets_dir / f"{name.strip()}.json"
@@ -1900,6 +1906,8 @@ def build_ui():
                 cot_input, steps_input, out_format_input,
                 abc_temp_input, abc_top_p_input, abc_top_k_input, abc_rep_input, abc_pen_window_input, abc_min_tok_input, abc_max_tok_input,
                 sem_temp_input, sem_top_p_input, sem_top_k_input, sem_rep_input, sem_pen_window_input, sem_min_tok_input, sem_max_tok_input,
+                cfg_input, batch_count_input,
+                normalize_checkbox, fade_checkbox, trim_checkbox, metadata_checkbox,
             ],
         )
         preset_save_btn.click(
@@ -1908,6 +1916,8 @@ def build_ui():
                 preset_name_input, cot_input, steps_input, out_format_input,
                 abc_temp_input, abc_top_p_input, abc_top_k_input, abc_rep_input, abc_pen_window_input, abc_min_tok_input, abc_max_tok_input,
                 sem_temp_input, sem_top_p_input, sem_top_k_input, sem_rep_input, sem_pen_window_input, sem_min_tok_input, sem_max_tok_input,
+                cfg_input, batch_count_input,
+                normalize_checkbox, fade_checkbox, trim_checkbox, metadata_checkbox,
             ],
             outputs=preset_info,
         )
