@@ -21,6 +21,7 @@
 - 🎚️ **完整采样参数控制**：ABC 阶段（Stage 1）与语义 Token 阶段（Stage 2）独立温度 / Top-P / Top-K / 重复惩罚等
 - 📜 **生成历史管理**：分页浏览、试听、歌词同步、乐谱预览，自动清理缺失文件记录，可删除/清空
 - 🎚️ **预设系统**：5 套内置参数预设，支持自定义预设的保存与加载
+- 🌐 **中英双语界面**：右上角即时切换，含 Gradio 内置文案（上传提示/页脚）同步切换；模型路径外置 `config.cfg` 配置
 
 ---
 
@@ -61,9 +62,11 @@
 
 ## 安装与运行
 
+> 完整安装流程（含 YuE2 主项目环境、模型下载、转谱模型、config.cfg 配置）见 **[Docs/setup.md](Docs/setup.md)**。
+
 ### Windows
 ```bash
-install.bat   # 创建虚拟环境并安装依赖（检查模型文件，缺失会给出下载指引）
+install.bat   # 在 yue2-webui 下创建独立虚拟环境并安装依赖（检查模型文件，缺失会给出下载指引）
 run.bat       # 启动 WebUI
 ```
 
@@ -73,25 +76,28 @@ bash install.sh
 bash run.sh
 ```
 
-启动后浏览器访问 Gradio 地址（默认 `http://127.0.0.1:7860`）。
+启动后浏览器访问 Gradio 地址（**http://127.0.0.1:9898**）。
 
-### 手动运行
+### 手动运行（推荐：与主项目共享根目录虚拟环境）
 ```bash
-python -m venv .venv
-.venv\Scripts\activate          # Windows；Linux 用 source .venv/bin/activate
-pip install -r requirements.txt
-python app.py
+python -m venv .venv           # 在仓库根目录执行
+.venv\Scripts\activate         # Windows；Linux 用 source .venv/bin/activate
+pip install -e .               # 安装 YuE2 主项目依赖（先装主项目）
+pip install -r yue2-webui/requirements.txt   # 再装 WebUI 依赖
+python yue2-webui/app.py
 ```
 
 ---
 
-## 模型文件
+## 模型文件与 config.cfg
 
-程序启动时会检查以下模型文件（提示缺失时按 `src` / 远端仓库指引下载到对应目录）：
-- `yue2-3b-q8_0.gguf`（主模型，定义于 `config.py` 的 `model_gguf`）
-- `yue2-vae-f16.gguf`（VAE 解码器，定义于 `vae_gguf`）
+模型路径由仓库根目录的外置 **`config.cfg`** 统一配置（`[models]` 段：`models_dir` / `main_model` / `vae_model` / `sheetsage2_path`，相对路径基于仓库根，也可用绝对路径；文件缺失时回退内置默认值）：
 
-在「设置 → 系统状态」页可随时检查。
+- `models/yue2-3b-q8_0.gguf` — 主模型（约 4.0GB，需手动下载，见 setup.md 第 4 步）
+- `models/yue2-vae-f16.gguf` — VAE 解码器（约 250MB，同上）
+- `audio-cpp/models/SheetSage2-GGUF/sheetsage2-orig.gguf` — 转谱模型（约 2.5GB，随 audio-cpp 目录自带，无需下载）
+
+模型下载**不会自动执行**；「设置 → 系统状态」页可随时检查，显示的路径即来自 `config.cfg`。
 
 ---
 
@@ -99,24 +105,32 @@ python app.py
 
 ```
 yue2-webui/
-├── app.py                # 主应用：Gradio UI 与全部交互逻辑
-├── backend_gguf.py       # GGUF 后端推理封装
-├── config.py             # 参数定义 / 默认值 / 校验 (validate_params)
-├── queue_manager.py      # 任务队列与并发 / 取消控制
-├── history.py            # 生成历史持久化 (history.json)
-├── postprocess.py        # 音频后处理（标准化 / 淡入淡出 / 裁剪 / 元数据）
-├── style_presets.py      # 风格快捷标签
-├── vocal_presets.py      # 人声 / 乐器 / 情绪 / 语言 / 流派标签
-├── lyrics_templates.py   # 歌词内容模板
+├── app.py                # 唯一入口：Gradio UI 与全部交互逻辑（核心模块在 src/）
+├── src/                  # 核心业务模块
+│   ├── backend_gguf.py   # GGUF 后端推理封装 + config.cfg 模型路径加载
+│   ├── config.py         # 参数定义 / 默认值 / 校验 (validate_params)
+│   ├── i18n.py           # 中英双语词典与 tr() 翻译接口
+│   ├── queue_manager.py  # 任务队列与并发 / 取消控制
+│   ├── history.py        # 生成历史持久化 (history.json)
+│   ├── postprocess.py    # 音频后处理（标准化 / 淡入淡出 / 裁剪 / 元数据）
+│   ├── style_presets.py  # 风格快捷标签
+│   ├── vocal_presets.py  # 人声 / 乐器 / 情绪 / 语言 / 流派标签
+│   └── lyrics_templates.py # 歌词内容模板
+├── tests/                # 测试套件（i18n / 模型配置 / 语言持久化 / 使用上一次 / 历史回收站 / 队列）
 ├── presets/              # 自定义参数预设存储
 ├── outputs/              # 生成结果（按任务定时戳分目录）
 ├── logs/                 # 运行日志
 ├── static/               # 前端静态资源（乐谱渲染等）
+├── Docs/                 # 项目文档（setup 安装指南 / requirements 需求）
 ├── DESIGN.md             # 详细设计方案 v2.0
 ├── requirements.txt      # Python 依赖
 ├── install.bat / install.sh
 ├── run.bat / run.sh
-└── history.json          # 历史记录数据
+├── history.json          # 历史记录数据
+├── last_inputs.json      # 「使用上一次」记录（风格 / 歌词 / 最近生成的乐谱）
+└── lang_state.json       # 界面语言持久化（重启后恢复上次选择）
+
+../config.cfg             # 仓库根：模型路径外置配置（[models] 段）
 ```
 
 ---

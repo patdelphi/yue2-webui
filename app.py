@@ -20,6 +20,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# 核心模块已整理到 src/ 子目录（app.py 作为唯一入口留在根目录）
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).parent / "src"))
+
 from config import GenerationParams, CotMode, SamplingParams, OutFormat, validate_params, TranscriptionResult
 from backend_gguf import GGUFBackend
 from style_presets import STYLE_PRESETS
@@ -30,12 +34,40 @@ from postprocess import postprocess_audio
 from queue_manager import queue_manager, TaskType, TaskStatus, TaskCancelledError
 from i18n import tr, normalize_lang
 
-# 当前界面语言（运行时切换，不可通过重启进程生效则需手动切）
-_CUR_LANG = "zh"
-
 PROJECT_ROOT = Path(__file__).parent.parent
 WEBUI_ROOT = PROJECT_ROOT / "yue2-webui"
 LAST_INPUTS_FILE = WEBUI_ROOT / "last_inputs.json"
+# 语言状态持久化文件：服务重启后恢复上次选择，避免旧英文页面与重置为 zh 的
+# 服务端 _CUR_LANG 不同步（表现为生成结果状态栏/变体标签回退中文）
+LANG_STATE_FILE = WEBUI_ROOT / "lang_state.json"
+
+
+def _save_lang_state(lang: str) -> None:
+    """将当前语言选择写入 lang_state.json（异常时静默忽略，不影响切换）。"""
+    try:
+        import json as _json
+        LANG_STATE_FILE.write_text(_json.dumps({"lang": lang}), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"保存语言状态失败: {e}")
+
+
+def _load_lang_state() -> str:
+    """读取持久化的语言选择；文件缺失/内容非法时回退 zh。"""
+    try:
+        import json as _json
+        data = _json.loads(LANG_STATE_FILE.read_text(encoding="utf-8"))
+        lang = data.get("lang", "zh")
+        return lang if lang in ("zh", "en") else "zh"
+    except FileNotFoundError:
+        return "zh"
+    except Exception as e:
+        logger.warning(f"读取语言状态失败，回退中文: {e}")
+        return "zh"
+
+
+# 当前界面语言：启动时从 lang_state.json 恢复上次选择
+_CUR_LANG = _load_lang_state()
+
 backend = GGUFBackend(PROJECT_ROOT)
 history_mgr = HistoryManager(
     history_file=WEBUI_ROOT / "history.json",
@@ -116,6 +148,22 @@ def _save_last_inputs(style: str, lyrics: str, abc: str):
         "abc": abc or "",
         "updated_at": datetime.now().isoformat(timespec="seconds"),
     }
+    tmp = LAST_INPUTS_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(LAST_INPUTS_FILE)
+
+
+def _update_last_abc(abc: str):
+    """生成成功后用产出的乐谱更新「使用上一次」记录（仅改 abc，保留风格/歌词）。
+
+    背景：_save_last_inputs 在任务开始时存的是外部 ABC 输入框内容（正常生成时为空），
+    若不更新，生成后点「使用上一次」乐谱将恢复为空。
+    """
+    if not abc:
+        return
+    data = _load_last_inputs()
+    data["abc"] = abc
+    data["updated_at"] = datetime.now().isoformat(timespec="seconds")
     tmp = LAST_INPUTS_FILE.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(LAST_INPUTS_FILE)
@@ -316,6 +364,7 @@ def _generate_worker(
             on_progress=on_progress,
             cancel_event=_task.cancel_event,
             output_name=task_id,
+            lang=lang,
         )
         results.append((task_id, variant_dir, result, current_seed))
 
@@ -325,6 +374,11 @@ def _generate_worker(
             raise TaskCancelledError(tr(lang, "任务已取消"))
         failed_msg = results[0][2].error_message if results else tr(lang, "未知错误")
         raise ValueError(f"{tr(lang, '生成失败')}: {failed_msg}")
+
+    # 生成成功：用产出的乐谱（最后一个成功变体）更新「使用上一次」记录，
+    # 否则记录停留在任务开始时外部输入框的内容（正常生成时为空）
+    last_abc = successful[-1][2].abc_score or (abc_text or "")
+    _update_last_abc(last_abc)
 
     format_label = FORMAT_LABELS.get(params.out_format.value, "PCM 16-bit")
 
@@ -346,8 +400,8 @@ def _generate_worker(
                         "batch_count": batch_count,
                         "variant_index": idx + 1,
                         "out_format": params.out_format.value,
-                        "model_gguf": params.model_gguf,
-                        "vae_gguf": params.vae_gguf,
+                        "model_gguf": backend.main_model,
+                        "vae_gguf": backend.vae_model,
                         "abc_sampling": asdict(params.abc_sampling),
                         "semantic_sampling": asdict(params.semantic_sampling),
                     },
@@ -640,6 +694,7 @@ def _resynthesize_worker(
         output_dir=output_dir,
         on_progress=on_progress,
         cancel_event=_task.cancel_event,
+        lang=lang,
     )
 
     if result.success:
@@ -669,6 +724,9 @@ def _resynthesize_worker(
 
         lyrics_file = output_dir / f"{output_dir.name}.txt"
         lyrics_file.write_text(params.lyrics, encoding="utf-8")
+
+        # 重新合成成功：产出乐谱更新「使用上一次」记录
+        _update_last_abc(result.abc_score or abc_text or "")
 
         abc_download = str(output_dir / f"{output_dir.name}.abc") if result.abc_score else None
         mp3_download = result.mp3_path
@@ -753,7 +811,7 @@ def _transcribe_worker(_task, audio_path, lang="zh"):
         if p and p.get("message"):
             _task.push_progress(p.get("progress", 0), p["message"])
     
-    result = backend.transcribe(audio_path, output_dir, on_progress=on_progress)
+    result = backend.transcribe(audio_path, output_dir, on_progress=on_progress, lang=lang)
     
     if result.success:
         abc_score = result.abc_score or ""
@@ -1177,14 +1235,15 @@ def build_ui():
             # 说明文字用原生 HTML label（无 Gradio block 底色）
             gr.HTML('<label>Lang/语言</label>', elem_id="lang-hint", container=False)
             lang_select = gr.Dropdown(
-                choices=["中文", "English"], value="中文",
+                choices=["中文", "English"], value=("English" if _CUR_LANG == "en" else "中文"),
                 show_label=False, container=False,
                 elem_id="lang-dd", scale=0, min_width=90,
             )
         # 语言即时切换控件：下拉框选择中文/English，State 保存归一化语言标识。
         # translatables/_updaters 一一对应（同一组件各占一位），保证 apply_lang
         # 返回值数量与 outputs=[lang_state]+translatables 完全一致。
-        lang_state = gr.State("zh")
+        # 初始值取自 lang_state.json 恢复的 _CUR_LANG，重启后界面语言不回退。
+        lang_state = gr.State(_CUR_LANG)
         translatables: list = []
         _updaters: list = []
 
@@ -1198,6 +1257,7 @@ def build_ui():
             global _CUR_LANG
             nlang = normalize_lang(lang)
             _CUR_LANG = nlang
+            _save_lang_state(nlang)  # 持久化，服务重启后恢复
             return [nlang] + [u(nlang) for u in _updaters]
 
         _reg(title_md, lambda lang: gr.update(value="### YuE2 Music Studio · " + tr(lang, "AI音乐创作 — 输入歌词和风格，生成完整歌曲")))
@@ -1407,7 +1467,12 @@ def build_ui():
 
                         last_style_btn.click(fn=lambda cur: on_restore_last("style", cur), inputs=style_input, outputs=style_input)
                         last_lyrics_btn.click(fn=lambda cur: on_restore_last("lyrics", cur), inputs=lyrics_input, outputs=lyrics_input)
-                        last_abc_btn.click(fn=lambda cur: on_restore_last("abc", cur), inputs=abc_input, outputs=abc_input)
+                        # 恢复上次乐谱：off（直接生成）模式下 ABC 输入框隐藏，
+                        # 恢复到乐谱时自动切回 full 以显示输入框（cot 值变化触发 on_cot_change 联动显示）
+                        def _restore_last_abc(cur_abc, cur_cot):
+                            value = on_restore_last("abc", cur_abc)
+                            return value, ("full" if (value and cur_cot == "off") else cur_cot)
+                        last_abc_btn.click(fn=_restore_last_abc, inputs=[abc_input, cot_input], outputs=[abc_input, cot_input])
 
                         with gr.Row():
                             seed_input = gr.Number(label=_t("随机种子"), value=831001, precision=0, info=_t("勾选「随机种子变化」时每次生成自动换新，此处显示实际使用的种子"))
