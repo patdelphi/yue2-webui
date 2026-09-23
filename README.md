@@ -1,5 +1,9 @@
 ﻿# YuE2 Music Studio WebUI
 
+<a id="top"></a>
+
+**中文** | [English](#english)
+
 本项目是 **YuE2 音乐生成 WebUI** 主项目。基于香港科技大学联合 M-A-P 团队开发的 YuE2 模型，将 **歌词 + 风格描述** 转化为 48kHz 立体声音频，并引入 **ABC 乐谱** 作为可编辑的符号化中间表示，实现"白盒"音乐创作。
 
 > 底层推理代码位于上级目录 `src` / `backend_gguf.py`，本目录自成一个完整的 Gradio WebUI 应用。
@@ -47,7 +51,8 @@
 
 ### ⚙️ 设置
 - **系统状态**：检查模型文件是否就绪（模型 GGUF / VAE GGUF）。
-- **参数预设**：内置预设（默认 / 快速demo / 高质量 / 创意模式 / 保守模式），支持保存当前参数为自定义预设并加载。
+- **当前队列**：实时显示运行中 / 排队中任务与最近完成记录（每 2 秒自动刷新）。
+- **参数预设**：内置预设（默认 / 快速demo / 高质量 / 创意模式 / 保守模式），支持保存当前参数为自定义预设并加载（覆盖 CFG / 批量 / 后处理 / 采样全部 23 项参数）。
 
 ---
 
@@ -116,7 +121,7 @@ yue2-webui/
 │   ├── style_presets.py  # 风格快捷标签
 │   ├── vocal_presets.py  # 人声 / 乐器 / 情绪 / 语言 / 流派标签
 │   └── lyrics_templates.py # 歌词内容模板
-├── tests/                # 测试套件（i18n / 模型配置 / 语言持久化 / 使用上一次 / 历史回收站 / 队列）
+├── tests/                # 测试套件（i18n / 模型配置 / 语言持久化 / 使用上一次 / 历史回收站 / 队列 / 预设）
 ├── presets/              # 自定义参数预设存储
 ├── outputs/              # 生成结果（按任务定时戳分目录）
 ├── logs/                 # 运行日志
@@ -150,3 +155,163 @@ yue2-webui/
 ## 依赖库
 
 见 [requirements.txt](requirements.txt)，核心为 `gradio`、`torch`、`numpy`，音频处理使用 `audio-cpp` 工具。
+
+---
+
+<a id="english"></a>
+
+# YuE2 Music Studio WebUI (English)
+
+[中文](#top) | **English**
+
+This is the **YuE2 music generation WebUI** project. Built on the YuE2 model jointly developed by HKUST and the M-A-P team, it turns **lyrics + style descriptions** into 48kHz stereo audio, and introduces **ABC notation** as an editable symbolic intermediate representation for "white-box" music creation.
+
+> The underlying inference code lives in the parent directory (`src` / `backend_gguf.py`); this folder is a self-contained Gradio web app.
+
+---
+
+## Features
+
+- 🎵 **Full creation mode**: generates score + chords + audio (`cot=full`, default & recommended)
+- 🎼 **Melody mode**: melody only, ideal for covers (`cot=melody`)
+- ⚡ **Direct mode**: skips the score for the fastest results (`cot=off`)
+- 🎤 **Audio transcription**: upload audio and transcribe it to an ABC score (SheetSage2)
+- 🎨 **ABC score preview**: SVG-rendered sheet music with playback
+- 📝 **Lyrics structure editor**: section markers + drag-to-reorder + live structure analysis
+- 💬 **Lyrics comments**: lines starting with `//` or `**` are treated as comments and never sent to the model
+- 🔁 **"Use last time"**: one-click restore of the style / lyrics / score from the most recent generation
+- 🎛️ **Audio post-processing**: volume normalization, fade in/out, silence trimming, metadata embedding
+- 📦 **Batch variants**: up to 10 variants per run, each with an independent seed; variant selector for A/B listening and one-click "set as final"
+- 🎚️ **Full sampling control**: independent temperature / Top-P / Top-K / repetition penalty for the ABC stage (Stage 1) and semantic-token stage (Stage 2)
+- 📜 **Generation history**: paginated browsing, playback, lyric sync, score preview; auto-cleans records with missing files; delete/clear supported
+- 🎚️ **Preset system**: 5 built-in parameter presets plus save/load of custom presets
+- 🌐 **Bilingual UI (Chinese/English)**: instant switch at the top right, including Gradio built-in texts (upload hints / footer); model paths configured via external `config.cfg`
+
+---
+
+## UI Overview (4 Tabs)
+
+### 🎼 Create
+- **Style description**: language + genre + instruments + vocals + tempo. Built-in style / vocal / instrument / mood / language / genre quick tags — click to append.
+- **Lyrics**: supports `[Intro] [Verse] [Pre-Chorus] [Chorus] [Bridge] [Outro]` section markers; structure templates (V-C, V-C-V-C, V-C-V-C-B-C, A-A-B-A, etc.), drag-to-reorder sections, content templates.
+- **Work mode**: full creation / melody / direct.
+- **ABC score**: can be entered externally; after generation the score is filled back here — edit it and click "Resynthesize" to generate new audio from the modified score.
+- **Generation params**: random seed (optional auto-renew per run), CFG guidance scale, ODE steps, output format (PCM16/PCM24/Float32), batch variant count.
+- **Advanced sampling**: two groups of temperature / Top-P / Top-K / repetition penalty / penalty window / Min-Max tokens for ABC sampling (Stage 1) and semantic-token sampling (Stage 2).
+- **Output**: audio player, variant selector (shown for batches — "set as final" or "keep all"), ABC score preview, export MIDI / PNG / MP3, resynthesize.
+
+### 🎤 Transcribe
+- Upload audio (WAV / MP3 / FLAC / OGG / M4A, etc.) and transcribe it to an ABC score with SheetSage2.
+- Preview the score, download ABC / MIDI, or "Send to Create" to reuse it directly.
+
+### 📜 History
+- Paginated list: time, style, mode, audio duration, elapsed time, Task ID.
+- Click a record to play the audio, view lyric sync, preview the score, and inspect the ABC text and style description.
+- Records with missing files are cleaned automatically; delete selected / clear all / refresh supported.
+
+### ⚙️ Settings
+- **System status**: check whether model files are ready (main GGUF / VAE GGUF).
+- **Current queue**: live view of running / queued tasks and recent completions (auto-refreshes every 2s).
+- **Presets**: built-in presets (Default / Quick Demo / High Quality / Creative / Conservative); save the current parameters as a custom preset and load it back (covers all 23 params — CFG / batch / post-processing / sampling).
+
+---
+
+## Requirements
+
+- Windows 10/11 (also runs on Linux via `run.sh`)
+- Python 3.10 or newer
+- NVIDIA GPU (8GB+ VRAM recommended) + CUDA 11.8+ (CPU inference works but is much slower)
+- Disk space: at least 10GB for model files
+
+---
+
+## Installation & Running
+
+> For the full setup guide (YuE2 main-project environment, model download, transcription model, config.cfg), see **[Docs/setup.md](Docs/setup.md)**.
+
+### Windows
+```bash
+install.bat   # creates a dedicated venv under yue2-webui and installs dependencies (checks model files, prints download hints if missing)
+run.bat       # start the WebUI
+```
+
+### Linux
+```bash
+bash install.sh
+bash run.sh
+```
+
+After startup, open the Gradio address in your browser (**http://127.0.0.1:9898**).
+
+### Manual (recommended: share the repo-root venv with the main project)
+```bash
+python -m venv .venv           # run in the repository root
+.venv\Scripts\activate         # Windows; on Linux use source .venv/bin/activate
+pip install -e .               # install YuE2 main-project dependencies (main project first)
+pip install -r yue2-webui/requirements.txt   # then WebUI dependencies
+python yue2-webui/app.py
+```
+
+---
+
+## Model Files & config.cfg
+
+Model paths are configured centrally in the external **`config.cfg`** (`[models]` section: `models_dir` / `main_model` / `vae_model` / `sheetsage2_path`; relative paths are resolved against the repository root, absolute paths also work; falls back to built-in defaults if the file is missing):
+
+- `models/yue2-3b-q8_0.gguf` — main model (~4.0GB, manual download, see setup.md step 4)
+- `models/yue2-vae-f16.gguf` — VAE decoder (~250MB, same as above)
+- `audio-cpp/models/SheetSage2-GGUF/sheetsage2-orig.gguf` — transcription model (~2.5GB, bundled with the audio-cpp folder, no download needed)
+
+Model download is **never automatic**; check anytime under Settings → System status — the paths shown there come from `config.cfg`.
+
+---
+
+## Directory Layout
+
+```
+yue2-webui/
+├── app.py                # single entry point: Gradio UI and all interaction logic (core modules in src/)
+├── src/                  # core modules
+│   ├── backend_gguf.py   # GGUF backend wrapper + config.cfg model-path loading
+│   ├── config.py         # parameter definitions / defaults / validation (validate_params)
+│   ├── i18n.py           # bilingual dictionary and tr() interface
+│   ├── queue_manager.py  # task queue, concurrency and cancellation
+│   ├── history.py        # generation history persistence (history.json)
+│   ├── postprocess.py    # audio post-processing (normalize / fade / trim / metadata)
+│   ├── style_presets.py  # style quick tags
+│   ├── vocal_presets.py  # vocal / instrument / mood / language / genre tags
+│   └── lyrics_templates.py # lyric content templates
+├── tests/                # test suites (i18n / model config / lang persistence / use-last-time / recycle bin / queue / presets)
+├── presets/              # custom parameter presets
+├── outputs/              # generation results (one folder per task timestamp)
+├── logs/                 # runtime logs
+├── static/               # frontend static assets (score rendering, etc.)
+├── Docs/                 # documentation (setup guide / design / requirements)
+├── config.cfg            # external model-path config ([models] section; relative paths resolved against the parent system root)
+├── requirements.txt      # Python dependencies
+├── install.bat / install.sh
+├── run.bat / run.sh
+├── history.json          # history data
+├── last_inputs.json      # "use last time" record (style / lyrics / latest generated score)
+└── lang_state.json       # UI language persistence (restored after restart)
+```
+
+---
+
+## Typical Parameter Presets
+
+| Preset | ODE steps | CFG | Notes |
+| --- | --- | --- | --- |
+| Default | 8 | 0 | standard quality (recommended starting point) |
+| Quick Demo | 4 | 0 | fastest results, for quick previews |
+| High Quality | 32 | 0 | best quality (PCM24 output) |
+| Creative | 8 | 0 | sem_temp 1.5 / sem_top_p 0.98, more variety |
+| Conservative | 8 | 0 | sem_temp 0.3 / sem_rep_penalty 1.5, more stable |
+
+> CFG = 0 means Auto. Each variant in a batch gets an independent random seed; the fixed seed only applies to single generations.
+
+---
+
+## Dependencies
+
+See [requirements.txt](requirements.txt) — the core ones are `gradio`, `torch`, and `numpy`; audio processing uses the `audio-cpp` tools.
