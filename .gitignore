@@ -55,5 +55,11 @@ Thumbs.db
 # Test screenshots
 test_*.png
 
+# Voice tools runtime (generated, not tracked)
+voice-tools/tmp/
+voice-tools/stems/
+voice-tools/refs/
+.pytest_tmp/
+
 # Misc temporary
 =1.47

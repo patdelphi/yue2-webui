@@ -33,6 +33,8 @@ from history import HistoryManager, HistoryRecord
 from postprocess import postprocess_audio
 from queue_manager import queue_manager, TaskType, TaskStatus, TaskCancelledError
 from i18n import tr, normalize_lang
+from voice_client import VoiceClient
+from voice_ui_handlers import VoiceHandlers
 
 PROJECT_ROOT = Path(__file__).parent.parent
 WEBUI_ROOT = PROJECT_ROOT / "yue2-webui"
@@ -72,6 +74,15 @@ backend = GGUFBackend(PROJECT_ROOT)
 history_mgr = HistoryManager(
     history_file=WEBUI_ROOT / "history.json",
     outputs_root=WEBUI_ROOT / "outputs",
+)
+
+# 音色工坊：独立 worker 客户端 + 业务处理器（懒加载 worker 进程）
+voice_client = VoiceClient(PROJECT_ROOT)
+voice_handlers = VoiceHandlers(
+    project_root=PROJECT_ROOT,
+    webui_root=WEBUI_ROOT,
+    history_mgr=history_mgr,
+    voice_client=voice_client,
 )
 
 # Per-channel active task registry, so concurrent requests (e.g. generation
@@ -833,6 +844,174 @@ def on_send_to_generate(abc_text):
     return abc_text
 
 
+# =======================================================================
+# 音色工坊 Tab：业务函数（分离 / 翻唱 的入队与进度转发）
+# 复用 voice_handlers 的 run_in_queue + worker 回调；本层只做参数校验、
+# 进度转发和结果展平，不含模型推理逻辑（见 Docs/voice-tools-plan.md）。
+# =======================================================================
+
+def _voice_ref_choices(lang="zh"):
+    """生成音色库下拉选项：显示文件名，值为绝对路径。"""
+    paths = voice_handlers.list_refs()
+    # 组内键不得重复（Gradio choices 需 (label, value) 唯一即可）
+    return [(Path(p).name or p, p) for p in paths]
+
+
+def _voice_ref_names():
+    """仅返回文件名列表（用于「从音色库选择」的 label）。"""
+    return [Path(p).name or p for p in voice_handlers.list_refs()]
+
+
+# 分离轨道类型 → 中文标签（与 worker 分离产物键一致）
+_STEM_TYPE_LABELS = {"vocals": "人声", "accompaniment": "伴奏",
+                     "drums": "鼓", "bass": "贝斯", "other": "其他"}
+
+
+def _voice_stem_choices(lang="zh", exclude_vocals=True):
+    """素材库下拉：列出轨道素材（label 标注类型）；默认排除人声轨（作伴奏用）。"""
+    out = []
+    for name, stype, p in voice_handlers.list_stems():
+        if exclude_vocals and stype == "vocals":
+            continue
+        out.append((f"{name} · {tr(lang, _STEM_TYPE_LABELS.get(stype, stype))}", p))
+    return out
+
+
+def _voice_source_history_choices(lang="zh", limit=50):
+    """生成「从历史记录选择」下拉：列出最近 generation/cover 记录（有音频者）。"""
+    choices = []
+    for rec in history_mgr.list_all():
+        if rec.audio_path and Path(rec.audio_path).exists() \
+                and rec.record_type in ("generation", "cover"):
+            choices.append((f"{rec.record_type} · {Path(rec.audio_path).name}", rec.audio_path))
+        if len(choices) >= limit:
+            break
+    return choices
+
+
+def _voice_dry_history_choices(lang="zh", limit=50):
+    """生成「从干声历史选择」下拉：仅列人声分离产出的人声干声记录。"""
+    choices = []
+    for rec in history_mgr.list_all():
+        if rec.audio_path and Path(rec.audio_path).exists() \
+                and rec.record_type == "separation":
+            choices.append((f"separation · {Path(rec.audio_path).name}", rec.audio_path))
+        if len(choices) >= limit:
+            break
+    return choices
+
+
+def on_voice_save_ref(src_upload, name_input):
+    """把上传的参考干声存入音色库，返回(成功提示, 音色库新下拉选项)。"""
+    if not src_upload:
+        raise gr.Error(tr(_CUR_LANG, "请先上传音频文件"))
+    name = (name_input or "").strip() or Path(src_upload).stem
+    voice_handlers.save_ref(src_upload, name)
+    return tr(_CUR_LANG, "已保存到音色库"), _voice_ref_choices(_CUR_LANG)
+
+
+def on_voice_src_mode(src_mode):
+    """源音频两入口显隐：history 下拉 或 上传。"""
+    return gr.update(visible=(src_mode == "history")), gr.update(visible=(src_mode == "upload"))
+
+
+def on_voice_ref_mode(ref_mode):
+    """参考音色三入口显隐：音色库 / 干声历史 / 上传(含命名保存)。"""
+    return (gr.update(visible=(ref_mode == "library")),
+            gr.update(visible=(ref_mode == "dry")),
+            gr.update(visible=(ref_mode == "upload")))
+
+
+def _resolve_voice_source(history_val, upload_val):
+    """从「历史记录 / 上传」两入口取实际音频路径，两者均无效则抛错。"""
+    path = upload_val if upload_val and Path(upload_val).exists() else history_val
+    if not path or not Path(path).exists():
+        raise gr.Error(tr(_CUR_LANG, "请先选择源音频"))
+    return str(path)
+
+
+def on_voice_separate(source_history, source_upload, sep_mode="vocals",
+                      progress=gr.Progress(track_tqdm=False)):
+    """音轨分离：入队 Demucs，返回产物(文件列表, 历史提示, 轨道下拉, 产物字典)。"""
+    source = _resolve_voice_source(source_history, source_upload)
+    vote = "2" if sep_mode == "vocals" else "4"
+    lang = _CUR_LANG
+    result = voice_handlers.run_in_queue(
+        TaskType.SEPARATION, voice_handlers.separate_worker,
+        lang, tr, "音轨分离",
+        lambda v, d: progress(v, desc=d),
+        source=source, mode=vote, root_task_id="",
+    )
+    # 产物列表（存在才展示）
+    files = []
+    for p in sorted(result.get("products", {}).values()):
+        if isinstance(p, str) and Path(p).exists():
+            files.append(p)
+    note = tr(lang, "分离完成") + " · " + tr(lang, "写入历史")
+    # 轨道下拉 choices：label 用类型中文名，value 用产物路径（人声在前）
+    products = result.get("products", {})
+    items = [(tr(lang, _STEM_TYPE_LABELS.get(k, k)), v)
+             for k, v in products.items() if isinstance(v, str) and Path(v).exists()]
+    dd_update = gr.update(choices=items, value=items[0][1] if items else None)
+    return files, note, dd_update, products
+
+
+def on_voice_sep_save_ref(stem_path, name_input, products):
+    """把选中的分离轨道存库：人声→音色库（Seed-VC 参考），乐器轨→素材库。
+
+    衔接「音轨分离 → 音色翻唱」：分离产物按类型分流入库，切到翻唱 Tab 即可选用。
+    """
+    if not stem_path or not Path(stem_path).exists():
+        raise gr.Error(tr(_CUR_LANG, "请先选择源音频"))
+    # 从产物字典反查轨道类型
+    stype = next((k for k, v in (products or {}).items() if v == stem_path), "other")
+    name = (name_input or "").strip() or Path(stem_path).stem
+    if stype == "vocals":
+        voice_handlers.save_ref(stem_path, name)
+        return tr(_CUR_LANG, "已保存到音色库")
+    voice_handlers.save_stem(stem_path, name, stype)
+    return tr(_CUR_LANG, "已保存到素材库")
+
+
+def on_voice_cover(source_history, source_upload, ref_library, ref_dry, ref_upload,
+                   semi_tone=0, steps=30, gain_db=0.0, custom_acc="",
+                   progress=gr.Progress(track_tqdm=False)):
+    """参考音色翻唱：入队 分离+换嗓+混音 全流程，返回成品/中间产物。
+
+    custom_acc=自定义伴奏路径（素材库），留空则用源曲分离出的原伴奏。
+    """
+    source = _resolve_voice_source(source_history, source_upload)
+    # 参考音色解析优先级：上传 → 干声历史 → 音色库
+    ref = None
+    for cand in (ref_upload, ref_dry, ref_library):
+        if cand and Path(cand).exists():
+            ref = cand
+            break
+    if not ref:
+        raise gr.Error(tr(_CUR_LANG, "请先选择参考音色"))
+    # 自定义伴奏校验（选了但文件缺失则忽略，回退原伴奏）
+    acc = custom_acc if custom_acc and Path(custom_acc).exists() else ""
+    lang = _CUR_LANG
+    result = voice_handlers.run_in_queue(
+        TaskType.COVER, voice_handlers.cover_worker,
+        lang, tr, "参考音色翻唱",
+        lambda v, d: progress(v, desc=d),
+        source=source, ref=str(ref),
+        accompaniment=acc, semi_tone=int(semi_tone or 0),
+        diffusion_steps=int(steps or 30), gain_db=float(gain_db or 0.0),
+        root_task_id="",
+    )
+    products = result.get("products", {})
+    final_path = products.get("cover", "")
+    conv_path = products.get("converted_vocals", "")
+    acc_path = products.get("accompaniment", "")
+    all_files = [final_path] + [p for p in (conv_path, acc_path) if p]
+    # 过滤已存在者，避免组件报错
+    all_files = [p for p in all_files if isinstance(p, str) and Path(p).exists()]
+    note = tr(lang, "翻唱完成") + " · " + tr(lang, "写入历史")
+    return all_files, note
+
+
 def on_random_seed():
     """Generate random seed."""
     return random.randint(0, 2**31 - 1)
@@ -946,23 +1125,38 @@ def on_history_next_page(current_page):
 
 
 def _load_history_entry(row_index, current_state):
-    """Load a history entry by row index. Returns state, audio, info, style, lyrics, abc, preview, lyrics_data, duration_data."""
+    """Load a history entry by row index.
+    返回 state, audio, info, style, lyrics, abc, preview, lyrics_data, duration_data, stem_dd, stem_audio。
+    """
+    no_stem = gr.update(visible=False, choices=[]), gr.update(visible=False, value=None)
     rows = history_mgr.to_dataframe_rows()
     if row_index < 0 or row_index >= len(rows):
-        return current_state, None, tr(_CUR_LANG, "请选择一条记录"), "", "", "", "", "", ""
+        return current_state, None, tr(_CUR_LANG, "请选择一条记录"), "", "", "", "", "", "", *no_stem
     task_id = rows[row_index][5]
     entry = history_mgr.get(task_id)
     if not entry:
-        return current_state, None, tr(_CUR_LANG, "记录不存在"), "", "", "", "", "", ""
+        return current_state, None, tr(_CUR_LANG, "记录不存在"), "", "", "", "", "", "", *no_stem
     audio_path = Path(entry.audio_path)
     abc_score = history_mgr.get_abc_score(task_id) or ""
+    # 多轨产物回放：仅有 separation/cover 且存在条目标签才显示
+    stem_choices = []
+    stem_first = None
+    for s in getattr(entry, "stems", None) or []:
+        p = s.get("path", "") if isinstance(s, dict) else ""
+        if p and Path(p).exists():
+            stem_choices.append((s.get("label", p), p))
+            stem_first = stem_first or p
+    has_stem = bool(stem_choices)
+    stem_dd = gr.update(choices=stem_choices, value=stem_first if stem_choices else None,
+                        visible=has_stem)
+    stem_audio = gr.update(value=stem_first, visible=has_stem)
     if audio_path.exists():
         lyrics = entry.lyrics or entry.lyrics_preview or ""
         _lyrics_json = html.escape(json.dumps(lyrics, ensure_ascii=False), quote=True)
         lyrics_data = f'<div class="history-lyrics-data" style="display:none" data-lyrics=\'{_lyrics_json}\' data-duration="{entry.audio_duration_seconds}"></div>'
         abc_preview = '<div id="history-abc-preview-container" style="padding: 20px; border-radius: 8px; min-height: 200px;"><div id="history-abc-paper"></div><div id="history-abc-audio"></div></div>'
-        return [task_id], str(audio_path), f"**{entry.task_id}**", entry.style, lyrics, abc_score, abc_preview, lyrics_data, f'<div class="history-duration-data" style="display:none" data-duration="{entry.audio_duration_seconds}"></div>'
-    return [task_id], None, tr(_CUR_LANG, "音频文件不存在"), "", "", "", "", "", ""
+        return [task_id], str(audio_path), f"**{entry.task_id}**", entry.style, lyrics, abc_score, abc_preview, lyrics_data, f'<div class="history-duration-data" style="display:none" data-duration="{entry.audio_duration_seconds}"></div>', stem_dd, stem_audio
+    return [task_id], None, tr(_CUR_LANG, "音频文件不存在"), "", "", "", "", "", "", stem_dd, stem_audio
 
 
 def on_history_select(evt: gr.SelectData, current_state: list, current_page):
@@ -1033,7 +1227,8 @@ def on_check_models():
 
 
 # 队列任务类型 → 展示名（中文原文走 tr 翻译）
-_QUEUE_TYPE_LABELS = {"generation": "生成", "transcription": "转谱"}
+_QUEUE_TYPE_LABELS = {"generation": "生成", "transcription": "转谱",
+                      "separation": "分离", "cover": "翻唱"}
 
 
 def _queue_status_html():
@@ -1767,6 +1962,11 @@ def build_ui():
                     _reg(history_next_btn, lambda lang: gr.update(value=tr(lang, "下一页")))
                 history_audio = gr.Audio(label=_t("试听"), type="filepath", elem_id="history-audio")
                 _reg(history_audio, lambda lang: gr.update(label=tr(lang, "试听")))
+                history_stem_dd = gr.Dropdown(label=_t("轨道回放(分离/翻唱)"),
+                                              choices=[], interactive=True, visible=False)
+                _reg(history_stem_dd, lambda lang: gr.update(label=tr(lang, "轨道回放(分离/翻唱)")))
+                history_stem_audio = gr.Audio(type="filepath", elem_id="history-stem-audio",
+                                              visible=False)
                 history_info = gr.Markdown()
                 with gr.Row():
                     with gr.Column(scale=1):
@@ -1797,14 +1997,202 @@ def build_ui():
                     history_clear_btn = gr.Button(_t("清空历史"))
                     _reg(history_clear_btn, lambda lang: gr.update(value=tr(lang, "清空历史")))
 
-                history_df.select(fn=on_history_select, inputs=[history_state, history_page], outputs=[history_state, history_audio, history_info, history_style, history_lyrics, history_abc, history_abc_preview, history_lyrics_data, history_duration_data])
-                history_row_trigger.change(fn=on_history_row_click, inputs=[history_row_trigger, history_state, history_page], outputs=[history_state, history_audio, history_info, history_style, history_lyrics, history_abc, history_abc_preview, history_lyrics_data, history_duration_data])
+                history_df.select(fn=on_history_select, inputs=[history_state, history_page], outputs=[history_state, history_audio, history_info, history_style, history_lyrics, history_abc, history_abc_preview, history_lyrics_data, history_duration_data, history_stem_dd, history_stem_audio])
+                history_row_trigger.change(fn=on_history_row_click, inputs=[history_row_trigger, history_state, history_page], outputs=[history_state, history_audio, history_info, history_style, history_lyrics, history_abc, history_abc_preview, history_lyrics_data, history_duration_data, history_stem_dd, history_stem_audio])
+                history_stem_dd.change(fn=lambda v: gr.update(value=v, visible=True), inputs=history_stem_dd, outputs=history_stem_audio)
                 history_refresh_btn.click(fn=refresh_history_full, outputs=[history_df, history_page_info, history_page])
                 history_delete_btn.click(fn=on_history_delete, inputs=history_state, outputs=[history_df, history_page_info, history_info, history_state, history_page])
                 history_clear_btn.click(fn=on_history_clear, outputs=[history_df, history_page_info, history_info, history_state, history_page])
                 history_prev_btn.click(fn=on_history_prev_page, inputs=history_page, outputs=[history_df, history_page_info, history_page])
                 history_next_btn.click(fn=on_history_next_page, inputs=history_page, outputs=[history_df, history_page_info, history_page])
                 demo.load(fn=refresh_history_full, outputs=[history_df, history_page_info, history_page])
+
+            with gr.Tab(_t("音轨分离")) as tab_sep:
+                _reg(tab_sep, lambda lang: gr.update(label=tr(lang, "音轨分离")))
+                # —— 左右分栏：左=源音频+分离参数，右=执行与输出 ——
+                with gr.Row():
+                    with gr.Column(scale=5):
+                        sep_src_md = gr.Markdown(_t("### 源音频"))
+                        _reg(sep_src_md, lambda lang: gr.update(value=tr(lang, "### 源音频")))
+
+                        # 源音频：历史记录 或 上传（value 固定 history/upload）
+                        sep_src_mode = gr.Radio(choices=[
+                            (_t("从历史记录选择"), "history"), (_t("上传音频"), "upload"),
+                        ], value="history", label=_t("当前源"))
+                        _reg(sep_src_mode, lambda lang: gr.update(
+                            choices=[(tr(lang, "从历史记录选择"), "history"), (tr(lang, "上传音频"), "upload")],
+                            label=tr(lang, "当前源")))
+
+                        sep_src_history = gr.Dropdown(
+                            choices=_voice_source_history_choices(_CUR_LANG),
+                            label=_t("从历史记录选择"), interactive=True)
+                        _reg(sep_src_history, lambda lang: gr.update(
+                            choices=_voice_source_history_choices(lang),
+                            label=tr(lang, "从历史记录选择")))
+
+                        sep_src_upload = gr.Audio(label=_t("上传音频"), type="filepath",
+                                                  elem_id="sep-src-upload", visible=False)
+                        _reg(sep_src_upload, lambda lang: gr.update(label=tr(lang, "上传音频")))
+
+                        sep_param_md = gr.Markdown(_t("### 音轨分离"))
+                        _reg(sep_param_md, lambda lang: gr.update(value=tr(lang, "### 音轨分离")))
+                        sep_stem_mode = gr.Radio(choices=[
+                            (_t("人声/伴奏"), "vocals"), (_t("人声/鼓/贝斯/其他"), "full"),
+                        ], value="vocals", label=_t("分离模式"))
+                        _reg(sep_stem_mode, lambda lang: gr.update(
+                            choices=[(tr(lang, "人声/伴奏"), "vocals"), (tr(lang, "人声/鼓/贝斯/其他"), "full")],
+                            label=tr(lang, "分离模式")))
+
+                    # —— 右栏：执行与输出 ——
+                    with gr.Column(scale=4):
+                        sep_btn = gr.Button(_t("开始分离"), variant="primary")
+                        _reg(sep_btn, lambda lang: gr.update(value=tr(lang, "开始分离")))
+                        sep_info = gr.Markdown()
+                        sep_files = gr.Files(label=_t("输出产物"), elem_id="sep-files", interactive=False)
+                        _reg(sep_files, lambda lang: gr.update(label=tr(lang, "输出产物")))
+                        # —— 衔接「分离 → 翻唱」：分离轨道入库（人声→音色库，乐器轨→素材库） ——
+                        sep_products_state = gr.State(value={})
+                        sep_ref_md = gr.Markdown(_t("### 保存分离轨到库"))
+                        _reg(sep_ref_md, lambda lang: gr.update(value=tr(lang, "### 保存分离轨到库")))
+                        sep_stem_dd = gr.Dropdown(label=_t("选择轨道"), interactive=True)
+                        _reg(sep_stem_dd, lambda lang: gr.update(label=tr(lang, "选择轨道")))
+                        sep_ref_name = gr.Textbox(label=_t("命名"), elem_id="sep-ref-name")
+                        _reg(sep_ref_name, lambda lang: gr.update(label=tr(lang, "命名")))
+                        sep_save_btn = gr.Button(_t("保存到库"), size="sm")
+                        _reg(sep_save_btn, lambda lang: gr.update(value=tr(lang, "保存到库")))
+                        sep_save_info = gr.Markdown()
+
+                # 事件绑定
+                sep_src_mode.change(fn=on_voice_src_mode, inputs=sep_src_mode,
+                                    outputs=[sep_src_history, sep_src_upload])
+                sep_btn.click(fn=on_voice_separate,
+                              inputs=[sep_src_history, sep_src_upload, sep_stem_mode],
+                              outputs=[sep_files, sep_info, sep_stem_dd, sep_products_state])
+                sep_save_btn.click(fn=on_voice_sep_save_ref,
+                                   inputs=[sep_stem_dd, sep_ref_name, sep_products_state],
+                                   outputs=[sep_save_info])
+
+            with gr.Tab(_t("音色翻唱")) as tab_cover:
+                _reg(tab_cover, lambda lang: gr.update(label=tr(lang, "音色翻唱")))
+                # —— 左右分栏：左=被翻唱歌曲+参考音色+翻唱参数，右=执行与输出 ——
+                with gr.Row():
+                    with gr.Column(scale=5):
+                        cover_src_md = gr.Markdown(_t("### 被翻唱歌曲"))
+                        _reg(cover_src_md, lambda lang: gr.update(value=tr(lang, "### 被翻唱歌曲")))
+
+                        # 被翻唱歌曲：历史记录 或 上传（value 固定 history/upload）
+                        cover_src_mode = gr.Radio(choices=[
+                            (_t("从历史记录选择"), "history"), (_t("上传音频"), "upload"),
+                        ], value="history", label=_t("当前源"))
+                        _reg(cover_src_mode, lambda lang: gr.update(
+                            choices=[(tr(lang, "从历史记录选择"), "history"), (tr(lang, "上传音频"), "upload")],
+                            label=tr(lang, "当前源")))
+
+                        cover_src_history = gr.Dropdown(
+                            choices=_voice_source_history_choices(_CUR_LANG),
+                            label=_t("从历史记录选择"), interactive=True)
+                        _reg(cover_src_history, lambda lang: gr.update(
+                            choices=_voice_source_history_choices(lang),
+                            label=tr(lang, "从历史记录选择")))
+
+                        cover_src_upload = gr.Audio(label=_t("上传音频"), type="filepath",
+                                                    elem_id="cover-src-upload", visible=False)
+                        _reg(cover_src_upload, lambda lang: gr.update(label=tr(lang, "上传音频")))
+
+                        # —— 参考音色三入口：音色库 / 干声历史 / 上传 ——
+                        cover_ref_md = gr.Markdown(_t("### 参考音色"))
+                        _reg(cover_ref_md, lambda lang: gr.update(value=tr(lang, "### 参考音色")))
+
+                        cover_ref_mode = gr.Radio(choices=[
+                            (_t("从音色库选择"), "library"), (_t("从干声历史选择"), "dry"),
+                            (_t("上传参考干声(1-30秒)"), "upload"),
+                        ], value="library", label=_t("参考音色"))
+                        _reg(cover_ref_mode, lambda lang: gr.update(
+                            choices=[(tr(lang, "从音色库选择"), "library"),
+                                     (tr(lang, "从干声历史选择"), "dry"),
+                                     (tr(lang, "上传参考干声(1-30秒)"), "upload")],
+                            label=tr(lang, "参考音色")))
+
+                        # 音色库入口（默认可见）
+                        cover_ref_dropdown = gr.Dropdown(
+                            choices=_voice_ref_choices(_CUR_LANG), label=_t("音色库选择"),
+                            interactive=True)
+                        _reg(cover_ref_dropdown, lambda lang: gr.update(
+                            choices=_voice_ref_choices(lang), label=tr(lang, "音色库选择")))
+
+                        # 干声历史入口：仅列人声分离产出的人声干声（默认隐藏）
+                        cover_ref_dry = gr.Dropdown(
+                            choices=_voice_dry_history_choices(_CUR_LANG),
+                            label=_t("干声历史选择"), interactive=True, visible=False)
+                        _reg(cover_ref_dry, lambda lang: gr.update(
+                            choices=_voice_dry_history_choices(lang),
+                            label=tr(lang, "干声历史选择")))
+
+                        # 上传入口（含命名保存，仅 upload 模式可见）
+                        with gr.Column(visible=False) as cover_ref_upload_panel:
+                            cover_ref_upload = gr.Audio(label=_t("上传参考干声(1-30秒)"), type="filepath",
+                                                        elem_id="cover-ref-upload")
+                            _reg(cover_ref_upload, lambda lang: gr.update(label=tr(lang, "上传参考干声(1-30秒)")))
+                            with gr.Row():
+                                cover_ref_name = gr.Textbox(label=_t("输入音色库名称"), elem_id="cover-ref-name")
+                                _reg(cover_ref_name, lambda lang: gr.update(label=tr(lang, "输入音色库名称")))
+                                cover_ref_save_btn = gr.Button(_t("保存到音色库"), size="sm")
+                                _reg(cover_ref_save_btn, lambda lang: gr.update(value=tr(lang, "保存到音色库")))
+                            cover_ref_info = gr.Markdown(_t("保存参考音色提示"))
+                            _reg(cover_ref_info, lambda lang: gr.update(value=tr(lang, "保存参考音色提示")))
+
+                        # —— 自定义伴奏（可选）：从素材库选乐器轨替换原曲伴奏 ——
+                        cover_acc_dd = gr.Dropdown(
+                            choices=_voice_stem_choices(_CUR_LANG),
+                            label=_t("自定义伴奏(可选)"), interactive=True,
+                            info=_t("留空自动使用源伴奏"))
+                        _reg(cover_acc_dd, lambda lang: gr.update(
+                            choices=_voice_stem_choices(lang),
+                            label=tr(lang, "自定义伴奏(可选)"),
+                            info=tr(lang, "留空自动使用源伴奏")))
+
+                        # —— 翻唱参数 ——
+                        cover_semi = gr.Slider(-12, 12, value=0, step=1, label=_t("半音偏移"))
+                        _reg(cover_semi, lambda lang: gr.update(label=tr(lang, "半音偏移")))
+                        with gr.Row():
+                            cover_semi_orig = gr.Button(_t("半音快捷原调"), size="sm")
+                            _reg(cover_semi_orig, lambda lang: gr.update(value=tr(lang, "半音快捷原调")))
+                            cover_semi_m12 = gr.Button(_t("−12"), size="sm")
+                            cover_semi_p12 = gr.Button(_t("+12"), size="sm")
+                        cover_steps = gr.Slider(10, 50, value=30, step=1, label=_t("扩散步数"))
+                        _reg(cover_steps, lambda lang: gr.update(label=tr(lang, "扩散步数")))
+                        cover_gain = gr.Slider(-6, 6, value=0, step=0.5, label=_t("伴奏增益(dB)"))
+                        _reg(cover_gain, lambda lang: gr.update(label=tr(lang, "伴奏增益(dB)")))
+
+                    # —— 右栏：执行与输出 ——
+                    with gr.Column(scale=4):
+                        cover_btn = gr.Button(_t("开始翻唱"), variant="primary")
+                        _reg(cover_btn, lambda lang: gr.update(value=tr(lang, "开始翻唱")))
+                        cover_info = gr.Markdown()
+                        cover_files = gr.Files(label=_t("输出产物"), elem_id="cover-files", interactive=False)
+                        _reg(cover_files, lambda lang: gr.update(label=tr(lang, "输出产物")))
+
+                # 事件绑定
+                cover_src_mode.change(fn=on_voice_src_mode, inputs=cover_src_mode,
+                                      outputs=[cover_src_history, cover_src_upload])
+                cover_ref_mode.change(fn=on_voice_ref_mode, inputs=cover_ref_mode,
+                                      outputs=[cover_ref_dropdown, cover_ref_dry,
+                                               cover_ref_upload_panel])
+                cover_ref_save_btn.click(fn=on_voice_save_ref, inputs=[cover_ref_upload, cover_ref_name],
+                                         outputs=[cover_ref_info, cover_ref_dropdown])
+                cover_semi_orig.click(fn=lambda: 0, outputs=cover_semi)
+                cover_semi_m12.click(fn=lambda: -12, outputs=cover_semi)
+                cover_semi_p12.click(fn=lambda: 12, outputs=cover_semi)
+                cover_btn.click(fn=on_voice_cover,
+                                inputs=[cover_src_history, cover_src_upload,
+                                        cover_ref_dropdown, cover_ref_dry, cover_ref_upload,
+                                        cover_semi, cover_steps, cover_gain, cover_acc_dd],
+                                outputs=[cover_files, cover_info])
+
+                # 每次切到翻唱 Tab 时刷新音色库/伴奏下拉（衔接「分离入库 → 翻唱选用」）
+                tab_cover.select(fn=lambda: (_voice_ref_choices(_CUR_LANG),
+                                             _voice_stem_choices(_CUR_LANG)),
+                                 outputs=[cover_ref_dropdown, cover_acc_dd])
 
             with gr.Tab(_t("设置")) as tab_settings:
                 _reg(tab_settings, lambda lang: gr.update(label=tr(lang, "设置")))

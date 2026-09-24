@@ -25,11 +25,12 @@
 - 🎚️ **完整采样参数控制**：ABC 阶段（Stage 1）与语义 Token 阶段（Stage 2）独立温度 / Top-P / Top-K / 重复惩罚等
 - 📜 **生成历史管理**：分页浏览、试听、歌词同步、乐谱预览，自动清理缺失文件记录，可删除/清空
 - 🎚️ **预设系统**：5 套内置参数预设，支持自定义预设的保存与加载
+- 🎛️ **音色工坊**：音轨分离（Demucs）拆分任意音频为人声/伴奏，参考音色翻唱（Demucs + Seed-VC）将歌曲换嗓后与伴奏混音，支持历史/上传源与参考音色库（可选功能，独立安装）
 - 🌐 **中英双语界面**：右上角即时切换，含 Gradio 内置文案（上传提示/页脚）同步切换；模型路径外置 `config.cfg` 配置
 
 ---
 
-## 界面结构（4 个 Tab）
+## 界面结构（4 个 Tab + 可选「音色工坊」）
 
 ### 🎼 创作
 - **风格描述**：语言 + 流派 + 乐器 + 人声 + 速度。内置风格 / 人声 / 乐器 / 情绪 / 语言 / 流派快捷标签，点击自动追加到文本框。
@@ -48,6 +49,12 @@
 - 分页列表显示：时间、风格、模式、音频时长、生成耗时、Task ID。
 - 点击记录可试听音频、查看歌词同步、预览乐谱、查看 ABC 文本与风格描述。
 - 自动清理缺失文件的历史记录；支持删除选中、清空全部、刷新。
+
+### 🎛️ 音色工坊（可选）
+- **音轨分离**：把任意音频拆为人声/伴奏（2 轨）或鼓/贝斯/其他（4 轨），使用 Demucs。
+- **参考音色翻唱**：完整歌曲 → 分离人声 → 换成参考音色（Seed-VC）→ 与伴奏混音，支持半音移调 / 扩散步数 / 伴奏增益。
+- **源与参考**：可从生成历史选择源音频或直接上传；参考干声可一键存入音色库复用。
+- 产物自动聚合到源任务目录并写入历史；需独立安装（见 setup.md 第 6 节）。
 
 ### ⚙️ 设置
 - **系统状态**：检查模型文件是否就绪（模型 GGUF / VAE GGUF）。
@@ -92,6 +99,8 @@ pip install -r yue2-webui/requirements.txt   # 再装 WebUI 依赖
 python yue2-webui/app.py
 ```
 
+> 需要「音色工坊」（分离/翻唱）时，另运行 `yue2-webui\install_voice.bat` 安装独立依赖，见 **Docs/setup.md 第 6 节**。
+
 ---
 
 ## 模型文件与 config.cfg
@@ -120,13 +129,19 @@ yue2-webui/
 │   ├── postprocess.py    # 音频后处理（标准化 / 淡入淡出 / 裁剪 / 元数据）
 │   ├── style_presets.py  # 风格快捷标签
 │   ├── vocal_presets.py  # 人声 / 乐器 / 情绪 / 语言 / 流派标签
-│   └── lyrics_templates.py # 歌词内容模板
-├── tests/                # 测试套件（i18n / 模型配置 / 语言持久化 / 使用上一次 / 历史回收站 / 队列 / 预设）
+│   ├── lyrics_templates.py # 歌词内容模板
+│   ├── voice_client.py   # 音色工坊 worker 客户端（分离/翻唱 HTTP 调用）
+│   └── voice_ui_handlers.py # 音色工坊队列 worker/历史/音色库逻辑
+├── tests/                # 测试套件（i18n / 模型配置 / 语言持久化 / 使用上一次 / 历史回收站 / 队列 / 预设 / 音色工坊）
+├── voice-tools/          # 音色工坊独立环境 & 参考音色库（可选）
+│   ├── worker.py         # 独立 venv HTTP worker（Demucs / Seed-VC）
+│   ├── venv/             # 独立 Python 3.11 虚拟环境
+│   └── refs/             # 参考音色库
 ├── presets/              # 自定义参数预设存储
 ├── outputs/              # 生成结果（按任务定时戳分目录）
 ├── logs/                 # 运行日志
 ├── static/               # 前端静态资源（乐谱渲染等）
-├── Docs/                 # 项目文档（setup 安装指南 / design 设计方案 / requirements 需求）
+├── Docs/                 # 项目文档（setup 安装指南 / design 设计方案 / requirements 需求 / changelog 变更日志 / voice-tools-plan 音色工坊规划）
 ├── config.cfg            # 模型路径外置配置（[models] 段；相对路径基于上级系统根解析）
 ├── requirements.txt      # Python 依赖
 ├── install.bat / install.sh
@@ -185,11 +200,12 @@ This is the **YuE2 music generation WebUI** project. Built on the YuE2 model joi
 - 🎚️ **Full sampling control**: independent temperature / Top-P / Top-K / repetition penalty for the ABC stage (Stage 1) and semantic-token stage (Stage 2)
 - 📜 **Generation history**: paginated browsing, playback, lyric sync, score preview; auto-cleans records with missing files; delete/clear supported
 - 🎚️ **Preset system**: 5 built-in parameter presets plus save/load of custom presets
+- 🎛️ **Voice Studio**: stem separation (Demucs) splits any audio into vocals/accompaniment, and reference-timbre covers (Demucs + Seed-VC) re-voice a song and mix it with the accompaniment; supports history/upload sources and a reference-timbre library (optional feature, installed separately)
 - 🌐 **Bilingual UI (Chinese/English)**: instant switch at the top right, including Gradio built-in texts (upload hints / footer); model paths configured via external `config.cfg`
 
 ---
 
-## UI Overview (4 Tabs)
+## UI Overview (4 Tabs + optional Voice Studio)
 
 ### 🎼 Create
 - **Style description**: language + genre + instruments + vocals + tempo. Built-in style / vocal / instrument / mood / language / genre quick tags — click to append.
@@ -208,6 +224,12 @@ This is the **YuE2 music generation WebUI** project. Built on the YuE2 model joi
 - Paginated list: time, style, mode, audio duration, elapsed time, Task ID.
 - Click a record to play the audio, view lyric sync, preview the score, and inspect the ABC text and style description.
 - Records with missing files are cleaned automatically; delete selected / clear all / refresh supported.
+
+### 🎛️ Voice Studio (optional)
+- **Stem separation**: split any audio into vocals/accompaniment (2 stems) or drums/bass/other (4 stems) with Demucs.
+- **Reference-timbre cover**: full song → separate vocals → re-voice with a reference timbre (Seed-VC) → mix with the accompaniment; supports semitone shift / diffusion steps / accompaniment gain.
+- **Sources & references**: pick the source from generation history or upload directly; save a reference dry vocal to the timbre library with one click.
+- Outputs are aggregated into the source task folder and written to history; requires a separate install (see setup.md §6).
 
 ### ⚙️ Settings
 - **System status**: check whether model files are ready (main GGUF / VAE GGUF).
@@ -245,12 +267,15 @@ After startup, open the Gradio address in your browser (**http://127.0.0.1:9898*
 
 ### Manual (recommended: share the repo-root venv with the main project)
 ```bash
-python -m venv .venv           # run in the repository root
-.venv\Scripts\activate         # Windows; on Linux use source .venv/bin/activate
-pip install -e .               # install YuE2 main-project dependencies (main project first)
-pip install -r yue2-webui/requirements.txt   # then WebUI dependencies
-python yue2-webui/app.py
+# run in the repository root
+python -m venv .venv
+.venv\Scripts\activate            # Windows; on Linux use source .venv/bin/activate
+pip install -e .                  # install YuE2 main-project dependencies (main project first)
+pip install -r yue2-webui\requirements.txt   # then WebUI dependencies
+python yue2-webui\app.py
 ```
+
+> To enable the Voice Studio (separation / cover), also run `yue2-webui\install_voice.bat` to install the isolated dependencies — see **Docs/setup.md §6**.
 
 ---
 
@@ -280,13 +305,19 @@ yue2-webui/
 │   ├── postprocess.py    # audio post-processing (normalize / fade / trim / metadata)
 │   ├── style_presets.py  # style quick tags
 │   ├── vocal_presets.py  # vocal / instrument / mood / language / genre tags
-│   └── lyrics_templates.py # lyric content templates
-├── tests/                # test suites (i18n / model config / lang persistence / use-last-time / recycle bin / queue / presets)
+│   ├── lyrics_templates.py # lyric content templates
+│   ├── voice_client.py   # voice-studio worker client (separation / cover HTTP calls)
+│   └── voice_ui_handlers.py # voice-studio queue workers / history / timbre library
+├── tests/                # test suites (i18n / model config / lang persistence / use-last-time / recycle bin / queue / presets / voice studio)
+├── voice-tools/          # voice-studio isolated env & reference-timbre library (optional)
+│   ├── worker.py         # standalone venv HTTP worker (Demucs / Seed-VC)
+│   ├── venv/             # isolated Python 3.11 virtual env
+│   └── refs/             # reference-timbre library
 ├── presets/              # custom parameter presets
 ├── outputs/              # generation results (one folder per task timestamp)
 ├── logs/                 # runtime logs
 ├── static/               # frontend static assets (score rendering, etc.)
-├── Docs/                 # documentation (setup guide / design / requirements)
+├── Docs/                 # documentation (setup guide / design / requirements / changelog / voice-tools-plan)
 ├── config.cfg            # external model-path config ([models] section; relative paths resolved against the parent system root)
 ├── requirements.txt      # Python dependencies
 ├── install.bat / install.sh

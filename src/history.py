@@ -3,7 +3,7 @@ import json
 import sys
 import threading
 from pathlib import Path
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from typing import Optional
 
@@ -96,6 +96,11 @@ class HistoryRecord:
     status: str = "completed"
     abc_path: str = ""
     out_format: str = "pcm16"
+    # 音色工坊衍生记录（可选字段，默认值保证旧记录兼容）
+    record_type: str = "generation"   # generation | separation | cover
+    derived_from: str = ""            # 直接前驱 task_id（分离/翻唱记录必填）
+    root_task_id: str = ""            # 顶层源任务 id（链式翻唱定位聚合目录）
+    stems: list = field(default_factory=list)  # 多轨产物：[{label, type, path}, ...]，供历史查看/回放
 
 
 class HistoryManager:
@@ -193,6 +198,12 @@ class HistoryManager:
             candidate = wav.with_suffix(suffix)
             if candidate.exists():
                 files.append(candidate)
+
+        # 多轨产物（音色工坊分离/翻唱各轨），一并纳入删除范围
+        for stem in getattr(entry, "stems", None) or []:
+            p = Path(stem.get("path", "")) if isinstance(stem, dict) else Path()
+            if p.exists() and p not in files:
+                files.append(p)
 
         # 兼容乐谱存于独立目录的旧记录（abc_path 为相对 WEBUI_ROOT 的路径）
         if entry.abc_path:

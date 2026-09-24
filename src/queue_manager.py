@@ -24,6 +24,8 @@ class TaskCancelledError(Exception):
 class TaskType(Enum):
     GENERATION = "generation"
     TRANSCRIPTION = "transcription"
+    SEPARATION = "separation"   # 音轨分离（独立功能，Demucs）
+    COVER = "cover"             # 参考音色翻唱（分离 + Seed-VC 换嗓 + 混音）
 
 
 class TaskStatus(Enum):

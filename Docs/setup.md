@@ -145,3 +145,73 @@ run.bat
 | 无 NVIDIA GPU | 设置环境变量 `YUE2_BACKEND=cpu` 后重启（速度显著变慢） |
 | 生成报 CUDA 错误 | 更新显卡驱动 / 确认 CUDA 11.8+；或临时切 CPU 验证流程 |
 | 切换语言后组件报错 | 刷新浏览器页面（后端重启后旧页面组件序列失效） |
+
+---
+
+## 6. 音色工坊（可选功能 · 音轨分离 / 参考音色翻唱）
+
+> 音色工坊为**可选增强功能**：音轨分离（Demucs）把任意音频拆成人声/伴奏（或 4 轨），参考音色翻唱（Demucs + Seed-VC）把完整歌曲换嗓后与伴奏混音。两者都需**独立安装**，不装也不影响 WebUI 其他功能。
+
+### 6.1 特性与显存占用
+
+| 功能 | 依赖 | 显存 |
+| --- | --- | --- |
+| 音轨分离 | Demucs (HTDemucs) | ~1.5–2GB |
+| 参考音色翻唱 | Demucs + Seed-VC + ffmpeg | ~2–3GB |
+
+### 6.2 一键安装脚本
+
+```bash
+# 在 yue2-webui 目录下执行
+cd yue2-webui
+install_voice.bat        # Windows：创建独立 venv、安装依赖、clone Seed-VC
+# 或 bash install_voice.sh   # Linux
+```
+
+脚本会：创建独立虚拟环境（`voice-tools/venv`，Python 3.11 + torch2.6 cu126 独立隔离，避免与主环境依赖冲突）、安装 Demucs、clone Seed-VC 到用户指定目录、下载 SVC 模型（约 2–2.5GB）。
+
+> 注：Seed-VC 为 **GPL-3.0**，本方案**不 vendor 其源码进仓库**，主 app 仅通过**进程边界（HTTP）**调用（见 [voice-tools-plan.md](voice-tools-plan.md) 许可说明）。
+
+### 6.3 配置 config.cfg（[voice] 段）
+
+```ini
+[voice]
+enabled = 1                     ; 是否启用音色工坊
+worker_port = 8190              ; worker 端口，被占用时自动 +1
+seedvc_dir =                    ; Seed-VC 仓库路径（空 = 未安装，UI 显示安装指引）
+max_input_minutes = 8           ; 输入音频最大时长限制（分钟）
+```
+
+### 6.4 手动验证（命令行冒烟）
+
+```bash
+# 启动独立 worker（端口 8190）
+voice-tools\venv\Scripts\activate
+python voice-tools\worker.py
+```
+
+- 健康检查：`curl http://127.0.0.1:8190/api/health`
+- 分离接口：`POST /api/separate`（源音频 → vocals.wav + accompaniment.wav）
+- 翻唱接口：`POST /api/convert`（源 + 参考干声 → 换嗓人声 + 混音成品）
+
+### 6.5 WebUI 内的操作
+
+1. 主 app 首次提交分离/翻唱任务时**懒启动** worker 子进程（健康检查 30s 超时给出明确错误）。
+2. 「音色工坊」Tab：模式（分离 / 翻唱）→ 源（历史 / 上传）→ 参考音色（上传干声入库 / 音色库下拉）→ 半音 / 扩散步数 / 伴奏增益 → 执行。
+3. 产物聚合在源任务目录：`outputs/<root_task_id>/derived/sep_XXXX` 或 `cover_XXXX`（短 id 避免 Windows 260 路径限制）。
+4. 产物自动写入生成历史，可在「历史」Tab 回看试听。
+
+### 6.6 参考音色库
+
+参考干声保存目录：`voice-tools/refs/`（WAV/MP3/FLAC/M4A/OGG）。在 UI 中「保存到音色库」即复制到此目录，之后可从下拉框直接选用。
+
+---
+
+## 7. 常见问题（补充）
+
+| 现象 | 处理 |
+| --- | --- |
+| 音色工坊提示未安装/无 worker | 检查 `config.cfg` 的 `seedvc_dir` 与 `enabled`；运行 `install_voice.bat` |
+| worker 端口被占用 | 自动 +1 重试；占用过多可手动改 `config.cfg` 的 `worker_port` |
+| Seed-VC OOM / 长曲报错 | 缩短输入音频（建议 ≤5 分钟）；`max_input_minutes` 已做限制 |
+| 分离后无 vocals 轨 | 确认源为常规歌曲且开头非静音 |
