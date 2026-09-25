@@ -3,9 +3,10 @@
 与 app.py 解耦：本模块只负责"入队 worker + 产物落盘 + 历史记录"，不包含 Gradio 布局。
 app.py 仅做：Tab 布局、语言注册、事件绑定，并把按钮输入转发到本模块的函数。
 
-核心设计（见 Docs/voice-tools-plan.md §3.4）：
-- 产物独立文件夹：outputs/separations/<时间戳>_<短id>/（分离）、outputs/covers/...（翻唱）
-- 产物文件名 <时间戳>_<类别>.wav（如 20260924_201805_vocals.wav），按文件名即可辨识轨道
+核心设计（文件管理重构，见 Docs/）：
+- 产物独立文件夹：outputs/separations_<时间戳>/（分离）、outputs/cover_<时间戳>/（翻唱）
+- 产物文件名 <项目名>_<时间戳>_<类别>.wav（项目名空则时间戳开头），按文件名即可辨识轨道
+- 上传文件统一留存 uploads/：<源文件名>_<时间戳>_<类别>.<ext>（sep_src/cover_src/dry_ref/transcribe）
 - 每个 worker 从 VoiceClient 调用 worker，并把结果写为 HistoryRecord
 """
 
@@ -20,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-from history import HistoryRecord
+from history import HistoryRecord, sanitize_project
 from queue_manager import queue_manager, TaskCancelledError, TaskStatus, TaskType
 from voice_client import VoiceClient, VoiceResult
 
@@ -94,18 +95,81 @@ class VoiceHandlers:
     def _derived_dir(self, kind: str) -> tuple:
         """创建独立产物文件夹，返回 (目录绝对路径, 时间戳前缀)。
 
-        每次任务一个独立文件夹：outputs/separations/<时间戳>_<短id>/（分离）或
-        outputs/covers/<时间戳>_<短id>/（翻唱）。时间戳前缀供 worker 命名产物
-        <时间戳>_<类别>.wav，文件夹名与产物名对齐，便于按文件夹整组回放/下载。
+        新命名规范（文件管理重构）：outputs/separations_<时间戳>/（分离）或
+        outputs/cover_<时间戳>/（翻唱）—— outputs 下单层目录，目录名 = 固定前缀
+        +时间戳（不含项目名，改名只改文件名不动目录）。同秒撞名时等待取新时间戳。
         """
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        kind_dir = "separations" if kind == "sep" else "covers"
-        base = self.webui_root / "outputs" / kind_dir
-        d = base / f"{ts}_{new_short_id()}"
-        while d.exists():  # 极低概率冲突，见缝插针避免覆盖
-            d = base / f"{ts}_{new_short_id()}"
+        prefix = "separations_" if kind == "sep" else "cover_"
+        d = self.webui_root / "outputs" / f"{prefix}{ts}"
+        while d.exists():  # 同秒撞名（队列串行下罕见）：等待后取新时间戳避免覆盖
+            time.sleep(1.0)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            d = self.webui_root / "outputs" / f"{prefix}{ts}"
         d.mkdir(parents=True, exist_ok=True)
         return d, ts
+
+    # ---------------------------------------------------------------- 上传统一留存
+    # 上传类别标识（文件名后缀段）：分离源 / 翻唱源 / 参考干声 / 转谱
+    UPLOAD_CATEGORIES = ("sep_src", "cover_src", "dry_ref", "transcribe")
+    # 可留存的音频扩展名白名单
+    UPLOAD_EXTS = (".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac", ".wma")
+
+    def uploads_dir(self) -> Path:
+        """上传文件统一留存目录（webui_root/uploads），不存在则创建。"""
+        d = self.webui_root / "uploads"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def persist_upload(self, src_path: str, category: str) -> str:
+        """上传文件留存到 uploads/：<源文件名>_<时间戳>_<类别>.<ext>，返回落盘路径。
+
+        同内容 md5 去重：与已有同类别留存内容一致时直接复用（源名/时间戳以首次
+        留存为准），避免同一文件多次上传产生多份副本；比对失败回退直接拷贝。
+        留存是尽力而为：任何异常仅记日志并返回原路径，不阻断任务。
+        """
+        import hashlib
+        import shutil
+        src = Path(src_path)
+        if not src.exists() or category not in self.UPLOAD_CATEGORIES:
+            return str(src)
+        try:
+            def _md5(p: Path) -> str:
+                # 分块读取计算 md5，避免大文件一次读入内存
+                h = hashlib.md5()
+                with open(p, "rb") as f:
+                    for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                        h.update(chunk)
+                return h.hexdigest()
+
+            try:
+                digest = _md5(src)
+                for p in self.list_uploads(category):
+                    try:
+                        if _md5(p) == digest:
+                            return str(p)  # 内容相同：复用已有留存
+                    except OSError:
+                        continue
+            except Exception:
+                logger.exception("上传 md5 去重比对失败，回退直接拷贝")
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            dest = self.uploads_dir() / \
+                f"{sanitize_project(src.stem)}_{ts}_{category}{src.suffix.lower() or '.wav'}"
+            shutil.copyfile(src, dest)
+            return str(dest)
+        except Exception:
+            logger.exception("上传留存失败(已忽略): %s", src_path)
+            return str(src)
+
+    def list_uploads(self, category: str) -> list:
+        """列出 uploads/ 中指定类别的留存文件（按修改时间倒序，仅音频白名单）。"""
+        out = []
+        for p in sorted(self.uploads_dir().glob("*"),
+                        key=lambda p: p.stat().st_mtime, reverse=True):
+            if p.is_file() and p.suffix.lower() in self.UPLOAD_EXTS \
+                    and p.stem.endswith(f"_{category}"):
+                out.append(p)
+        return out
 
     def _recycle_created_derived(self, out_dir: Path) -> None:
         """回收本次任务已创建但未入历史的衍生目录（孤儿回收）。
@@ -137,7 +201,7 @@ class VoiceHandlers:
                 root_task_id: str, audio_path: str, output_dir: Path,
                 duration: float = 0.0, elapsed: float = 0.0,
                 style: str = "", status: str = "completed",
-                stems: Optional[list] = None) -> None:
+                stems: Optional[list] = None, project: str = "") -> None:
         """追加一条音色工坊历史记录（不覆盖现有生成/转谱记录）。"""
         record = HistoryRecord(
             task_id=task_id,
@@ -154,6 +218,7 @@ class VoiceHandlers:
             derived_from=derived_from,
             root_task_id=root_task_id,
             stems=list(stems or []),
+            project=project,
         )
         self.history_mgr.append(record)
         self.history_mgr.auto_prune()
@@ -228,38 +293,26 @@ class VoiceHandlers:
                 except Exception:
                     pass
 
-    def _keep_source_copy(self, source: str, out_dir: Path, ts: str,
-                          from_upload: bool) -> None:
-        """上传源副本留存：Gradio 临时文件会被清理，拷贝到产物文件夹供历史追溯。
-
-        仅上传源拷贝（历史记录源本身已在 outputs 内持久存在）；
-        失败仅记日志不阻断任务（留存是尽力而为）。
-        """
-        if not from_upload or not source:
-            return
-        try:
-            import shutil
-            ext = Path(source).suffix or ".wav"
-            shutil.copyfile(source, out_dir / f"{ts}_source{ext}")
-        except Exception:
-            logger.exception("上传源副本留存失败(已忽略)")
-
     # ---------------------------------------------------------------- 队列 workers
     def separate_worker(self, _task, source: str, mode: str, root_task_id: str = "",
                         denoise: bool = False, lang: str = "zh", tr=None,
-                        from_upload: bool = False, **kwargs) -> dict:
+                        from_upload: bool = False, project: str = "",
+                        **kwargs) -> dict:
         """音轨分离 worker：调用 worker 分离，独立产物文件夹 + 写历史记录，返回产物 dict。
 
         入队约定（见 run_in_queue_stream）：首个参数名为 _task，并吸收 lang/tr。
-        denoise=True 时对输出人声降噪。产物落 outputs/separations/<时间戳>_<短id>/，
-        文件名 <时间戳>_<类别>.wav，按文件名即可辨识人声/伴奏等轨。
-        from_upload=True 时拷贝源副本入产物文件夹（Gradio 临时文件不持久）。
+        产物落 outputs/separations_<时间戳>/，文件名 <项目名>_<时间戳>_<类别>.wav
+        （项目名空则时间戳开头），按文件名即可辨识人声/伴奏等轨。
+        from_upload=True 时源文件留存到 uploads/（<源名>_<ts>_sep_src.<ext>）。
         阶段进度经 out_dir/_progress.json 轮询上报（分离中/降噪中）。
         """
+        project = sanitize_project(project or "")
         derived_from = root_task_id
         root = root_task_id or f"upload_{new_short_id()}"  # 上传源无生成任务目录，仅作记录
         out_dir, ts = self._derived_dir("sep")
-        self._keep_source_copy(source, out_dir, ts, from_upload)
+        if from_upload:
+            self.persist_upload(source, "sep_src")
+        prefix = f"{project}_{ts}" if project else ts  # 产物文件名主干（worker 产物 = <prefix>_<类别>.wav）
         # 阶段进度文件 + 轮询线程（worker 写阶段，线程转发到任务进度通道）
         progress_file = out_dir / "_progress.json"
         stop_evt = threading.Event()
@@ -270,7 +323,7 @@ class VoiceHandlers:
         try:
             result = self.voice_client.separate(
                 source, mode=mode, output_dir=str(out_dir), denoise=denoise,
-                prefix=ts, progress_file=str(progress_file),
+                prefix=prefix, progress_file=str(progress_file),
                 cancel_event=_task.cancel_event)
         except Exception:
             # worker 抛异常：回收本次已建但未入历史的衍生目录，再向上抛原始错误
@@ -298,7 +351,8 @@ class VoiceHandlers:
         stems = _build_stems(products)
         self._record(_task.task_id, "separation", derived_from, root,
                      products.get("vocals", ""), out_dir,
-                     duration=duration, style=_source_label(source), stems=stems)
+                     duration=duration, style=_source_label(source), stems=stems,
+                     project=project)
         return {"products": products, "stems": stems,
                 "output_dir": str(out_dir), "root_task_id": root}
 
@@ -307,17 +361,23 @@ class VoiceHandlers:
                      denoise: bool = False,
                      root_task_id: str = "", lang: str = "zh", tr=None,
                      source_vocals: str = "", source_acc: str = "",
-                     from_upload: bool = False, **kwargs) -> dict:
+                     from_upload: bool = False, project: str = "",
+                     **kwargs) -> dict:
         """参考音色翻唱 worker：完整管线（换嗓+混音）+ 写历史记录。denoise=True 时对换嗓人声降噪。
 
-        产物落 outputs/covers/<时间戳>_<短id>/，全部轨道平铺命名 <时间戳>_<类别>。
+        产物落 outputs/cover_<时间戳>/，文件名 <项目名>_<时间戳>_<类别>.wav
+        （项目名 = 源项目名_音色名，由 app 层拼好传入）。
         source_vocals/source_acc 非空时复用已有分离结果（跳过 Demucs 重复分离）。
+        from_upload=True 时源文件留存到 uploads/（<源名>_<ts>_cover_src.<ext>）。
         阶段进度经 out_dir/_progress.json 轮询上报（分离中/换嗓中/降噪中/混音中）。
         """
+        project = sanitize_project(project or "")
         derived_from = root_task_id
         root = root_task_id or f"upload_{new_short_id()}"
         out_dir, ts = self._derived_dir("cover")
-        self._keep_source_copy(source, out_dir, ts, from_upload)
+        if from_upload:
+            self.persist_upload(source, "cover_src")
+        prefix = f"{project}_{ts}" if project else ts  # 产物文件名主干
         # 阶段进度文件 + 轮询线程（worker 写阶段，线程转发到任务进度通道）
         progress_file = out_dir / "_progress.json"
         stop_evt = threading.Event()
@@ -329,7 +389,7 @@ class VoiceHandlers:
             result = self.voice_client.convert(
                 source, ref, semi_tone=semi_tone, diffusion_steps=diffusion_steps,
                 accompaniment=accompaniment, gain_db=gain_db, output_dir=str(out_dir),
-                denoise=denoise, prefix=ts,
+                denoise=denoise, prefix=prefix,
                 source_vocals=source_vocals, source_acc=source_acc,
                 progress_file=str(progress_file), cancel_event=_task.cancel_event,
             )
@@ -358,7 +418,8 @@ class VoiceHandlers:
         stems = _build_stems(result.products)
         self._record(_task.task_id, "cover", derived_from, root,
                      cover_path, out_dir, duration=duration,
-                     style=f"cover+{semi_tone:+.0f}", stems=stems)
+                     style=f"cover+{semi_tone:+.0f}", stems=stems,
+                     project=project)
         return {"products": result.products, "stems": stems,
                 "output_dir": str(out_dir), "root_task_id": root}
 
@@ -415,48 +476,17 @@ class VoiceHandlers:
         return str(dest)
 
     # ---------------------------------------------------------------- 上传干音历史（第二来源）
-    def dry_dir(self) -> Path:
-        """上传已验证干音留存目录（voice-tools/dry_uploads），不存在则创建。"""
-        d = self.webui_root / "voice-tools" / "dry_uploads"
-        d.mkdir(parents=True, exist_ok=True)
-        return d
-
     def save_dry_upload(self, src_path: str) -> str:
-        """把上传且检测通过的人声干音留存到 dry_uploads，返回落盘路径。
+        """把上传且检测通过的人声干音留存到 uploads/（类别 dry_ref），返回落盘路径。
 
-        按文件内容 md5 去重：同一干声重复上传或多任务复用时直接返回已有文件，
-        避免 dry_uploads 目录无限膨胀。比对失败回退直接拷贝（保底不拦截任务）。
+        文件管理重构：与所有上传统一走 persist_upload（<源名>_<时间戳>_dry_ref.<ext>），
+        内容 md5 去重避免重复副本。
         """
-        import hashlib
-        import shutil
-        src = Path(src_path)
-
-        def _md5(p: Path) -> str:
-            # 分块读取计算 md5，避免大文件一次读入内存
-            h = hashlib.md5()
-            with open(p, "rb") as f:
-                for chunk in iter(lambda: f.read(1024 * 1024), b""):
-                    h.update(chunk)
-            return h.hexdigest()
-
-        try:
-            digest = _md5(src)
-            exts = (".wav", ".mp3", ".flac", ".m4a", ".ogg")
-            for p in sorted(self.dry_dir().glob("*")):
-                if p.suffix.lower() in exts and p.is_file() and _md5(p) == digest:
-                    return str(p)  # 内容相同：复用已有文件，不再拷贝
-        except Exception:
-            logger.exception("干声 md5 去重比对失败，回退直接拷贝")
-        dest = self.dry_dir() / f"dry_{new_short_id(4)}{src.suffix.lower() or '.wav'}"
-        shutil.copyfile(src, dest)
-        return str(dest)
+        return self.persist_upload(src_path, "dry_ref")
 
     def list_dry_uploads(self) -> list[str]:
-        """列出所有已验证干音绝对路径（按修改时间倒序）。"""
-        exts = (".wav", ".mp3", ".flac", ".m4a", ".ogg")
-        return [str(p) for p in sorted(self.dry_dir().glob("*"),
-                                       key=lambda p: p.stat().st_mtime, reverse=True)
-                if p.suffix.lower() in exts]
+        """列出所有已验证干音绝对路径（uploads/ 下 *_dry_ref.*，按修改时间倒序）。"""
+        return [str(p) for p in self.list_uploads("dry_ref")]
 
     # ---------------------------------------------------------------- 素材库（乐器轨留存）
     # 合法轨道类型：与 worker 分离产物键一致（2轨: vocals/accompaniment；4轨: vocals/drums/bass/other）

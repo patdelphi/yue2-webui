@@ -41,7 +41,7 @@ def test_delete_is_file_level_not_directory_level():
     """批量场景：同批次两个变体若共用目录，删除一个不能影响另一个。"""
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        mgr = H.HistoryManager(history_file=root / "history.json", outputs_root=root / "outputs")
+        mgr = H.HistoryManager(db_file=root / "history.db", outputs_root=root / "outputs")
 
         # 构造同目录下的两个"变体"（模拟两个变体落在同一自目录的不同文件）
         var_dir = mgr.outputs_root / "batch_20260923"
@@ -87,6 +87,7 @@ def test_delete_is_file_level_not_directory_level():
         assert var_dir.exists(), "输出目录必须保留，不允许整目录删除"
         # 5) keep 记录仍在历史
         assert mgr.get(keep_stem) is not None
+        mgr.close()  # 释放 SQLite 句柄，避免 TemporaryDirectory 清理被锁
         print("PASS: 删除为文件级，未误删同目录其它变体、未删除目录")
 
 
@@ -95,7 +96,7 @@ def test_auto_prune_uses_constant_default():
     assert H.HISTORY_MAX_ENTRIES == 100
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        mgr = H.HistoryManager(history_file=root / "history.json", outputs_root=root / "outputs")
+        mgr = H.HistoryManager(db_file=root / "history.db", outputs_root=root / "outputs")
 
         # 塞入 HISTORY_MAX_ENTRIES + 2 条记录
         keep = []
@@ -112,19 +113,41 @@ def test_auto_prune_uses_constant_default():
         kept_ids = {r.task_id for r in mgr.list_all()}
         # 最旧的两条 t0、t1 应被移除
         assert "t0" not in kept_ids and "t1" not in kept_ids
+        mgr.close()  # 释放 SQLite 句柄，避免 TemporaryDirectory 清理被锁
         print("PASS: auto_prune 默认使用 HISTORY_MAX_ENTRIES 常量")
 
 
 def test_real_recycle_on_windows():
-    """Windows 下真实回收站删除：文件被移走且原路径不再存在。"""
+    """Windows 下真实回收站删除：SHFileOperationW 主路径必须成功（回归测试）。
+
+    历史 bug：API 名误写为 SHFILEOperationW，ctypes 抛 AttributeError 被
+    except 吞掉、静默回退为 unlink 直接删除——文件消失但从未进回收站。
+    因此必须断言 _delete_to_recycle 返回 True，而不能只断言文件消失。
+    """
+    if sys.platform != "win32":
+        print("SKIP: 非 Windows 平台")
+        return
     with tempfile.TemporaryDirectory() as tmp:
-        p = Path(tmp) / "trashme.tmp"
+        root = Path(tmp)
+        # 文件级：移入回收站必须走通主路径
+        p = root / "trashme.tmp"
         p.write_text("junk", encoding="utf-8")
         assert p.exists()
-        removed = H.delete_files_to_recycle([p])
-        assert removed == 1, f"应移除 1 个文件，实际 {removed}"
-        assert not p.exists(), "文件应从原路径消失（已进回收站或已删除）"
-        print("PASS: 文件移入回收站（Windows）")
+        assert H._delete_to_recycle(p) is True, \
+            "SHFileOperationW 主路径应返回 True（曾因 API 名拼写错误静默失败）"
+        assert not p.exists(), "文件应从原路径消失（已进回收站）"
+        # 目录级：整目录移入回收站（delete_project 的主路径）
+        d = root / "trashdir"
+        d.mkdir()
+        (d / "inner.txt").write_text("junk", encoding="utf-8")
+        assert H._delete_to_recycle(d) is True, "目录级回收站主路径应返回 True"
+        assert not d.exists(), "目录应整体移入回收站"
+        # delete_files_to_recycle 基于同一主路径
+        p2 = root / "trashme2.tmp"
+        p2.write_text("junk", encoding="utf-8")
+        removed = H.delete_files_to_recycle([p2])
+        assert removed == 1 and not p2.exists(), "文件级批量回收应成功"
+        print("PASS: 文件/目录均通过 SHFileOperationW 移入回收站")
 
 
 if __name__ == "__main__":

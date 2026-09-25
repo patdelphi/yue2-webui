@@ -2,9 +2,9 @@
 """voice_ui_handlers 单元测试（mock voice_client，不触发真实 worker/进程）。
 
 验证点：
-1. separate_worker：产物落独立文件夹 outputs/separations/<时间戳>_<短id>/，写入 history 记录；
-   时间戳前缀传给 worker（产物命名 <时间戳>_<类别>.wav），返回 dict 含 stems
-2. cover_worker：cover 记录写入 outputs/covers/...，root_task_id/derived_from 正确
+1. separate_worker：产物落独立文件夹 outputs/separations_<时间戳>/，写入 history 记录；
+   <项目名>_<时间戳> 前缀传给 worker（产物命名 <前缀>_<类别>.wav），返回 dict 含 stems
+2. cover_worker：cover 记录写入 outputs/cover_<时间戳>/，root_task_id/derived_from 正确
 3. 分离失败时（ok=False）抛 RuntimeError，不写历史
 4. 音色库 save_ref/list_refs 正常落盘与列出
 5. 短 id 唯一性/长度基本约束
@@ -58,7 +58,7 @@ def _make_handlers(tmp, vc):
     webui = tmp / "yue2-webui"
     webui.mkdir(parents=True, exist_ok=True)
     # 造一个最小历史管理器（沿用真实实现）
-    hm = HistoryManager(webui / "history.json", webui / "outputs")
+    hm = HistoryManager(webui / "history.db", webui / "outputs")
     h = VoiceHandlers(project_root=tmp, webui_root=webui, history_mgr=hm, voice_client=vc)
     return h
 
@@ -75,10 +75,12 @@ def test_separate_worker_writes_history(tmp_path):
     h = _make_handlers(tmp_path, vc)
     t = _FakeTask("sep001")
     Path(tmp_path / "vocals.wav").write_bytes(b"\x00")
-    out = h.separate_worker(t, source="a.wav", mode="2", root_task_id="root_task")
-    # 产物落独立文件夹 outputs/separations/<时间戳>_<短id>/
-    seps = tmp_path / "yue2-webui" / "outputs" / "separations"
-    assert seps.is_dir() and any(p.is_dir() for p in seps.iterdir())
+    out = h.separate_worker(t, source="a.wav", mode="2", root_task_id="root_task",
+                            project="夜曲demo")
+    # 产物落独立文件夹 outputs/separations_<时间戳>/（outputs 下单层目录）
+    outputs = tmp_path / "yue2-webui" / "outputs"
+    sep_dirs = [p for p in outputs.iterdir() if p.is_dir() and p.name.startswith("separations_")]
+    assert sep_dirs and len(list(outputs.iterdir())) == 1  # outputs 下仅此一个目录
     # 历史记录写入，output_dir 指向该独立文件夹
     recs = h.history_mgr.list_all()
     assert len(recs) == 1
@@ -86,14 +88,17 @@ def test_separate_worker_writes_history(tmp_path):
     assert recs[0].root_task_id == "root_task"
     assert recs[0].derived_from == "root_task"
     assert recs[0].audio_path.endswith("vocals.wav")
+    assert recs[0].project == "夜曲demo"  # 项目名写入记录（改名/列表展示用）
     # output_dir 为相对 webui_root 的路径，指向独立产物文件夹
     assert (tmp_path / "yue2-webui" / recs[0].output_dir).is_dir()
-    # 时间戳前缀传给 worker（产物命名 <时间戳>_<类别>.wav），目录名与之对齐
+    # 产物命名前缀 = <项目名>_<时间戳>（worker 产物 = <前缀>_<类别>.wav）
     call = vc.calls[0]
     assert call[0] == "separate"
     prefix = call[2].get("prefix", "")
-    assert len(prefix) == 15 and prefix[8] == "_"  # 形如 20260924_201805
-    assert prefix in Path(recs[0].output_dir).name
+    assert prefix.startswith("夜曲demo_") and len(prefix) == 22  # 6字项目名 + _ + 15位时间戳
+    # 目录名不含项目名，仅 separations_<时间戳>
+    assert recs[0].output_dir.replace("\\", "/").endswith(
+        "separations_" + prefix[len("夜曲demo_"):])
     # 返回 dict 含 stems（供 UI 播放器组填充）
     assert out["stems"] and out["stems"][0]["type"] == "vocals"
 
@@ -107,20 +112,24 @@ def test_cover_worker_writes_history(tmp_path):
     Path(tmp_path / "cover.flac").write_bytes(b"\x00")
     out = h.cover_worker(t, source="s.wav", ref="r.wav", accompaniment="a.wav",
                          semi_tone=-12, diffusion_steps=30, gain_db=0.0,
-                         root_task_id="gen_root")
+                         root_task_id="gen_root", project="源曲_女声")
     recs = h.history_mgr.list_all()
     assert len(recs) == 1
     assert recs[0].record_type == "cover"
     assert recs[0].root_task_id == "gen_root"
     # 配音至 cover 产物
     assert recs[0].audio_path.endswith("cover.flac")
-    # 产物落独立文件夹 outputs/covers/<时间戳>_<短id>/，时间戳前缀传给 worker
-    covers = tmp_path / "yue2-webui" / "outputs" / "covers"
-    assert covers.is_dir() and any(p.is_dir() for p in covers.iterdir())
+    assert recs[0].project == "源曲_女声"  # 项目名 = 源项目名_音色名（app 层拼好传入）
+    # 产物落独立文件夹 outputs/cover_<时间戳>/，命名前缀传给 worker
+    outputs = tmp_path / "yue2-webui" / "outputs"
+    cover_dirs = [p for p in outputs.iterdir() if p.is_dir() and p.name.startswith("cover_")]
+    assert cover_dirs and len(list(outputs.iterdir())) == 1
     call = vc.calls[0]
     assert call[0] == "convert"
     prefix = call[2].get("prefix", "")
-    assert prefix and prefix in Path(recs[0].output_dir).name
+    assert prefix.startswith("源曲_女声_")
+    assert recs[0].output_dir.replace("\\", "/").endswith(
+        "cover_" + prefix[len("源曲_女声_"):])
     assert out["stems"]
 
 
@@ -307,3 +316,29 @@ def test_voice_score_white_noise_not_voice():
 def test_detect_voice_missing_file():
     """文件不存在返回 None（不判定、不抛异常）。"""
     assert detect_voice(str(Path("Z:/no/such/file.wav"))) is None
+
+
+def test_cover_tab_management_moved_to_separation():
+    """翻唱页仅保留选择+试听；删除/重命名管理功能移至分离页库管理区。
+
+    断言 app.py 源码：
+    1. 翻唱页的管理组件（cover_ref_del/cover_acc_del/重命名）已移除；
+    2. 分离页存在库管理组件（lib_stem_*/lib_ref_*）并绑定现有删除/重命名回调；
+    3. 翻唱页保留试听播放器（cover_ref_preview/cover_acc_preview）。
+    """
+    src = (Path(__file__).resolve().parent.parent / "app.py").read_text(encoding="utf-8-sig")
+    # 翻唱页管理组件移除
+    for token in ("cover_ref_del_btn", "cover_acc_del_btn",
+                  "cover_ref_rename_input", "cover_acc_rename_input"):
+        assert token not in src, f"翻唱页应移除管理组件: {token}"
+    # 翻唱页保留选择+试听
+    for token in ("cover_ref_dropdown", "cover_ref_preview",
+                  "cover_acc_dd", "cover_acc_preview"):
+        assert token in src, f"翻唱页应保留选择/试听组件: {token}"
+    # 分离页库管理区：素材库 + 音色库的删除/重命名绑定现有回调
+    for token in ("lib_stem_del_btn", "lib_stem_rename_btn",
+                  "lib_ref_del_btn", "lib_ref_rename_btn",
+                  "lib_stem_dd.change", "lib_ref_dd.change"):
+        assert token in src, f"分离页应有库管理组件/绑定: {token}"
+    assert "lib_stem_del_btn.click(fn=on_voice_stem_delete" in src
+    assert "lib_ref_del_btn.click(fn=on_voice_ref_delete" in src

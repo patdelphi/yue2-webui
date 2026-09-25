@@ -4,6 +4,74 @@
 
 ---
 
+## 2026-09-25 — 一致性优化（历史页行号错位 / 播放器同步 / 类型词中文化 / 删除确认弹窗）
+
+> 整体一致性审查中发现并修复 1 个严重 bug + 3 处不一致。
+
+**Bug 修复**
+
+- 【严重】历史页行号错位：`app.py` `_load_history_entry` 与 `on_history_next_page` 内部取数用全量 `to_dataframe_rows()`，而表格显示用 `record_types=("generation",)` 过滤后行集——存在分离/翻唱记录时两者顺序错位，点击表格中的生成记录实际选中 separation 记录（实测：点击 var3 行后改项目名，误改了分离目录）。两处均补过滤参数修复；`tests/test_history_filter.py` 源码断言同步从 2 处更新为 4 处。
+
+**一致性优化**
+
+- 历史页 4 个回调（删除选中/清空历史/改项目名/删除项目）outputs 补播放器三元组（试听/轨道回放）：删除/清空后播放器同步清空（不再指向已删除文件），改名后按记录新路径重填（对齐分离/翻唱页 on_voice_task_rename/delete 行为）。
+- 分离源/翻唱源下拉类型词中文化：`rec.record_type` 原样拼接（中文界面显示英文 "generation/cover"），改经 `_QUEUE_TYPE_LABELS` + tr 翻译；i18n 补 "翻唱": "Cover" 词条。
+- 三处"删除项目"按钮（历史页/分离页/翻唱页）加前端确认弹窗（双语文案），取消则中止回调不触发删除。实测确认 Gradio 5.x 中 js 返回 false 不能阻止 fn 执行，必须 throw 中断。
+
+**验证**
+
+- 全量 pytest 81 passed；i18n 自检 17 通过；py_compile 通过。
+- 浏览器 E2E：删除项目弹窗取消路径（记录不动）与确定路径（3 条同目录记录全删 + 整目录真实入回收站）均通过；改项目名后 3 条记录 project/15 个文件同步更新，播放器按新路径重载音频；行号映射修复后选中行与显示行一致。
+
+---
+
+## 2026-09-25 — 端到端测试修复（回收站失效 / 中文产物名乱码 / 回调索引）
+
+> 文件管理重构后的 T1-T7 真实任务全链路测试（生成→改名→分离→翻唱→删除→上传留存）中发现并修复 5 个 bug。
+
+**Bug 修复**
+
+- 【严重】回收站从未真正生效：`src/history.py` 中 Win32 API 名误写 `SHFILEOperationW`（正确为 `SHFileOperationW`，仅 SH 大写），ctypes 抛 AttributeError 被 except 吞掉、静默回退为 unlink 直接删除——所有"移入回收站"操作实际均在直删文件，违背可还原约束。修复后整目录经 SHFileOperationW 真实入回收站（已验证回收站内条目含原路径信息）。
+- 中文项目名产物乱码：audiocpp_cli.exe 对非 ASCII `--out` 路径落盘乱码（"测试曲"→"娴嬭瘯鏇"）且校验失败。`src/backend_gguf.py` 改为 CLI 阶段使用 ASCII 安全名（目录名 song_<ts>），成功后由 Python（Windows Unicode API）重命名 wav/abc 为最终中文项目名。
+- 生成完成回调索引笔误：`app.py` 批量结果 5 元组 (tid, fname, dir, result, stems) 误按 [2] 取 result / 按 4 元组解包，导致 "WindowsPath has no attribute abc_score" 与 "too many values to unpack"。
+- 分离 Tab 源下拉不刷新：`tab_sep.select` 遗漏 sep_src_history 刷新（翻唱页有、分离页漏），新生成歌曲需刷新页面才能作为分离源。
+- 【测试加强】`tests/test_history_recycle.py`：此前仅断言"文件消失"（fallback 直删也能满足，故拼写 bug 溜过），现断言 `_delete_to_recycle` 主路径必须返回 True（文件级 + 目录级）。
+
+**验证**
+
+- 全量 pytest 80 passed；i18n 自检 17 通过；改动文件 py_compile 通过。
+- E2E 真实任务：生成（中文项目名四件套正确落盘）→ 历史改名（文件+db 同步）→ 分离（separations_<ts> + 项目名沿用）→ 翻唱（cover_<ts> 四轨）→ 历史页/分离页删除项目（db 移除 + 整目录真实入回收站，回收站条目含原路径）→ 上传留存（uploads/<源名>_<ts>_sep_src.wav 精确副本）全部通过。
+
+---
+
+## 2026-09-25 — 文件管理整体重构（项目名/目录命名/上传留存 + SQLite 历史库）
+
+**命名规范（定稿）**
+
+- 生成：`outputs/song_<ts>/`，文件 `<项目名>_<ts>[_varN].wav/.abc/.txt`（空项目名则以 `<ts>` 开头）；生成页新增"项目名 (可选)"输入框。
+- 分离：`outputs/separations_<ts>/`，文件 `<项目名>_<ts>_<类别>.wav`（类别 = vocals/accompaniment/drums/bass/other）；项目名自动取自源（历史记录 project 字段优先，其次文件名解析，无结构取文件主干）。
+- 翻唱：`outputs/cover_<ts>/`，文件 `<项目名>_<ts>_<类别>.wav`；项目名自动 = 源项目名_音色名（app 层拼接传入）。
+- 上传统一留存 `uploads/`：`<源文件名>_<ts>_<类别>.<ext>`（类别 sep_src/cover_src/dry_ref/transcribe），同类别 md5 内容去重；上传源副本留存不再拷入产物目录。
+- task_id 与文件名解耦（目录名固定前缀+ts，不含项目名）：改名只动文件不动目录，规避记录路径级联更新。
+
+**项目级管理**
+
+- 历史页：表格新增"项目名"列（7 列）；选中记录可改项目名——仅替换文件名项目名段（保留时间戳/_varN 后缀），同步记录 project/audio_path/abc_path/stems[].path（绝对/相对两种形态兼容）；新增"删除项目"——整目录移系统回收站，同目录批量变体记录一并移除，安全限定 outputs 下 song_/separations_/cover_ 单层前缀目录。
+- 分离页/翻唱页：任务历史区各新增"新项目名 + 改项目名 + 删除项目"操作行（与翻唱页仅保留选择功能的管理移位设计衔接）。
+
+**存储引擎迁移（history.json → history.db）**
+
+- `HistoryManager` 重写为 SQLite 持久化：WAL 模式 + synchronous=NORMAL（PRAGMA），一行一条记录，自增 id 保持插入顺序（list_all 按 id 倒序 = 最新在前，行为与 JSON 版一致）；stems 以 JSON 文本列存储，读写自动序列化。
+- 所有写操作（insert/update/delete）在 RLock + `with conn` 事务中执行，异常自动回滚；新增 close()/__del__ 释放句柄（Windows 下避免锁文件）。
+- 公共接口签名不变（append/list_all/get/set_status/delete/rename_project/delete_project/clear/auto_prune/to_dataframe_rows/prune_missing），app.py 与 voice_ui_handlers.py 零逻辑改动，仅构造参数 history_file → db_file。
+- 数据清空重置：旧 history.json 备份为 history.json.bak_20260925 后置空；outputs/ 与 voice-tools/dry_uploads/ 清空（均无残留数据）。
+
+**测试与验证**
+
+- 新增 `tests/test_history_project.py`（8 项）：sanitize_project 清洗/长度/空值、rename_project 项目名段替换与 _varN 保留、空项目名剥离、stems 相对/绝对路径同步、非规范文件不动、delete_project 记录移除与非项目目录拒绝、app/handlers 源码断言（目录前缀/项目名输入框/persist_upload）。
+- 更新 test_history_filter.py（task_id 列索引 [5]→[6]）、test_voice_handlers.py（目录命名断言改 separations_<ts>/cover_<ts> 单层 + project 透传）、test_history_recycle.py / test_history_filter.py（db 路径 + close 释放句柄）。
+- 验证：pytest 80 passed；i18n 自检 17 通过；服务重启（9898）后浏览器实测——生成页"项目名 (可选)"输入框、历史页 7 列表头（共 0 条）+ 改项目名/删除项目按钮、分离页库管理 + 任务历史改名/删除、翻唱页任务历史改名/删除按钮均正常渲染。
+
 ## 2026-09-25 — 取消链路修复（取消状态与文案统一）
 
 - 修复：worker 侧取消（如直接 POST /api/cancel）此前显示"任务失败： 任务已取消"，现统一映射为"已取消"（状态 CANCELLED + 文案 + 不弹错误窗）。

@@ -36,6 +36,11 @@ env/
 # Generated outputs
 outputs/
 history.json
+history.json.bak_*
+history.db
+history.db-shm
+history.db-wal
+uploads/
 last_inputs.json
 lang_state.json
 presets/*.json

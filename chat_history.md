@@ -423,3 +423,94 @@
 **排查记录**：① 系统 HTTP_PROXY(7890) 劫持 127.0.0.1 请求返回 502 → urllib 用 `ProxyHandler({})` 禁代理；② Gradio 5 Dropdown 严格校验 choices，脚本传小写盘符路径不匹配（choices 为大写 Y: 绝对路径）；③ gradio_client `outputs()` 中间流不含终态 yield，终态以 `job.result()` 为准（UI 实际显示正确）；④ `/on_voice_cancel` 回调为 lambda 绑定无 api_name，gradio_client 调不到 → C2 改用真实浏览器验证。
 
 **未执行**：git commit/push（待用户批准）。
+
+## 2026-09-25 README 更新与提交
+
+- **README.md**：中英文 4 处音色工坊描述同步更新（功能特性、音色工坊小节、Voice Studio 概述与详情），覆盖复用分离、协作取消、阶段进度、响度对齐、库管理、动态超时、产物独立目录与整组回放等新特性；格式校验 CRLF+BOM 通过。
+- **git commit**：提交 3593f69（11 个文件，+1090/-83），含取消链路修复（worker.py / voice_client.py / voice_ui_handlers.py / app.py）、管线优化、新增 test_voice_loudness.py、changelog 与 chat_history。排除 .pytest_tmp2/、tests/.tmp-ht/ 临时目录。
+- **未执行**：git push（用户未指示）。
+
+## 2026-09-25 系统设置新增音色工坊模型状态
+
+- **需求**：系统设置「模型状态」新增显示音色工坊三个模型（用户确认方案：音色工坊全套）。
+- **改动**：src/voice_client.py 新增 check_voice_models()（文件级检查，不加载模型）：Demucs=htdemucs torch hub 缓存（955717e8-8726e21a.th，TORCH_HOME 优先）、Seed-VC=models--Plachta--Seed-VC/snapshots 下 .pth、campplus=models--funasr--campplus/snapshots 下 campplus_cn_common.bin；app.py on_check_models() 新增音色工坊段（未启用/未配置/缺失三态文案，Demucs 缺失提示自动下载）；src/i18n.py 新增 7 条中英词条。
+- **测试**：tests/test_voice_client.py 新增 4 项（disabled/no_seedvc_dir/all_ready/missing），修复过程中发现 snapshots 目录不存在时应报 False 而非 None。
+- **验证**：py_compile 通过；pytest 68 passed；i18n 自检 17 通过；真实环境三模型均检出为 True；服务已重启（9898 就绪）。
+- **未执行**：git commit（待批准）。
+
+## 2026-09-25 系统设置页 UI 重设
+
+- **需求**：系统设置页 UI 重新设置（用户选定方案：左右分栏+紧凑化）。
+- **改动**：app.py 设置 Tab 布局重排——左列（scale=3）「系统状态」+「检查模型」按钮同行（scale=0, min_width=110, size=sm），右列（scale=2）「当前队列」；下方「参数预设」整行（预设下拉+加载按钮同行 scale 4:1，名称输入+保存按钮同行）。逻辑与事件绑定未变。
+- **踩坑**：gr.Markdown 不支持 scale 参数（TypeError），改为按钮端固定宽度控制。
+- **验证**：py_compile 通过；服务重启后 Chrome DevTools 真实浏览器验证——左右分栏生效（系统状态 x=85 / 当前队列 x=821 同水平线），检查模型按钮与标题同行，参数预设两行紧凑排列；音色工坊三模型 ✅ 显示正常。
+- **未执行**：git commit（待批准）。
+
+## 2026-09-25 系统设置页区块外框
+
+- **需求**：系统设置页加外框分隔线（区块卡片化）。
+- **改动**：app.py——_TITLE_ROW_CSS 追加 .settings-panel 样式（border: 1px solid var(--border-color-primary); border-radius: 10px; padding: 2px 14px 12px; background: var(--background-fill-primary)，颜色随明暗主题自动切换）；左列/右列 Column 与参数预设区 Group 挂 elem_classes="settings-panel"。
+- **验证**：py_compile 通过；服务重启后浏览器 evaluate_script 确认 3 个 panel 均带边框（714px/486px/1216px，border solid、radius 10px、暗色主题背景 rgb(15,15,17)），截图确认视觉卡片分隔效果。
+- **未执行**：git commit（待批准）。
+
+## 2026-09-25 歌曲历史仅显示生成记录
+
+- **需求**：歌曲历史页只保留生成的歌曲，不显示分离与翻唱的历史。
+- **改动**：src/history.py to_dataframe_rows() 新增可选参数 record_types（None=全部，向后兼容；传入则按类型过滤）；app.py 两处取数（refresh_history 与 _get_history_page）均传 record_types=("generation",)。
+- **测试**：新增 tests/test_history_filter.py——不传参返回全部 3 条、仅生成 1 条、组合过滤 2 条、app 源码断言两处调用均带过滤。
+- **验证**：py_compile 通过；pytest 70 passed（含 2 项新增）；服务重启后浏览器确认历史页显示"第 1 / 3 页，共 26 条"（history.json 分布 generation 26 / separation 10 / cover 7，分离与翻唱已排除）。
+- **未执行**：git commit（待批准）。
+
+## 2026-09-25 库管理功能移至分离页
+
+- **需求**：翻唱页去掉删除选中/重命名（只保留选择，选中即试听）；管理功能放入分离页。
+- **改动**：app.py——翻唱页移除音色库/素材库两处管理行（删除选中/重命名为/重命名按钮）及绑定，保留下拉+试听播放器；分离页右栏新增"库管理"区块：素材库(乐器轨)与音色库(参考干声)两组下拉+试听+删除/重命名（复用 on_voice_stem/ref_delete/rename 回调，回收站删除不变）；tab_sep.select 扩展刷新两库下拉。src/i18n.py 新增 3 条中英词条（### 库管理/素材库(乐器轨)/音色库(参考干声)）。
+- **测试**：tests/test_voice_handlers.py 新增 test_cover_tab_management_moved_to_separation（源码断言：翻唱页管理组件已移除、选择/试听保留、分离页库管理组件与绑定就位）。
+- **验证**：py_compile 通过；pytest 71 passed；i18n 自检 17 通过；浏览器验证——翻唱页 0 个删除/重命名按钮、音色库选中后试听播放器显示（容器 196px）且 shadow DOM audio blob src 加载成功；分离页库管理区块两组按钮齐全。
+- **过程**：JS element.click() 不触发 Gradio 下拉选择，需派发完整 pointerdown/mousedown/pointerup/mouseup/click 事件序列；试听 audio 元素在 shadow DOM 内（document.querySelector 查不到，需入 shadowRoot 取 blob src）。
+- **清理**：测试用音色库条目 _ui_test_preview.wav 已删除。
+- **未执行**：git commit（待批准）。
+
+## 2026-09-25 17:22 — 文件管理整体重构 + 历史库迁移 SQLite
+
+- **需求**：1) 生成可输项目名（文件=项目名_时间戳，目录=song_时间戳）；2) 历史页可改项目名/删除项目（回收站）；3) 分离自动沿用源项目名（目录 separations_时间戳）；4) 翻唱项目名=源项目名_音色名（目录 cover_时间戳）；5) 上传统一放一个目录（保留源名+时间戳+类别标识）；6) 历史 db 与 outputs 全部清空；后追加：历史存储由 JSON 改为 SQLite。
+- **改动**：src/history.py——HistoryRecord 新增 project 字段；sanitize_project/rename_project/delete_project（文件级改名仅替换项目名段；整目录回收站删除，安全限定 song_/separations_/cover_ 前缀单层目录）；存储层整体重写为 SQLite（WAL+NORMAL，RLock+事务，自增 id 保序，stems JSON 列，接口签名不变）。src/voice_ui_handlers.py——产物目录改 outputs/separations_<ts>|cover_<ts> 单层；prefix=<项目名>_<ts> 透传 worker；persist_upload/list_uploads 统一 uploads/ 留存（sep_src/cover_src/dry_ref/transcribe 四类，md5 去重）；save_dry_upload 走统一留存。app.py——生成页项目名输入框；on_generate/_generate_worker 命名链路（song_<ts> 目录+task_id、<项目名>_<ts>[_varN] 文件）；_project_from_source/_voice_ref_name 项目名解析；分离/翻唱改名删除回调（on_voice_task_rename/delete）；历史页 7 列+改项目名+删除项目 UI；_transcribe_worker 上传留存；构造改 db_file=history.db。src/i18n.py 新增 14 条中英词条。
+- **数据**：history.json 备份为 history.json.bak_20260925（44 条）后清空；outputs/ 与 dry_uploads/ 均为空（无残留需清理）。
+- **测试**：新增 tests/test_history_project.py 8 项；更新 test_history_filter.py（列索引[6]）、test_voice_handlers.py（单层目录命名+project 断言）、test_history_recycle.py（db 路径+close）。
+- **验证**：py_compile 通过；pytest 80 passed；i18n 自检 17 通过；服务重启 9898 HTTP 200，history.db（WAL）自动创建；浏览器实测四个页面——生成页项目名输入框、历史页 7 列表头+共 0 条+改项目名/删除项目、分离页库管理+任务历史改名/删除、翻唱页任务历史改名/删除，均正常。
+- **未执行**：git commit（待批准）；真实生成/分离/翻唱任务端到端验证（建议跑一次生成验证 song_<ts> 目录与 <项目名>_<ts> 文件落盘）。
+## 2026-09-25 18:30 — T1-T7 端到端真实任务测试 + 5 个 bug 修复
+
+- **需求**：文件管理重构后整体测试一遍再交付（T1 生成 / T2 改名 / T3 分离 / T4 翻唱 / T5 删除 / T6 上传留存 / T7 收尾）。
+- **Bug 修复（5 个）**：
+  1. 【严重】src/history.py L57：Win32 API 名误写 SHFILEOperationW（正确 SHFileOperationW），AttributeError 被吞、静默回退 unlink 直删——回收站功能从未生效。修复后整目录真实入回收站（验证：回收站条目含原路径 Y:\...\outputs）。
+  2. src/backend_gguf.py：audiocpp_cli.exe 中文 --out 路径落盘乱码 → CLI 阶段用 ASCII 安全名（song_<ts>），成功后 Python 重命名中文项目名（wav+abc）。
+  3. app.py L398：批量结果 5 元组误按 [2] 取 result（abc_score 崩溃）。
+  4. app.py L435-441：4 元组解包 5 元组（too many values to unpack）。
+  5. app.py tab_sep.select：分离 Tab 切换遗漏刷新 sep_src_history 源下拉。
+  - tests/test_history_recycle.py 加强：断言 _delete_to_recycle 主路径返回 True（文件级+目录级），防止拼写类 bug 再溜过。
+- **E2E 验证（全部通过）**：T1 生成「测试曲」→ song_20260925_181142/ 四件套（wav/mp3/json/txt 中文名正确）+ db 记录；T2 改名四件套重命名+db 同步；T3 分离 → separations_20260925_181402 + 晨风曲项目名沿用 + 双播放器；T4 翻唱 → cover_<ts> 四轨 + 项目名=源_音色名；T5 历史页/分离页删除项目 → db 移除 + 整目录入回收站（两处均验）；T6 上传源 → uploads/sep_upload_test_20260925_181402_sep_src.wav（264644 字节精确副本）。
+- **回归**：pytest 80 passed（--basetemp 绕开 Temp 死链接权限问题）；i18n 17 通过；py_compile 通过。
+- **清理**：测试产物 5 项全部回收站移除（song_173646 乱码/174131/174336 失败残留、sep_src 留存、Temp 测试源）；.pytest_tmp3 已删。
+- **遗留**：outputs/song_20260925_174551 空目录被系统进程锁定无法删除（WinError 32，非本应用占用，关闭资源管理器/索引器后可手动删）；.pytest_tmp 旧临时目录残留待用户决定。
+- **未执行**：git commit（待批准）。
+## 2026-09-25 18:50 — 任务历史下拉增加项目名显示
+
+- **需求**：分离/翻唱任务历史下拉仅显示产物文件夹名（separations_<ts>/cover_<ts>），多个任务只有时间戳可辨，看不出对应哪个源/上传文件（项目名含上传文件名但前端不可见）。
+- **改动**：app.py——_voice_task_history_choices label 改为「项目名 · 文件夹名」（无项目名时退回文件夹名）；_voice_cover_source_choices 的 [分离] 记录同样前缀项目名。历史页表格本就有项目名列，无需改。
+- **验证**：py_compile 通过；pytest 80 passed；服务重启 9898 HTTP 200。当前 db 为空（测试记录已清），下拉效果待有真实任务后浏览器确认。
+- **未执行**：git commit（待批准）。
+
+
+## 2026-09-25 19:00 — 改名同步性确认测试
+
+- **需求**：确认歌曲历史页选中一首歌改项目名后，列表里同项目全部记录（批量变体）是否同步更新。
+- **改动**：tests/test_history_project.py 新增 test_rename_project_updates_all_records_in_dir——同目录两条记录（主变体+var1）改名后断言 project/audio_path 全部指向新文件名且文件存在。
+- **验证**：test_history_project.py 10 passed；rename_project 遍历同目录全部记录同步字段（文件重命名 + db 更新），前端 refresh_history() 刷新表格即全量可见；分离/翻唱独立目录不级联（设计如此）。
+- **未执行**：git commit（待批准）。
+## 2026-09-25 19:20 — 一致性优化（行号错位 bug + 播放器同步 + 类型词中文化 + 删除确认）
+
+- **Bug 修复（严重）**：历史页 _load_history_entry / on_history_next_page 取数未按 record_types=("generation",) 过滤，表格行号与全量记录错位——存在分离记录时点击生成记录实际选中 separation 记录（实测误改了分离目录项目名，已恢复）。两处补过滤参数；test_history_filter.py 源码断言 2→4 处。
+- **一致性**：历史页 4 回调（删除选中/清空/改名/删除项目）outputs 补播放器三元组——删除清空播放器、改名按新路径重填（对齐分离/翻唱页）；分离/翻唱源下拉类型词经 _QUEUE_TYPE_LABELS+tr 中文化，i18n 补"翻唱": "Cover"；三处删除项目按钮加前端确认弹窗（实测 Gradio 5.x js 返回 false 不阻止 fn，须 throw 中断，弹窗双语文案）。
+- **验证**：pytest 81 passed；i18n 17 通过；py_compile 通过；浏览器 E2E——弹窗取消（记录不动）/确定（3 条记录全删+目录入回收站）、改名后 3 记录+15 文件同步、播放器按新路径重载音频、选中行与显示行一致。
+- **未执行**：git commit（待批准）。

@@ -356,3 +356,61 @@ class VoiceClient:
 def heal_ffmpeg_check() -> str:
     """返回 ffmpeg 可用性检查文案（空串=可用）。"""
     return "" if shutil.which("ffmpeg") else "未找到 ffmpeg，请加入系统 PATH"
+
+
+# ---------------------------------------------------------------- 模型状态检查
+# Demucs htdemucs 在 torch hub 的缓存文件名（下载 url 的 hash，跨平台一致）；
+# 文件缺失时首次运行分离会自动下载（约 80MB）
+DEMUCS_CACHE_NAME = "955717e8-8726e21a.th"
+
+
+def _demucs_cache_file() -> Path:
+    """定位 htdemucs 的 torch hub 缓存文件（TORCH_HOME 优先，默认 ~/.cache/torch）。"""
+    torch_home = os.environ.get("TORCH_HOME")
+    base = Path(torch_home) if torch_home else Path.home() / ".cache" / "torch"
+    return base / "hub" / "checkpoints" / DEMUCS_CACHE_NAME
+
+
+def check_voice_models(project_root) -> dict:
+    """检查音色工坊三个模型文件的存在状态（仅文件级检查，不加载模型）。
+
+    供系统设置页「模型状态」展示：
+    - Demucs (htdemucs)：torch hub 缓存文件
+    - Seed-VC 主模型：seedvc_dir/checkpoints/models--Plachta--Seed-VC/snapshots 下的 .pth
+    - campplus 说话人编码器：models--funasr--campplus/snapshots 下的 campplus_cn_common.bin
+
+    返回 {"enabled", "demucs"/"seedvc"/"campplus": {"exists": bool|None, "path": str}}；
+    exists=None 表示该项不适用（未启用 / seedvc_dir 未配置），UI 应显示对应占位文案。
+    """
+    # 复用 VoiceClient 的配置读取（含 seedvc_dir 回退探测 project_root/seed-vc）
+    cfg = VoiceClient(Path(project_root))._load_cfg()
+
+    demucs_path = _demucs_cache_file()
+    result = {
+        "enabled": bool(cfg["enabled"]),
+        "demucs": {"exists": None, "path": str(demucs_path)},
+        "seedvc": {"exists": None, "path": ""},
+        "campplus": {"exists": None, "path": ""},
+    }
+    if not result["enabled"]:
+        return result
+
+    result["demucs"]["exists"] = demucs_path.is_file()
+
+    seedvc_dir = cfg.get("seedvc_dir")
+    if seedvc_dir is None:
+        return result  # 目录未配置：seedvc/campplus 保持 None（UI 显示「未配置」）
+
+    # Seed-VC 主模型：HF 缓存 snapshots 下任意 .pth（DiT 权重，文件名随版本变化故不硬编码）
+    seed_snap = Path(seedvc_dir) / "checkpoints" / "models--Plachta--Seed-VC" / "snapshots"
+    result["seedvc"]["path"] = str(seed_snap)
+    result["seedvc"]["exists"] = seed_snap.is_dir() and any(
+        p.is_file() and p.suffix == ".pth" for p in seed_snap.rglob("*"))
+
+    # campplus 说话人编码器：固定文件名 campplus_cn_common.bin
+    camp_snap = Path(seedvc_dir) / "checkpoints" / "models--funasr--campplus" / "snapshots"
+    result["campplus"]["path"] = str(camp_snap)
+    result["campplus"]["exists"] = camp_snap.is_dir() and any(
+        p.is_file() and p.name == "campplus_cn_common.bin" for p in camp_snap.rglob("*"))
+
+    return result

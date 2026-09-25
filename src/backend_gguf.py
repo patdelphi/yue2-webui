@@ -187,8 +187,13 @@ class GGUFBackend:
                  lang: str = "zh") -> GenerationResult:
         """Execute generation."""
         output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / f"{output_name or output_dir.name}.wav"
-        cmd = self.build_command(params, output_dir, output_name=output_name)
+        final_name = output_name or output_dir.name
+        # audiocpp_cli 对非 ASCII 输出文件名会落盘乱码（如中文项目名"测试曲"变"娴嬭瘯鏇"）：
+        # CLI 阶段统一改用 ASCII 安全名（目录名 song_<ts>），成功后由 Python
+        # （Windows Unicode API）重命名为最终项目名，规避 exe 的编码 bug
+        cli_name = final_name if final_name.isascii() else output_dir.name
+        output_path = output_dir / f"{final_name}.wav"
+        cmd = self.build_command(params, output_dir, output_name=cli_name)
         logger.info(f"Executing audiocpp_cli command: {' '.join(str(c) for c in cmd)}")
         
         start_time = time.time()
@@ -229,6 +234,15 @@ class GGUFBackend:
                     generation_time_seconds=elapsed,
                 )
             
+            # CLI 成功后：把 ASCII 中转名重命名为最终项目名（wav + abc）
+            if cli_name != final_name:
+                cli_wav = output_dir / f"{cli_name}.wav"
+                if cli_wav.exists():
+                    cli_wav.rename(output_path)
+                cli_abc = output_dir / f"{cli_name}.abc"
+                if cli_abc.exists():
+                    cli_abc.rename(output_dir / f"{final_name}.abc")
+
             if not output_path.exists():
                 logger.error("Output file not found after generation")
                 return GenerationResult(

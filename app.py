@@ -29,11 +29,11 @@ from backend_gguf import GGUFBackend
 from style_presets import STYLE_PRESETS
 from vocal_presets import VOCAL_PRESETS, INSTRUMENT_PRESETS, MOOD_PRESETS, LANGUAGE_PRESETS, GENRE_PRESETS
 from lyrics_templates import LYRICS_TEMPLATES
-from history import HistoryManager, HistoryRecord
+from history import HistoryManager, HistoryRecord, sanitize_project, _FILENAME_TS_RE
 from postprocess import postprocess_audio
 from queue_manager import queue_manager, TaskType, TaskStatus, TaskCancelledError
 from i18n import tr, normalize_lang
-from voice_client import VoiceClient
+from voice_client import VoiceClient, check_voice_models
 from voice_ui_handlers import VoiceHandlers, detect_voice
 
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -72,7 +72,7 @@ _CUR_LANG = _load_lang_state()
 
 backend = GGUFBackend(PROJECT_ROOT)
 history_mgr = HistoryManager(
-    history_file=WEBUI_ROOT / "history.json",
+    db_file=WEBUI_ROOT / "history.db",
     outputs_root=WEBUI_ROOT / "outputs",
 )
 
@@ -181,7 +181,7 @@ def _update_last_abc(abc: str):
 
 
 def on_generate(
-    style, lyrics, cot, seed, random_seed, cfg_scale, num_inference_steps, out_format, batch_count,
+    project, style, lyrics, cot, seed, random_seed, cfg_scale, num_inference_steps, out_format, batch_count,
     normalize, fade, trim, metadata,
     abc_text,
     abc_temp, abc_top_p, abc_top_k, abc_rep_penalty, abc_pen_window, abc_min_tok, abc_max_tok,
@@ -242,6 +242,7 @@ def on_generate(
         TaskType.GENERATION,
         _generate_worker,
         lang=lang,
+        project=project or "",
         style=style, lyrics=lyrics, cot=cot, seeds=seeds, cfg_scale=cfg_scale,
         num_inference_steps=num_inference_steps, out_format=out_format, batch_count=batch_count,
         normalize=normalize, fade=fade, trim=trim, metadata=metadata, abc_text=abc_text,
@@ -300,7 +301,7 @@ def on_generate(
 
 def _generate_worker(
     _task,
-    style, lyrics, cot, seeds, cfg_scale, num_inference_steps, out_format, batch_count,
+    project, style, lyrics, cot, seeds, cfg_scale, num_inference_steps, out_format, batch_count,
     normalize, fade, trim, metadata, abc_text,
     abc_temp, abc_top_p, abc_top_k, abc_rep_penalty, abc_pen_window, abc_min_tok, abc_max_tok,
     sem_temp, sem_top_p, sem_top_k, sem_rep_penalty, sem_pen_window, sem_min_tok, sem_max_tok,
@@ -335,8 +336,12 @@ def _generate_worker(
 
     _save_last_inputs(params.style, params.lyrics, abc_text or "")
 
+    # 项目名清洗 + 产物命名规范（文件管理重构）：
+    #   目录 = outputs/song_<时间戳>/；文件 = <项目名>_<时间戳>[_varN].<ext>（项目名空则时间戳开头）
+    project = sanitize_project(project or "")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base_task_id = f"{timestamp}_{params.id}"
+    base_task_id = f"song_{timestamp}"           # 目录名 / 历史 task_id（不含项目名，改名不动目录）
+    file_stem = f"{project}_{timestamp}" if project else timestamp  # 产物文件名主干
     batch_count = int(batch_count)
     output_dir = WEBUI_ROOT / "outputs" / base_task_id
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -363,6 +368,8 @@ def _generate_worker(
 
         current_seed = seeds[i]
         task_id = f"{base_task_id}_var{i+1}" if batch_count > 1 else base_task_id
+        # 文件名与 task_id 解耦：task_id 固定 song_<ts>[_varN]，文件主干 = <项目名>_<ts>[_varN]
+        output_name = f"{file_stem}_var{i+1}" if batch_count > 1 else file_stem
         variant_dir = output_dir
         variant_dir.mkdir(parents=True, exist_ok=True)
 
@@ -374,27 +381,27 @@ def _generate_worker(
             output_dir=variant_dir,
             on_progress=on_progress,
             cancel_event=_task.cancel_event,
-            output_name=task_id,
+            output_name=output_name,
             lang=lang,
         )
-        results.append((task_id, variant_dir, result, current_seed))
+        results.append((task_id, output_name, variant_dir, result, current_seed))
 
-    successful = [(tid, d, r, s) for tid, d, r, s in results if r.success]
+    successful = [(tid, fname, d, r, s) for tid, fname, d, r, s in results if r.success]
     if not successful:
         if _task.cancel_event.is_set():
             raise TaskCancelledError(tr(lang, "任务已取消"))
-        failed_msg = results[0][2].error_message if results else tr(lang, "未知错误")
+        failed_msg = results[0][3].error_message if results else tr(lang, "未知错误")
         raise ValueError(f"{tr(lang, '生成失败')}: {failed_msg}")
 
     # 生成成功：用产出的乐谱（最后一个成功变体）更新「使用上一次」记录，
     # 否则记录停留在任务开始时外部输入框的内容（正常生成时为空）
-    last_abc = successful[-1][2].abc_score or (abc_text or "")
+    last_abc = successful[-1][3].abc_score or (abc_text or "")
     _update_last_abc(last_abc)
 
     format_label = FORMAT_LABELS.get(params.out_format.value, "PCM 16-bit")
 
     if any([normalize, fade, trim, metadata]):
-        for idx, (task_id, variant_dir, result, variant_seed) in enumerate(successful):
+        for idx, (task_id, fname, variant_dir, result, variant_seed) in enumerate(successful):
             wav_path = Path(result.audio_path)
             if wav_path.exists():
                 _task.push_progress(0, tr(lang, "后处理音频..."))
@@ -425,26 +432,26 @@ def _generate_worker(
                         logger.warning("MP3 re-export failed after post-processing")
                         result.mp3_path = None
 
-    total_time = sum(r.generation_time_seconds or 0 for _, _, r, _ in successful)
-    avg_duration = sum(r.audio_duration_seconds or 0 for _, _, r, _ in successful) / len(successful)
+    total_time = sum(r.generation_time_seconds or 0 for _, _, _, r, _ in successful)
+    avg_duration = sum(r.audio_duration_seconds or 0 for _, _, _, r, _ in successful) / len(successful)
 
     if batch_count > 1:
         duration_info = f"{tr(lang, '批量生成')} **{len(successful)}/{batch_count}** {tr(lang, '个变体')} | {tr(lang, '总耗时')} **{total_time:.1f}s** | {tr(lang, '平均音频时长')} **{avg_duration:.1f}s** | {format_label}"
     else:
-        r = successful[0][2]
+        r = successful[0][3]
         duration_info = f"{tr(lang, '生成耗时')} **{r.generation_time_seconds:.1f}s** | {tr(lang, '音频时长')} **{r.audio_duration_seconds:.1f}s** | {format_label}"
 
     _lyrics_json = html.escape(json.dumps(params.lyrics, ensure_ascii=False), quote=True)
     lyrics_data_html = f'<div class="gen-lyrics-data" style="display:none" data-lyrics=\'{_lyrics_json}\' data-duration="{avg_duration}"></div>'
 
-    for task_id, variant_dir, result, variant_seed in successful:
+    for task_id, fname, variant_dir, result, variant_seed in successful:
         abc_path = ""
         if result.abc_score:
-            abc_file = variant_dir / f"{task_id}.abc"
+            abc_file = variant_dir / f"{fname}.abc"
             abc_file.write_text(result.abc_score, encoding="utf-8")
             abc_path = str(abc_file.relative_to(WEBUI_ROOT))
 
-        lyrics_file = variant_dir / f"{task_id}.txt"
+        lyrics_file = variant_dir / f"{fname}.txt"
         lyrics_file.write_text(params.lyrics, encoding="utf-8")
 
         record = HistoryRecord(
@@ -464,15 +471,16 @@ def _generate_worker(
             output_dir=str(variant_dir.relative_to(WEBUI_ROOT)),
             abc_path=abc_path,
             out_format=params.out_format.value,
+            project=project,
         )
         history_mgr.append(record)
     history_mgr.auto_prune()
 
-    first_result = successful[0][2]
-    first_task_id = successful[0][0]
-    first_dir = successful[0][1]
+    first_result = successful[0][3]
+    first_fname = successful[0][1]
+    first_dir = successful[0][2]
     abc_display = first_result.abc_score or ""
-    abc_download = str(first_dir / f"{first_task_id}.abc") if first_result.abc_score else None
+    abc_download = str(first_dir / f"{first_fname}.abc") if first_result.abc_score else None
 
     if batch_count == 1:
         mp3_download = first_result.mp3_path
@@ -484,17 +492,17 @@ def _generate_worker(
         )
     else:
         variants_payload = []
-        for idx, (task_id, variant_dir, result, variant_seed) in enumerate(successful, start=1):
+        for idx, (task_id, fname, variant_dir, result, variant_seed) in enumerate(successful, start=1):
             variants_payload.append({
                 "label": f"{tr(lang, '变体')}{idx} (seed={variant_seed}, {result.audio_duration_seconds or 0:.1f}s)",
                 "task_id": task_id,
                 "audio_path": str(result.audio_path),
                 "abc_text": result.abc_score or "",
-                "abc_file": str(variant_dir / f"{task_id}.abc") if result.abc_score else None,
+                "abc_file": str(variant_dir / f"{fname}.abc") if result.abc_score else None,
                 "mp3_file": result.mp3_path,
             })
 
-        audio_paths = [str(r.audio_path) for _, _, r, _ in successful]
+        audio_paths = [str(r.audio_path) for _, _, _, r, _ in successful]
         h_rows, h_info = refresh_history()
         return (
             audio_paths[0], duration_info, abc_display, abc_download, None,
@@ -683,7 +691,7 @@ def _resynthesize_worker(
     _save_last_inputs(params.style, params.lyrics, abc_text or "")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    task_id = f"{timestamp}_resynth_{params.id}"
+    task_id = f"song_{timestamp}"  # 重新合成也走 song_<ts> 项目目录（无项目名，文件以时间戳开头）
     output_dir = WEBUI_ROOT / "outputs" / task_id
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -705,6 +713,7 @@ def _resynthesize_worker(
         output_dir=output_dir,
         on_progress=on_progress,
         cancel_event=_task.cancel_event,
+        output_name=timestamp,
         lang=lang,
     )
 
@@ -733,7 +742,7 @@ def _resynthesize_worker(
         history_mgr.append(record)
         history_mgr.auto_prune()
 
-        lyrics_file = output_dir / f"{output_dir.name}.txt"
+        lyrics_file = output_dir / f"{timestamp}.txt"
         lyrics_file.write_text(params.lyrics, encoding="utf-8")
 
         # 重新合成成功：产出乐谱更新「使用上一次」记录
@@ -814,6 +823,9 @@ def on_transcribe(audio_file, progress=gr.Progress(track_tqdm=False)):
 def _transcribe_worker(_task, audio_path, lang="zh"):
     """Worker function for transcription, runs in queue thread."""
     audio_path = Path(audio_path)
+    # 上传源统一留存（文件管理重构）：uploads/<源名>_<时间戳>_transcribe.<ext>，
+    # Gradio 临时文件会被清理，不留存则历史无法追溯源音频
+    voice_handlers.persist_upload(str(audio_path), "transcribe")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     task_id = f"transcribe_{timestamp}"
     output_dir = WEBUI_ROOT / "outputs" / task_id
@@ -878,12 +890,16 @@ def _voice_stem_choices(lang="zh", exclude_vocals=True):
 
 
 def _voice_source_history_choices(lang="zh", limit=50):
-    """生成「从历史记录选择」下拉：列出最近 generation/cover 记录（有音频者）。"""
+    """生成「从历史记录选择」下拉：列出最近 generation/cover 记录（有音频者）。
+
+    类型词经 _QUEUE_TYPE_LABELS + tr 翻译，避免中文界面出现英文类型词。
+    """
     choices = []
     for rec in history_mgr.list_all():
         if rec.audio_path and Path(rec.audio_path).exists() \
                 and rec.record_type in ("generation", "cover"):
-            choices.append((f"{rec.record_type} · {Path(rec.audio_path).name}", rec.audio_path))
+            type_label = tr(lang, _QUEUE_TYPE_LABELS.get(rec.record_type, rec.record_type))
+            choices.append((f"{type_label} · {Path(rec.audio_path).name}", rec.audio_path))
         if len(choices) >= limit:
             break
     return choices
@@ -899,7 +915,8 @@ def _voice_cover_source_choices(lang="zh", limit=50):
     for rec in history_mgr.list_all():
         if rec.record_type in ("generation", "cover") and rec.audio_path \
                 and Path(rec.audio_path).exists():
-            choices.append((f"{rec.record_type} · {Path(rec.audio_path).name}", rec.audio_path))
+            type_label = tr(lang, _QUEUE_TYPE_LABELS.get(rec.record_type, rec.record_type))
+            choices.append((f"{type_label} · {Path(rec.audio_path).name}", rec.audio_path))
         elif rec.record_type == "separation":
             # 换嗓需人声轨、混音需伴奏轨，两者齐备才可复用
             stems = {s.get("type"): s.get("path", "") for s in (rec.stems or [])
@@ -907,7 +924,10 @@ def _voice_cover_source_choices(lang="zh", limit=50):
             v, a = stems.get("vocals", ""), stems.get("accompaniment", "")
             if v and a and Path(v).exists() and Path(a).exists():
                 folder = Path(rec.output_dir).name if rec.output_dir else Path(v).stem
-                choices.append((f"[{tr(lang, '分离')}] {folder}", f"sep_task:{rec.task_id}"))
+                # 有项目名时前缀显示，避免多条分离记录仅时间戳可辨
+                proj = getattr(rec, "project", "")
+                label = f"[{tr(lang, '分离')}] {proj} · {folder}" if proj else f"[{tr(lang, '分离')}] {folder}"
+                choices.append((label, f"sep_task:{rec.task_id}"))
         if len(choices) >= limit:
             break
     return choices
@@ -933,14 +953,16 @@ def _voice_dry_upload_choices(lang="zh", limit=50):
 def _voice_task_history_choices(record_type, lang="zh", limit=50):
     """按类型列出任务历史（separation/cover），value=task_id，用于 Tab 内选择回放。
 
-    显示名取产物文件夹名（新记录含时间戳，按文件夹辨识任务）。
+    显示名 = "项目名 · 产物文件夹名"（项目名含上传源文件名；无项目名时仅文件夹名）。
     """
     choices = []
     for rec in history_mgr.list_all():
         if rec.record_type == record_type and rec.audio_path \
                 and Path(rec.audio_path).exists():
             folder = Path(rec.output_dir).name if rec.output_dir else Path(rec.audio_path).stem
-            choices.append((folder, rec.task_id))
+            # 有项目名时前缀显示（含上传源文件名），避免多个任务仅时间戳可辨
+            label = f"{rec.project} · {folder}" if getattr(rec, "project", "") else folder
+            choices.append((label, rec.task_id))
         if len(choices) >= limit:
             break
     return choices
@@ -992,6 +1014,42 @@ def on_voice_task_history_pick(task_id):
     if not items and entry and entry.audio_path and Path(entry.audio_path).exists():
         items.append((Path(entry.audio_path).name, entry.audio_path))
     return _fill_voice_players(items)
+
+
+def on_voice_task_rename(task_id, new_name, record_type):
+    """分离/翻唱任务历史：改项目名（重命名项目目录文件，保留时间戳）。
+
+    返回 (历史下拉刷新, 播放器组保持, 新项目名输入清空)。
+    """
+    if not task_id:
+        raise gr.Error(tr(_CUR_LANG, "请先选择任务"))
+    entry = history_mgr.get(task_id)
+    if not entry or not getattr(entry, "output_dir", ""):
+        raise gr.Error(tr(_CUR_LANG, "该记录没有产物目录"))
+    n = history_mgr.rename_project(entry.output_dir, new_name or "")
+    gr.Info(f"{tr(_CUR_LANG, '已重命名')} {n} {tr(_CUR_LANG, '个文件')}")
+    # 播放器里的旧路径已失效：按记录 stems 重新填充
+    items = _voice_stem_items(getattr(entry, "stems", None))
+    return (gr.update(choices=_voice_task_history_choices(record_type)),
+            *_fill_voice_players(items), "")
+
+
+def on_voice_task_delete(task_id, record_type):
+    """分离/翻唱任务历史：删除项目（整目录移入回收站，移除该目录全部记录）。
+
+    返回 (历史下拉刷新+清空选中, 播放器组清空)。
+    """
+    if not task_id:
+        raise gr.Error(tr(_CUR_LANG, "请先选择任务"))
+    entry = history_mgr.get(task_id)
+    if not entry or not getattr(entry, "output_dir", ""):
+        raise gr.Error(tr(_CUR_LANG, "该记录没有产物目录"))
+    n = history_mgr.delete_project(entry.output_dir)
+    if n <= 0:
+        raise gr.Error(tr(_CUR_LANG, "删除失败"))
+    gr.Info(f"{tr(_CUR_LANG, '已删除项目')} · {n} {tr(_CUR_LANG, '条记录')}")
+    return (gr.update(choices=_voice_task_history_choices(record_type), value=None),
+            *_fill_voice_players([]))
 
 
 def on_voice_save_ref(src_upload, name_input):
@@ -1054,6 +1112,47 @@ def _resolve_voice_source(history_val, upload_val):
     raise gr.Error(tr(_CUR_LANG, "请先选择源音频"))
 
 
+def _project_from_source(source: str) -> str:
+    """解析源音频的项目名（文件管理重构）：历史记录 project 字段优先。
+
+    记录无项目名则返回空（产物不带项目名前缀）；非历史源（上传）按文件名结构
+    <项目名>_<时间戳>[_类别] 提取项目名段，无该结构则用整个文件名主干。
+    """
+    try:
+        src = Path(source).resolve()
+        for rec in history_mgr.list_all():
+            if rec.audio_path and Path(rec.audio_path).resolve() == src:
+                return getattr(rec, "project", "") or ""
+    except OSError:
+        pass
+    m = _FILENAME_TS_RE.match(Path(source).stem)
+    if m:
+        return m.group("proj") or ""
+    return Path(source).stem
+
+
+def _voice_ref_name(ref_path: str) -> str:
+    """参考音色名（翻唱项目名的组成部分）。
+
+    音色库条目（名_4位短id.wav）去掉短 id 段；其余（uploads 留存/临时上传/
+    分离人声轨）按 <项目名>_<时间戳>[_类别] 结构剥时间戳段，无结构则取主干。
+    """
+    p = Path(ref_path)
+    stem = p.stem
+    try:
+        if p.parent.resolve() == voice_handlers.refs_dir().resolve():
+            base, sep, tail = stem.rpartition("_")
+            if sep and base and len(tail) == 4 and tail.isascii() and tail.isalnum():
+                return base
+            return stem
+    except OSError:
+        pass
+    m = _FILENAME_TS_RE.match(stem)
+    if m and m.group("proj"):
+        return m.group("proj")
+    return stem
+
+
 def _voice_running_outputs(text):
     """任务运行中的中间态输出：播放器组+历史下拉保持现状 + 进度文案 + 按钮保持禁用。"""
     return (*[gr.update()] * VOICE_PLAYER_COUNT, text,
@@ -1070,6 +1169,8 @@ def on_voice_separate(source_history, source_upload, sep_mode="vocals",
     产物文件夹（Gradio 临时文件不持久）。
     """
     source, from_upload = _resolve_voice_source(source_history, source_upload)
+    # 分离项目名（文件管理重构）：自动取源的项目名（历史记录 project / 上传文件名）
+    project = _project_from_source(source)
     vote = "2" if sep_mode == "vocals" else "4"
     lang = _CUR_LANG
     # 提交前先反馈：清空播放器组 + 禁用按钮
@@ -1081,7 +1182,7 @@ def on_voice_separate(source_history, source_upload, sep_mode="vocals",
         on_submit=lambda tid: _register_task("separation", tid),
         on_finish=lambda tid: _unregister_task("separation", tid),
         source=source, mode=vote, root_task_id="", denoise=bool(denoise),
-        from_upload=from_upload)
+        from_upload=from_upload, project=project)
     try:
         result = None
         while True:  # 消费状态流：每条文案 → 播放器保持 + 进度文案 + 按钮保持禁用
@@ -1148,6 +1249,9 @@ def on_voice_cover(source_history, source_upload, ref_library, ref_dry_upload,
         raise gr.Error(tr(_CUR_LANG, "请先选择参考音色"))
     # 自定义伴奏校验（选了但文件缺失则忽略，回退原伴奏）
     acc = custom_acc if custom_acc and Path(custom_acc).exists() else ""
+    # 翻唱项目名（文件管理重构）：源项目名_音色名（源无项目名则仅音色名）
+    cover_project = "_".join(x for x in (_project_from_source(source),
+                                         _voice_ref_name(str(ref))) if x)
     lang = _CUR_LANG
     # 提交前先反馈：清空播放器组 + 禁用按钮
     yield (*_fill_voice_players([]), tr(lang, "排队中..."),
@@ -1162,7 +1266,7 @@ def on_voice_cover(source_history, source_upload, ref_library, ref_dry_upload,
         diffusion_steps=int(steps or 30), gain_db=float(gain_db or 0.0),
         root_task_id=root_task_id, denoise=bool(denoise),
         source_vocals=source_vocals, source_acc=source_acc,
-        from_upload=from_upload,
+        from_upload=from_upload, project=cover_project,
     )
     try:
         result = None
@@ -1336,7 +1440,8 @@ def _history_page_info_text(page, pages, total):
 
 def refresh_history():
     """Refresh history dataframe (first page)."""
-    rows = history_mgr.to_dataframe_rows()
+    # 歌曲历史页只展示生成记录；分离/翻唱记录在各自 Tab 的历史区查看
+    rows = history_mgr.to_dataframe_rows(record_types=("generation",))
     page_rows = rows[:HISTORY_PAGE_SIZE]
     total = len(rows)
     pages = max(1, (total + HISTORY_PAGE_SIZE - 1) // HISTORY_PAGE_SIZE)
@@ -1351,7 +1456,8 @@ def refresh_history_full():
 
 def _get_history_page(page):
     """Get a specific page of history. Returns (rows, page_info)."""
-    rows = history_mgr.to_dataframe_rows()
+    # 与 refresh_history 一致：仅生成记录进入歌曲历史分页
+    rows = history_mgr.to_dataframe_rows(record_types=("generation",))
     total = len(rows)
     pages = max(1, (total + HISTORY_PAGE_SIZE - 1) // HISTORY_PAGE_SIZE)
     page = max(0, min(int(page), pages - 1))
@@ -1368,7 +1474,9 @@ def on_history_prev_page(current_page):
 
 def on_history_next_page(current_page):
     """Go to next page."""
-    rows = history_mgr.to_dataframe_rows()
+    # 页数按过滤后的记录集计算（与 refresh_history/_get_history_page 一致），
+    # 否则存在分离/翻唱记录时总页数会偏大
+    rows = history_mgr.to_dataframe_rows(record_types=("generation",))
     pages = max(1, (len(rows) + HISTORY_PAGE_SIZE - 1) // HISTORY_PAGE_SIZE)
     new_page = min(pages - 1, int(current_page) + 1)
     return _get_history_page(new_page) + (new_page,)
@@ -1377,12 +1485,15 @@ def on_history_next_page(current_page):
 def _load_history_entry(row_index, current_state):
     """Load a history entry by row index.
     返回 state, audio, info, style, lyrics, abc, preview, lyrics_data, duration_data, stem_dd, stem_audio。
+
+    注意：行号映射基于与表格一致的过滤记录集（generation），否则选中行会错位
+    （曾导致点击生成记录实际选中 separation 记录）。
     """
     no_stem = gr.update(visible=False, choices=[]), gr.update(visible=False, value=None)
-    rows = history_mgr.to_dataframe_rows()
+    rows = history_mgr.to_dataframe_rows(record_types=("generation",))
     if row_index < 0 or row_index >= len(rows):
         return current_state, None, tr(_CUR_LANG, "请选择一条记录"), "", "", "", "", "", "", *no_stem
-    task_id = rows[row_index][5]
+    task_id = rows[row_index][6]  # 列序：时间/项目名/风格/模式/时长/耗时/TaskID
     entry = history_mgr.get(task_id)
     if not entry:
         return current_state, None, tr(_CUR_LANG, "记录不存在"), "", "", "", "", "", "", *no_stem
@@ -1421,24 +1532,92 @@ def on_history_row_click(row_index, current_state, current_page):
     return _load_history_entry(actual_index, current_state)
 
 
+def _hist_player_keep():
+    """历史页播放器三元组：保持现状（未选中/操作失败时使用）。"""
+    return gr.update(), gr.update(), gr.update()
+
+
+def _hist_player_clear():
+    """历史页播放器三元组：清空并隐藏轨道回放（删除/清空成功后使用）。"""
+    return (gr.update(value=None),
+            gr.update(visible=False, choices=[], value=None),
+            gr.update(value=None, visible=False))
+
+
 def on_history_delete(selected_state):
-    """Delete the currently selected history entry."""
+    """Delete the currently selected history entry.
+
+    返回末尾三元组同步刷新播放器（试听/轨道回放），避免仍指向已删除文件
+    （与分离/翻唱页 on_voice_task_delete 清空播放器的行为一致）。
+    """
     if not selected_state:
         rows, info = refresh_history()
-        return rows, info, tr(_CUR_LANG, "请先点击选择要删除的记录"), selected_state, 0
+        return rows, info, tr(_CUR_LANG, "请先点击选择要删除的记录"), selected_state, 0, *_hist_player_keep()
     task_id = selected_state[0]
     if history_mgr.delete(task_id):
         rows, info = refresh_history()
-        return rows, info, f"{tr(_CUR_LANG, '已删除')} {task_id}", [], 0
+        return rows, info, f"{tr(_CUR_LANG, '已删除')} {task_id}", [], 0, *_hist_player_clear()
     rows, info = refresh_history()
-    return rows, info, tr(_CUR_LANG, "删除失败"), selected_state, 0
+    return rows, info, tr(_CUR_LANG, "删除失败"), selected_state, 0, *_hist_player_keep()
 
 
 def on_history_clear():
-    """Clear all history."""
+    """Clear all history. 清空后播放器一并清空。"""
     history_mgr.clear()
     rows, info = refresh_history()
-    return rows, info, tr(_CUR_LANG, "已清空所有历史"), [], 0
+    return rows, info, tr(_CUR_LANG, "已清空所有历史"), [], 0, *_hist_player_clear()
+
+
+def on_history_rename_project(selected_state, new_name):
+    """改项目名（文件管理重构）：重命名选中记录所在项目目录的全部文件。
+
+    只替换文件名中的项目名段，保留时间戳与后缀（_varN 等）；目录名不动。
+    输入留空 = 清除项目名（文件回退为时间戳开头）。
+    返回末尾三元组按记录新路径重填播放器（旧路径已随重命名失效）。
+    """
+    if not selected_state:
+        rows, info = refresh_history()
+        return rows, info, tr(_CUR_LANG, "请先点击选择要修改的记录"), selected_state, 0, *_hist_player_keep()
+    entry = history_mgr.get(selected_state[0])
+    if not entry or not getattr(entry, "output_dir", ""):
+        rows, info = refresh_history()
+        return rows, info, tr(_CUR_LANG, "该记录没有产物目录"), selected_state, 0, *_hist_player_keep()
+    n = history_mgr.rename_project(entry.output_dir, new_name or "")
+    rows, info = refresh_history()
+    # rename_project 已同步 db 路径：重新取记录，按新路径重填播放器
+    entry = history_mgr.get(selected_state[0]) or entry
+    stem_choices, stem_first = [], None
+    for s in getattr(entry, "stems", None) or []:
+        p = s.get("path", "") if isinstance(s, dict) else ""
+        if p and Path(p).exists():
+            stem_choices.append((s.get("label", p), p))
+            stem_first = stem_first or p
+    has_stem = bool(stem_choices)
+    audio = entry.audio_path if entry.audio_path and Path(entry.audio_path).exists() else None
+    stem_dd = gr.update(choices=stem_choices, value=stem_first if has_stem else None,
+                        visible=has_stem)
+    stem_audio = gr.update(value=stem_first, visible=has_stem)
+    return rows, info, f"{tr(_CUR_LANG, '已重命名')} {n} {tr(_CUR_LANG, '个文件')}", [], 0, audio, stem_dd, stem_audio
+
+
+def on_history_delete_project(selected_state):
+    """删除项目（文件管理重构）：选中记录所在的整个产物目录移入回收站。
+
+    同目录的批量变体等多条记录一并移除（目录整体回收，文件可从回收站还原）。
+    返回末尾三元组清空播放器，避免仍指向已删除目录。
+    """
+    if not selected_state:
+        rows, info = refresh_history()
+        return rows, info, tr(_CUR_LANG, "请先点击选择要删除的记录"), selected_state, 0, *_hist_player_keep()
+    entry = history_mgr.get(selected_state[0])
+    if not entry or not getattr(entry, "output_dir", ""):
+        rows, info = refresh_history()
+        return rows, info, tr(_CUR_LANG, "该记录没有产物目录"), selected_state, 0, *_hist_player_keep()
+    n = history_mgr.delete_project(entry.output_dir)
+    rows, info = refresh_history()
+    if n <= 0:
+        return rows, info, tr(_CUR_LANG, "删除失败"), selected_state, 0, *_hist_player_keep()
+    return rows, info, f"{tr(_CUR_LANG, '已删除项目')} · {n} {tr(_CUR_LANG, '条记录')}", [], 0, *_hist_player_clear()
 
 
 def on_check_models():
@@ -1458,6 +1637,34 @@ def on_check_models():
     ss_icon = "✅" if sheetsage2["exists"] else "❌"
     ss_state = tr(lang, "就绪") if sheetsage2["exists"] else tr(lang, "缺失")
     lines.append(f"- SheetSage2 ({tr(lang, '转谱')}): {ss_icon} {ss_state} `{sheetsage2['model_path']}`")
+
+    # 音色工坊三模型状态（Demucs / Seed-VC / campplus，文件级检查不加载模型）
+    try:
+        vc = check_voice_models(PROJECT_ROOT)
+        lines.append(f"\n### {tr(lang, '音色工坊')}\n")
+        if not vc["enabled"]:
+            lines.append(f"- {tr(lang, '未启用')}（config.cfg [voice] enabled=false）")
+        else:
+            for key, label in (
+                ("demucs", f"Demucs ({tr(lang, '音轨分离')})"),
+                ("seedvc", f"Seed-VC ({tr(lang, '音色转换')})"),
+                ("campplus", tr(lang, "campplus 说话人编码器")),
+            ):
+                item = vc[key]
+                if item["exists"] is None:
+                    # seedvc_dir 未配置：该项无法定位，给出配置指引
+                    lines.append(f"- {label}: ⚠️ {tr(lang, '未配置')} "
+                                 f"`config.cfg [voice] seedvc_dir`")
+                elif item["exists"]:
+                    lines.append(f"- {label}: ✅ `{item['path']}`")
+                else:
+                    # 缺失提示：Demucs 首次运行分离会自动下载；Seed-VC/campplus 需按文档安装
+                    hint = (tr(lang, "首次运行时自动下载") if key == "demucs"
+                            else tr(lang, "见 setup.md 第 6 节"))
+                    lines.append(f"- {label}: ❌ {hint} `{item['path']}`")
+    except Exception as e:
+        # 状态检查不应阻断设置页渲染，异常时仅提示检查失败
+        lines.append(f"\n### {tr(lang, '音色工坊')}\n- ⚠️ {tr(lang, '检查失败')}: {e}")
 
     try:
         import torch
@@ -1664,6 +1871,13 @@ def on_preset_save(name, cot, steps, out_format, abc_temp, abc_top_p, abc_top_k,
 # 因此必须显式 width:auto 才能让 hint/dd 按内容收缩，否则各自撑满整行换行堆叠。
 _TITLE_ROW_CSS = """
 #title-row { align-items: center; gap: 8px; }
+    /* 系统设置页区块卡片：外框分隔 + 内边距，颜色随明暗主题自动切换 */
+    .settings-panel {
+        border: 1px solid var(--border-color-primary);
+        border-radius: 10px;
+        padding: 2px 14px 12px;
+        background: var(--background-fill-primary);
+    }
     /* GitHub 图标：随主题色，hover 亮起；flex 收缩避免撑满整行 */
     #gh-icon { width: auto; flex: 0 0 auto; display: flex; align-items: center; margin: 0; }
     #gh-link { display: inline-flex; align-items: center; color: var(--body-text-color); opacity: .65; transition: opacity .15s; }
@@ -1989,6 +2203,17 @@ def build_ui():
                             return value, ("full" if (value and cur_cot == "off") else cur_cot)
                         last_abc_btn.click(fn=_restore_last_abc, inputs=[abc_input, cot_input], outputs=[abc_input, cot_input])
 
+                        # 项目名（文件管理重构）：产物文件名前缀 <项目名>_<时间戳>，留空则仅时间戳
+                        project_input = gr.Textbox(
+                            label=_t("项目名 (可选)"),
+                            placeholder=_t("例如: 夜曲demo"),
+                            info=_t("产物文件名 = 项目名_时间戳；留空则仅用时间戳"),
+                        )
+                        _reg(project_input, lambda lang: gr.update(
+                            label=tr(lang, "项目名 (可选)"),
+                            placeholder=tr(lang, "例如: 夜曲demo"),
+                            info=tr(lang, "产物文件名 = 项目名_时间戳；留空则仅用时间戳")))
+
                         with gr.Row():
                             seed_input = gr.Number(label=_t("随机种子"), value=831001, precision=0, info=_t("勾选「随机种子变化」时每次生成自动换新，此处显示实际使用的种子"))
                             _reg(seed_input, lambda lang: gr.update(label=tr(lang, "随机种子"), info=tr(lang, "勾选「随机种子变化」时每次生成自动换新，此处显示实际使用的种子")))
@@ -2159,9 +2384,9 @@ def build_ui():
                 history_row_trigger = gr.Number(visible=True, value=-1, elem_id="history-row-trigger", label="")
                 history_df = gr.Dataframe(
                     # 列头采用中英双语（Gradio 静态表格的 headers 不支持运行时切换）
-                    headers=["时间 Time", "风格 Style", "模式 Mode", "音频时长 Duration", "生成耗时 Elapsed", "Task ID"],
-                    datatype=["str", "str", "str", "str", "str", "str"],
-                    col_count=6,
+                    headers=["时间 Time", "项目名 Project", "风格 Style", "模式 Mode", "音频时长 Duration", "生成耗时 Elapsed", "Task ID"],
+                    datatype=["str", "str", "str", "str", "str", "str", "str"],
+                    col_count=7,
                     max_height=500,
                     interactive=False,
                     value=refresh_history()[0],
@@ -2209,13 +2434,42 @@ def build_ui():
                     _reg(history_delete_btn, lambda lang: gr.update(value=tr(lang, "删除选中")))
                     history_clear_btn = gr.Button(_t("清空历史"))
                     _reg(history_clear_btn, lambda lang: gr.update(value=tr(lang, "清空历史")))
+                # 项目管理（文件管理重构）：改项目名只改文件名段（保留时间戳）；
+                # 删除项目 = 整个产物目录移入回收站 + 移除该目录全部记录
+                with gr.Row():
+                    history_project_input = gr.Textbox(
+                        label=_t("新项目名"), placeholder=_t("留空则清除项目名"), scale=3)
+                    _reg(history_project_input, lambda lang: gr.update(
+                        label=tr(lang, "新项目名"), placeholder=tr(lang, "留空则清除项目名")))
+                    history_rename_btn = gr.Button(_t("改项目名"), size="sm")
+                    _reg(history_rename_btn, lambda lang: gr.update(value=tr(lang, "改项目名")))
+                    history_del_project_btn = gr.Button(_t("删除项目"), variant="stop", size="sm")
+                    _reg(history_del_project_btn, lambda lang: gr.update(value=tr(lang, "删除项目")))
 
                 history_df.select(fn=on_history_select, inputs=[history_state, history_page], outputs=[history_state, history_audio, history_info, history_style, history_lyrics, history_abc, history_abc_preview, history_lyrics_data, history_duration_data, history_stem_dd, history_stem_audio])
                 history_row_trigger.change(fn=on_history_row_click, inputs=[history_row_trigger, history_state, history_page], outputs=[history_state, history_audio, history_info, history_style, history_lyrics, history_abc, history_abc_preview, history_lyrics_data, history_duration_data, history_stem_dd, history_stem_audio])
                 history_stem_dd.change(fn=lambda v: gr.update(value=v, visible=True), inputs=history_stem_dd, outputs=history_stem_audio)
                 history_refresh_btn.click(fn=refresh_history_full, outputs=[history_df, history_page_info, history_page])
-                history_delete_btn.click(fn=on_history_delete, inputs=history_state, outputs=[history_df, history_page_info, history_info, history_state, history_page])
-                history_clear_btn.click(fn=on_history_clear, outputs=[history_df, history_page_info, history_info, history_state, history_page])
+                # outputs 末尾统一追加播放器三元组（试听/轨道回放），与回调返回值对应
+                history_delete_btn.click(fn=on_history_delete, inputs=history_state,
+                                         outputs=[history_df, history_page_info, history_info, history_state, history_page, history_audio, history_stem_dd, history_stem_audio])
+                history_clear_btn.click(fn=on_history_clear,
+                                        outputs=[history_df, history_page_info, history_info, history_state, history_page, history_audio, history_stem_dd, history_stem_audio])
+                # 项目管理：改项目名（文件级重命名，播放器按新路径重填）/ 删除项目（整目录入回收站，播放器清空）
+                history_rename_btn.click(fn=on_history_rename_project, inputs=[history_state, history_project_input],
+                                         outputs=[history_df, history_page_info, history_info, history_state, history_page, history_audio, history_stem_dd, history_stem_audio])
+                # 删除项目确认弹窗（前端 js，取消则中止回调不触发 Python 端删除）。
+                # 注意：Gradio 5.x 中 js 返回 false 不能阻止 fn 执行（实测），
+                # 必须在用户取消时 throw 中断；弹窗文案中英双语以兼容两种界面语言。
+                _DEL_PROJECT_CONFIRM_JS = (
+                    "() => { if (!confirm("
+                    "'确定删除整个项目目录？文件将移入回收站。\\n"
+                    "Delete the whole project folder? Files will be moved to the Recycle Bin.'"
+                    ")) throw new Error('cancelled'); }"
+                )
+                history_del_project_btn.click(fn=on_history_delete_project, inputs=history_state,
+                                              js=_DEL_PROJECT_CONFIRM_JS,
+                                              outputs=[history_df, history_page_info, history_info, history_state, history_page, history_audio, history_stem_dd, history_stem_audio])
                 history_prev_btn.click(fn=on_history_prev_page, inputs=history_page, outputs=[history_df, history_page_info, history_page])
                 history_next_btn.click(fn=on_history_next_page, inputs=history_page, outputs=[history_df, history_page_info, history_page])
                 demo.load(fn=refresh_history_full, outputs=[history_df, history_page_info, history_page])
@@ -2332,6 +2586,59 @@ def build_ui():
                                      visible=False, show_download_button=True)
                             for i in range(VOICE_PLAYER_COUNT)
                         ]
+                        # 项目管理（文件管理重构）：改项目名（保留时间戳）/ 删除项目（整目录入回收站）
+                        with gr.Row():
+                            sep_rename_input = gr.Textbox(
+                                label=_t("新项目名"), placeholder=_t("留空则清除项目名"), scale=3)
+                            _reg(sep_rename_input, lambda lang: gr.update(
+                                label=tr(lang, "新项目名"), placeholder=tr(lang, "留空则清除项目名")))
+                            sep_rename_btn = gr.Button(_t("改项目名"), size="sm")
+                            _reg(sep_rename_btn, lambda lang: gr.update(value=tr(lang, "改项目名")))
+                            sep_del_btn = gr.Button(_t("删除项目"), variant="stop", size="sm")
+                            _reg(sep_del_btn, lambda lang: gr.update(value=tr(lang, "删除项目")))
+
+                        # —— 库管理区：素材库（乐器轨）与音色库（参考干声）统一在此管理 ——
+                        # （翻唱页仅保留选择+试听；删除/重命名集中到分离页）
+                        lib_md = gr.Markdown(_t("### 库管理"))
+                        _reg(lib_md, lambda lang: gr.update(value=tr(lang, "### 库管理")))
+
+                        lib_stem_dd = gr.Dropdown(
+                            choices=_voice_stem_choices(_CUR_LANG),
+                            label=_t("素材库(乐器轨)"), interactive=True)
+                        _reg(lib_stem_dd, lambda lang: gr.update(
+                            choices=_voice_stem_choices(lang), label=tr(lang, "素材库(乐器轨)")))
+                        lib_stem_preview = gr.Audio(
+                            label=_t("试听"), type="filepath",
+                            elem_id="lib-stem-preview", visible=False,
+                            show_download_button=False)
+                        _reg(lib_stem_preview, lambda lang: gr.update(label=tr(lang, "试听")))
+                        with gr.Row():
+                            lib_stem_del_btn = gr.Button(_t("删除选中"), size="sm", variant="stop")
+                            _reg(lib_stem_del_btn, lambda lang: gr.update(value=tr(lang, "删除选中")))
+                            lib_stem_rename_input = gr.Textbox(
+                                label=_t("重命名为"), elem_id="lib-stem-rename")
+                            _reg(lib_stem_rename_input, lambda lang: gr.update(label=tr(lang, "重命名为")))
+                            lib_stem_rename_btn = gr.Button(_t("重命名"), size="sm")
+                            _reg(lib_stem_rename_btn, lambda lang: gr.update(value=tr(lang, "重命名")))
+
+                        lib_ref_dd = gr.Dropdown(
+                            choices=_voice_ref_choices(_CUR_LANG),
+                            label=_t("音色库(参考干声)"), interactive=True)
+                        _reg(lib_ref_dd, lambda lang: gr.update(
+                            choices=_voice_ref_choices(lang), label=tr(lang, "音色库(参考干声)")))
+                        lib_ref_preview = gr.Audio(
+                            label=_t("试听"), type="filepath",
+                            elem_id="lib-ref-preview", visible=False,
+                            show_download_button=False)
+                        _reg(lib_ref_preview, lambda lang: gr.update(label=tr(lang, "试听")))
+                        with gr.Row():
+                            lib_ref_del_btn = gr.Button(_t("删除选中"), size="sm", variant="stop")
+                            _reg(lib_ref_del_btn, lambda lang: gr.update(value=tr(lang, "删除选中")))
+                            lib_ref_rename_input = gr.Textbox(
+                                label=_t("重命名为"), elem_id="lib-ref-rename")
+                            _reg(lib_ref_rename_input, lambda lang: gr.update(label=tr(lang, "重命名为")))
+                            lib_ref_rename_btn = gr.Button(_t("重命名"), size="sm")
+                            _reg(lib_ref_rename_btn, lambda lang: gr.update(value=tr(lang, "重命名")))
 
                 # 事件绑定
                 sep_src_mode.change(fn=on_voice_src_mode, inputs=sep_src_mode,
@@ -2390,20 +2697,12 @@ def build_ui():
                             interactive=True)
                         _reg(cover_ref_dropdown, lambda lang: gr.update(
                             choices=_voice_ref_choices(lang), label=tr(lang, "音色库选择")))
-                        # —— 音色库管理：选中即试听；支持删除（回收站）与重命名 ——
+                        # —— 音色库入口：仅选择；选中即试听（管理功能在分离页库管理区） ——
                         cover_ref_preview = gr.Audio(
                             label=_t("试听"), type="filepath",
                             elem_id="cover-ref-preview", visible=False,
                             show_download_button=False)
                         _reg(cover_ref_preview, lambda lang: gr.update(label=tr(lang, "试听")))
-                        with gr.Row():
-                            cover_ref_del_btn = gr.Button(_t("删除选中"), size="sm", variant="stop")
-                            _reg(cover_ref_del_btn, lambda lang: gr.update(value=tr(lang, "删除选中")))
-                            cover_ref_rename_input = gr.Textbox(
-                                label=_t("重命名为"), elem_id="cover-ref-rename")
-                            _reg(cover_ref_rename_input, lambda lang: gr.update(label=tr(lang, "重命名为")))
-                            cover_ref_rename_btn = gr.Button(_t("重命名"), size="sm")
-                            _reg(cover_ref_rename_btn, lambda lang: gr.update(value=tr(lang, "重命名")))
 
                         # 干声历史入口：radio 选来源（分离人声/上传干声），再在下拉选文件（默认隐藏）
                         with gr.Column(visible=False) as cover_ref_dry_panel:
@@ -2451,21 +2750,12 @@ def build_ui():
                             choices=_voice_stem_choices(lang),
                             label=tr(lang, "自定义伴奏(可选)"),
                             info=tr(lang, "留空自动使用源伴奏")))
-                        # —— 素材库管理：选中即试听；支持删除（回收站）与重命名 ——
+                        # —— 素材库选择：仅选择；选中即试听（管理功能在分离页库管理区） ——
                         cover_acc_preview = gr.Audio(
                             label=_t("试听"), type="filepath",
                             elem_id="cover-acc-preview", visible=False,
                             show_download_button=False)
                         _reg(cover_acc_preview, lambda lang: gr.update(label=tr(lang, "试听")))
-                        with gr.Row():
-                            cover_acc_del_btn = gr.Button(_t("删除选中"), size="sm", variant="stop")
-                            _reg(cover_acc_del_btn, lambda lang: gr.update(value=tr(lang, "删除选中")))
-                            cover_acc_rename_input = gr.Textbox(
-                                label=_t("重命名为"), elem_id="cover-acc-rename")
-                            _reg(cover_acc_rename_input, lambda lang: gr.update(label=tr(lang, "重命名为")))
-                            cover_acc_rename_btn = gr.Button(_t("重命名"), size="sm")
-                            _reg(cover_acc_rename_btn, lambda lang: gr.update(value=tr(lang, "重命名")))
-                        cover_acc_info = gr.Markdown()
 
                         # —— 翻唱参数 ——
                         cover_semi = gr.Slider(-12, 12, value=0, step=1, label=_t("半音偏移"))
@@ -2514,6 +2804,16 @@ def build_ui():
                                      visible=False, show_download_button=True)
                             for i in range(VOICE_PLAYER_COUNT)
                         ]
+                        # 项目管理（文件管理重构）：改项目名（保留时间戳）/ 删除项目（整目录入回收站）
+                        with gr.Row():
+                            cover_rename_input = gr.Textbox(
+                                label=_t("新项目名"), placeholder=_t("留空则清除项目名"), scale=3)
+                            _reg(cover_rename_input, lambda lang: gr.update(
+                                label=tr(lang, "新项目名"), placeholder=tr(lang, "留空则清除项目名")))
+                            cover_rename_btn = gr.Button(_t("改项目名"), size="sm")
+                            _reg(cover_rename_btn, lambda lang: gr.update(value=tr(lang, "改项目名")))
+                            cover_del_btn = gr.Button(_t("删除项目"), variant="stop", size="sm")
+                            _reg(cover_del_btn, lambda lang: gr.update(value=tr(lang, "删除项目")))
 
                 # 事件绑定
                 cover_src_mode.change(fn=on_voice_src_mode, inputs=cover_src_mode,
@@ -2543,23 +2843,28 @@ def build_ui():
                 # 取消按钮：协作式取消本 Tab 排队中/运行中的任务（info 区反馈结果）
                 cover_cancel_btn.click(fn=lambda: on_voice_cancel("cover"),
                                        outputs=[cover_info])
-                # 音色库管理：选中即试听；删除/重命名（回收站）后刷新下拉并清空试听
+                # 音色库/素材库选择：选中即试听（管理功能在分离页库管理区）
                 cover_ref_dropdown.change(fn=lambda p: gr.update(value=p, visible=bool(p)),
                                           inputs=cover_ref_dropdown,
                                           outputs=[cover_ref_preview])
-                cover_ref_del_btn.click(fn=on_voice_ref_delete, inputs=[cover_ref_dropdown],
-                                        outputs=[cover_ref_preview, cover_ref_dropdown])
-                cover_ref_rename_btn.click(fn=on_voice_ref_rename,
-                                           inputs=[cover_ref_dropdown, cover_ref_rename_input],
-                                           outputs=[cover_ref_preview, cover_ref_dropdown])
-                # 素材库管理：选中即试听；删除/重命名（回收站）后刷新下拉
                 cover_acc_dd.change(fn=lambda p: gr.update(value=p, visible=bool(p)),
                                     inputs=cover_acc_dd, outputs=[cover_acc_preview])
-                cover_acc_del_btn.click(fn=on_voice_stem_delete, inputs=[cover_acc_dd],
-                                        outputs=[cover_acc_dd])
-                cover_acc_rename_btn.click(fn=on_voice_stem_rename,
-                                           inputs=[cover_acc_dd, cover_acc_rename_input],
-                                           outputs=[cover_acc_dd])
+
+                # 库管理（分离页）：选中即试听；删除/重命名（回收站）后刷新下拉
+                lib_stem_dd.change(fn=lambda p: gr.update(value=p, visible=bool(p)),
+                                   inputs=lib_stem_dd, outputs=[lib_stem_preview])
+                lib_stem_del_btn.click(fn=on_voice_stem_delete, inputs=[lib_stem_dd],
+                                       outputs=[lib_stem_dd])
+                lib_stem_rename_btn.click(fn=on_voice_stem_rename,
+                                          inputs=[lib_stem_dd, lib_stem_rename_input],
+                                          outputs=[lib_stem_dd])
+                lib_ref_dd.change(fn=lambda p: gr.update(value=p, visible=bool(p)),
+                                  inputs=lib_ref_dd, outputs=[lib_ref_preview])
+                lib_ref_del_btn.click(fn=on_voice_ref_delete, inputs=[lib_ref_dd],
+                                      outputs=[lib_ref_preview, lib_ref_dd])
+                lib_ref_rename_btn.click(fn=on_voice_ref_rename,
+                                         inputs=[lib_ref_dd, lib_ref_rename_input],
+                                         outputs=[lib_ref_preview, lib_ref_dd])
 
                 # 任务历史回放（按文件夹）：选任务 → 整组播放器填充全部轨道
                 sep_history_dd.change(fn=on_voice_task_history_pick, inputs=sep_history_dd,
@@ -2567,10 +2872,29 @@ def build_ui():
                 cover_history_dd.change(fn=on_voice_task_history_pick, inputs=cover_history_dd,
                                         outputs=[*cover_hist_audios])
 
-                # 每次切到分离 Tab 时刷新分离任务历史下拉
-                tab_sep.select(fn=lambda: gr.update(
-                    choices=_voice_task_history_choices("separation")),
-                    outputs=[sep_history_dd])
+                # 项目管理（文件管理重构）：改项目名（重命名文件保留时间戳）/ 删除项目（整目录入回收站）
+                sep_rename_btn.click(fn=lambda tid, name: on_voice_task_rename(tid, name, "separation"),
+                                     inputs=[sep_history_dd, sep_rename_input],
+                                     outputs=[sep_history_dd, *sep_hist_audios, sep_rename_input])
+                sep_del_btn.click(fn=lambda tid: on_voice_task_delete(tid, "separation"),
+                                  inputs=sep_history_dd,
+                                  js=_DEL_PROJECT_CONFIRM_JS,
+                                  outputs=[sep_history_dd, *sep_hist_audios])
+                cover_rename_btn.click(fn=lambda tid, name: on_voice_task_rename(tid, name, "cover"),
+                                       inputs=[cover_history_dd, cover_rename_input],
+                                       outputs=[cover_history_dd, *cover_hist_audios, cover_rename_input])
+                cover_del_btn.click(fn=lambda tid: on_voice_task_delete(tid, "cover"),
+                                    inputs=cover_history_dd,
+                                    js=_DEL_PROJECT_CONFIRM_JS,
+                                    outputs=[cover_history_dd, *cover_hist_audios])
+
+                # 每次切到分离 Tab 时刷新源下拉 + 分离任务历史 + 库管理两下拉
+                # （翻唱页删除后保持同步；新生成的歌曲也要能立即作为分离源，无需刷新页面）
+                tab_sep.select(fn=lambda: (gr.update(choices=_voice_source_history_choices(_CUR_LANG)),
+                                           gr.update(choices=_voice_task_history_choices("separation")),
+                                           gr.update(choices=_voice_stem_choices(_CUR_LANG)),
+                                           gr.update(choices=_voice_ref_choices(_CUR_LANG))),
+                               outputs=[sep_src_history, sep_history_dd, lib_stem_dd, lib_ref_dd])
                 # 每次切到翻唱 Tab 时刷新翻唱源/音色库/伴奏/干声两来源/翻唱历史下拉
                 # （衔接「分离入库 → 翻唱选用/复用」；翻唱源含可复用的分离记录）
                 # 注意：必须用 gr.update 包裹 choices，裸列表会被 Gradio 5 当作 value 赋值导致 not in choices 报错
@@ -2586,40 +2910,51 @@ def build_ui():
 
             with gr.Tab(_t("系统设置")) as tab_settings:
                 _reg(tab_settings, lambda lang: gr.update(label=tr(lang, "系统设置")))
-                sysstatus_md = gr.Markdown(_t("### 系统状态"))
-                _reg(sysstatus_md, lambda lang: gr.update(value=tr(lang, "### 系统状态")))
-                model_status = gr.Markdown(value=on_check_models())
-                # 切语言时重新渲染模型状态（apply_lang 先更新 _CUR_LANG 再执行 updater）
-                _reg(model_status, lambda lang: gr.update(value=on_check_models()))
-                check_models_btn = gr.Button(_t("检查模型"))
-                _reg(check_models_btn, lambda lang: gr.update(value=tr(lang, "检查模型")))
-                check_models_btn.click(fn=on_check_models, outputs=model_status)
-
-                # 当前队列状态窗口：Timer 每 2s 轮询只读快照（不影响任务进度流）
-                queue_md = gr.Markdown(_t("### 当前队列"))
-                _reg(queue_md, lambda lang: gr.update(value=tr(lang, "### 当前队列")))
-                queue_status_md = gr.Markdown(value=_queue_status_html())
-                # 切语言即时重渲染（apply_lang 先更新 _CUR_LANG 再执行 updater）
-                _reg(queue_status_md, lambda lang: gr.update(value=_queue_status_html()))
-                queue_timer = gr.Timer(2.0)
-                queue_timer.tick(fn=_queue_status_html, outputs=[queue_status_md])
-
-                presets_md = gr.Markdown(_t("### 参数预设"))
-                _reg(presets_md, lambda lang: gr.update(value=tr(lang, "### 参数预设")))
-                preset_dropdown = gr.Dropdown(
-                    label=_t("加载预设"),
-                    choices=_preset_display_names(_CUR_LANG),
-                    value=None,
-                )
-                _reg(preset_dropdown, lambda lang: gr.update(label=tr(lang, "加载预设"), choices=_preset_display_names(lang)))
-                preset_name_input = gr.Textbox(label=_t("保存预设名称"), placeholder=_t("我的预设"))
-                _reg(preset_name_input, lambda lang: gr.update(label=tr(lang, "保存预设名称"), placeholder=tr(lang, "我的预设")))
+                # 左右分栏：左列系统状态（模型检查），右列当前队列；下方参数预设整行
                 with gr.Row():
-                    preset_load_btn = gr.Button(_t("加载"))
-                    _reg(preset_load_btn, lambda lang: gr.update(value=tr(lang, "加载")))
-                    preset_save_btn = gr.Button(_t("保存当前参数"))
-                    _reg(preset_save_btn, lambda lang: gr.update(value=tr(lang, "保存当前参数")))
-                preset_info = gr.Markdown()
+                    with gr.Column(scale=3, elem_classes="settings-panel"):
+                        # 标题与「检查模型」按钮同行，压缩纵向占用
+                        with gr.Row():
+                            sysstatus_md = gr.Markdown(_t("### 系统状态"))
+                            _reg(sysstatus_md, lambda lang: gr.update(value=tr(lang, "### 系统状态")))
+                            check_models_btn = gr.Button(_t("检查模型"), scale=0, min_width=110, size="sm")
+                            _reg(check_models_btn, lambda lang: gr.update(value=tr(lang, "检查模型")))
+                        model_status = gr.Markdown(value=on_check_models())
+                        # 切语言时重新渲染模型状态（apply_lang 先更新 _CUR_LANG 再执行 updater）
+                        _reg(model_status, lambda lang: gr.update(value=on_check_models()))
+                        check_models_btn.click(fn=on_check_models, outputs=model_status)
+
+                    with gr.Column(scale=2, elem_classes="settings-panel"):
+                        # 当前队列状态窗口：Timer 每 2s 轮询只读快照（不影响任务进度流）
+                        queue_md = gr.Markdown(_t("### 当前队列"))
+                        _reg(queue_md, lambda lang: gr.update(value=tr(lang, "### 当前队列")))
+                        queue_status_md = gr.Markdown(value=_queue_status_html())
+                        # 切语言即时重渲染（apply_lang 先更新 _CUR_LANG 再执行 updater）
+                        _reg(queue_status_md, lambda lang: gr.update(value=_queue_status_html()))
+                        queue_timer = gr.Timer(2.0)
+                        queue_timer.tick(fn=_queue_status_html, outputs=[queue_status_md])
+
+                # 参数预设区：Group 承载卡片外框（与上方两列同样式）
+                with gr.Group(elem_classes="settings-panel"):
+                    presets_md = gr.Markdown(_t("### 参数预设"))
+                    _reg(presets_md, lambda lang: gr.update(value=tr(lang, "### 参数预设")))
+                    # 下拉与「加载」按钮同行、名称输入与「保存当前参数」按钮同行（紧凑化）
+                    with gr.Row():
+                        preset_dropdown = gr.Dropdown(
+                            label=_t("加载预设"),
+                            choices=_preset_display_names(_CUR_LANG),
+                            value=None,
+                            scale=4,
+                        )
+                        _reg(preset_dropdown, lambda lang: gr.update(label=tr(lang, "加载预设"), choices=_preset_display_names(lang)))
+                        preset_load_btn = gr.Button(_t("加载"), scale=1)
+                        _reg(preset_load_btn, lambda lang: gr.update(value=tr(lang, "加载")))
+                    with gr.Row():
+                        preset_name_input = gr.Textbox(label=_t("保存预设名称"), placeholder=_t("我的预设"), scale=4)
+                        _reg(preset_name_input, lambda lang: gr.update(label=tr(lang, "保存预设名称"), placeholder=tr(lang, "我的预设")))
+                        preset_save_btn = gr.Button(_t("保存当前参数"), scale=1)
+                        _reg(preset_save_btn, lambda lang: gr.update(value=tr(lang, "保存当前参数")))
+                    preset_info = gr.Markdown()
 
         lyrics_input.change(fn=on_lyrics_change, inputs=lyrics_input, outputs=structure_analysis)
 
@@ -2628,6 +2963,7 @@ def build_ui():
         generate_btn.click(
             fn=on_generate,
             inputs=[
+                project_input,
                 style_input, lyrics_input, cot_input, seed_input, random_seed_checkbox, cfg_input, steps_input, out_format_input, batch_count_input,
                 normalize_checkbox, fade_checkbox, trim_checkbox, metadata_checkbox,
                 abc_input,

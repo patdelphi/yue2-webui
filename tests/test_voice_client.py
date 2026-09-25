@@ -7,6 +7,7 @@
 3. 成功启动后 separate/convert 走通，异常统一收敛为 VoiceResult(ok=False)
 4. 健康检查成功即复用既有进程，失败则逐端口重试
 5. enabled=false 时直接拒绝
+6. check_voice_models：音色工坊三模型（Demucs/Seed-VC/campplus）状态检查
 """
 
 import sys
@@ -17,7 +18,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from voice_client import VoiceClient, VoiceError  # noqa: E402
+from voice_client import VoiceClient, VoiceError, check_voice_models  # noqa: E402
 
 
 def _make_client(project_root: Path) -> VoiceClient:
@@ -141,3 +142,71 @@ def test_cancelled_flag_parsed(monkeypatch):
     res2 = client.convert("s.wav", "ref.wav", output_dir=str(tmp / "cov"))
     assert res2.ok is False
     assert res2.cancelled is False
+
+
+# ---------------------------------------------------------------- 模型状态检查
+
+def _make_seedvc_fake(svc: Path):
+    """在假 seed-vc 目录中构造 HF 缓存结构（Seed-VC 主模型 .pth + campplus .bin）。"""
+    seed_snap = svc / "checkpoints" / "models--Plachta--Seed-VC" / "snapshots" / "abc123"
+    seed_snap.mkdir(parents=True)
+    (seed_snap / "DiT_seed_v2_fake.pth").write_bytes(b"x")
+    camp_snap = svc / "checkpoints" / "models--funasr--campplus" / "snapshots" / "def456"
+    camp_snap.mkdir(parents=True)
+    (camp_snap / "campplus_cn_common.bin").write_bytes(b"x")
+
+
+def test_check_voice_models_disabled(tmp_path):
+    """enabled=false 时三项 exists 均为 None（不检查），UI 显示「未启用」。"""
+    webui = tmp_path / "yue2-webui"
+    webui.mkdir()
+    (webui / "config.cfg").write_text("\n[voice]\nenabled = false\n", encoding="utf-8")
+    res = check_voice_models(tmp_path)
+    assert res["enabled"] is False
+    assert all(res[k]["exists"] is None for k in ("demucs", "seedvc", "campplus"))
+
+
+def test_check_voice_models_no_seedvc_dir(tmp_path, monkeypatch):
+    """enabled=true 但 seedvc_dir 未配置且探测不到：demucs 正常检查，
+    seedvc/campplus exists=None（UI 显示「未配置」）。"""
+    webui = tmp_path / "yue2-webui"
+    webui.mkdir()
+    (webui / "config.cfg").write_text("\n[voice]\nenabled = true\n", encoding="utf-8")
+    monkeypatch.setenv("TORCH_HOME", str(tmp_path / "torchhome"))  # demucs 缓存指向空目录
+    res = check_voice_models(tmp_path)
+    assert res["enabled"] is True
+    assert res["demucs"]["exists"] is False
+    assert res["seedvc"]["exists"] is None
+    assert res["campplus"]["exists"] is None
+
+
+def test_check_voice_models_all_ready(tmp_path, monkeypatch):
+    """三模型齐备：demucs 缓存文件 + Seed-VC snapshots .pth + campplus .bin。"""
+    webui = tmp_path / "yue2-webui"
+    webui.mkdir()
+    _make_seedvc_fake(tmp_path / "seed-vc")  # 未配 seedvc_dir 时自动探测 project_root/seed-vc
+    (webui / "config.cfg").write_text("\n[voice]\nenabled = true\n", encoding="utf-8")
+    th = tmp_path / "torchhome"
+    (th / "hub" / "checkpoints").mkdir(parents=True)
+    (th / "hub" / "checkpoints" / "955717e8-8726e21a.th").write_bytes(b"x")
+    monkeypatch.setenv("TORCH_HOME", str(th))
+    res = check_voice_models(tmp_path)
+    assert res["enabled"] is True
+    assert res["demucs"]["exists"] is True
+    assert res["seedvc"]["exists"] is True
+    assert res["campplus"]["exists"] is True
+    assert "models--Plachta--Seed-VC" in res["seedvc"]["path"]
+
+
+def test_check_voice_models_missing(tmp_path, monkeypatch):
+    """seed-vc 目录存在但缺模型：seedvc/campplus 为 False（缺失），路径仍返回。"""
+    webui = tmp_path / "yue2-webui"
+    webui.mkdir()
+    (tmp_path / "seed-vc" / "checkpoints").mkdir(parents=True)  # 空的 checkpoints 目录
+    (webui / "config.cfg").write_text(
+        "\n[voice]\nenabled = true\nseedvc_dir = seed-vc\n", encoding="utf-8")
+    monkeypatch.setenv("TORCH_HOME", str(tmp_path / "torchhome"))
+    res = check_voice_models(tmp_path)
+    assert res["demucs"]["exists"] is False
+    assert res["seedvc"]["exists"] is False
+    assert res["campplus"]["exists"] is False
