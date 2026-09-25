@@ -9,6 +9,7 @@ app.py 仅做：Tab 布局、语言注册、事件绑定，并把按钮输入转
 - 每个 worker 从 VoiceClient 调用 worker，并把结果写为 HistoryRecord
 """
 
+import json
 import logging
 import random
 import string
@@ -31,6 +32,34 @@ _SHORT_ID_CHARS = string.ascii_lowercase + string.digits
 
 def new_short_id(length: int = 4) -> str:
     return "".join(random.choice(_SHORT_ID_CHARS) for _ in range(length))
+
+
+# worker 阶段键 → 展示文案（worker 写入进度文件的 stage 值；文案经 tr 国际化）
+_STAGE_TEXTS = {"separating": "分离中...", "converting": "换嗓中...",
+                "denoising": "降噪中...", "mixing": "混音中..."}
+
+
+def _progress_poller(task, progress_file: Path, lang: str, tr_fn,
+                     stop_event: threading.Event) -> None:
+    """轮询 worker 阶段进度文件，转发到任务进度通道（run_in_queue_stream 消费）。
+
+    文件由 worker 在阶段边界重写（JSON：{"stage": ...}）；读取失败/未创建跳过本轮。
+    阶段变化才推送，避免重复刷屏。daemon 线程，stop_event 置位即退出。
+    """
+    last_stage = None
+    tr_fn = tr_fn or (lambda l, s: s)  # tr 缺失时回退原文（测试场景）
+    while not stop_event.wait(0.5):
+        try:
+            with open(progress_file, "r", encoding="utf-8") as f:
+                stage = json.load(f).get("stage", "")
+        except Exception:
+            continue  # 文件未创建/写入中，本轮跳过
+        if stage and stage != last_stage:
+            last_stage = stage
+            try:
+                task.push_progress(0, tr_fn(lang, _STAGE_TEXTS.get(stage, stage)))
+            except Exception:
+                pass  # 任务已结束等场景，进度推送失败无碍
 
 
 # 产物键 → 轨道中文标签（与 worker 分离/翻唱产物一致）
@@ -132,6 +161,8 @@ class VoiceHandlers:
     # ---------------------------------------------------------------- 队列提交
     def run_in_queue_stream(self, task_type: TaskType, worker_fn: Callable,
                             lang: str, tr_fn: Callable, task_id_name: str,
+                            on_submit: Optional[Callable[[str], None]] = None,
+                            on_finish: Optional[Callable[[str], None]] = None,
                             **kwargs):
         """生成器版队列提交：yield 实时状态文案，完成时 return worker 结果 dict。
 
@@ -140,10 +171,17 @@ class VoiceHandlers:
         前端组件（info 区 + 按钮）可实时反馈进度，避免任务运行期间界面无响应感。
         - 执行中文案附已用秒数（秒表）：worker 无细粒度进度，用耗时提供反馈
         - 相邻重复文案自动去重，减少无效前端更新
+        - on_submit/on_finish：任务 id 的注册/注销回调（供 app 层挂接取消按钮的
+          活动任务登记；模块不 import app，避免循环依赖）
         """
         # 捕获语言快照，供任务内文案使用（运行中切换语言不影响进行中任务）
         t = queue_manager.submit(task_type, worker_fn, cancel_event=threading.Event(),
                                  lang=lang, tr=tr_fn, **kwargs)
+        if on_submit is not None:
+            try:
+                on_submit(t.task_id)
+            except Exception:
+                logger.exception("on_submit 回调失败(已忽略)")
         run_started = None  # 首次进入 RUNNING 的时间戳，用于秒表
         last_text = None    # 上次已 yield 的文案，相同则跳过（去重）
         try:
@@ -183,31 +221,76 @@ class VoiceHandlers:
         except Exception:
             logger.exception(f"{task_id_name} 任务异常")
             raise
+        finally:
+            if on_finish is not None:
+                try:
+                    on_finish(t.task_id)
+                except Exception:
+                    pass
+
+    def _keep_source_copy(self, source: str, out_dir: Path, ts: str,
+                          from_upload: bool) -> None:
+        """上传源副本留存：Gradio 临时文件会被清理，拷贝到产物文件夹供历史追溯。
+
+        仅上传源拷贝（历史记录源本身已在 outputs 内持久存在）；
+        失败仅记日志不阻断任务（留存是尽力而为）。
+        """
+        if not from_upload or not source:
+            return
+        try:
+            import shutil
+            ext = Path(source).suffix or ".wav"
+            shutil.copyfile(source, out_dir / f"{ts}_source{ext}")
+        except Exception:
+            logger.exception("上传源副本留存失败(已忽略)")
 
     # ---------------------------------------------------------------- 队列 workers
     def separate_worker(self, _task, source: str, mode: str, root_task_id: str = "",
-                        denoise: bool = False, lang: str = "zh", tr=None, **kwargs) -> dict:
+                        denoise: bool = False, lang: str = "zh", tr=None,
+                        from_upload: bool = False, **kwargs) -> dict:
         """音轨分离 worker：调用 worker 分离，独立产物文件夹 + 写历史记录，返回产物 dict。
 
         入队约定（见 run_in_queue_stream）：首个参数名为 _task，并吸收 lang/tr。
         denoise=True 时对输出人声降噪。产物落 outputs/separations/<时间戳>_<短id>/，
         文件名 <时间戳>_<类别>.wav，按文件名即可辨识人声/伴奏等轨。
+        from_upload=True 时拷贝源副本入产物文件夹（Gradio 临时文件不持久）。
+        阶段进度经 out_dir/_progress.json 轮询上报（分离中/降噪中）。
         """
         derived_from = root_task_id
         root = root_task_id or f"upload_{new_short_id()}"  # 上传源无生成任务目录，仅作记录
         out_dir, ts = self._derived_dir("sep")
+        self._keep_source_copy(source, out_dir, ts, from_upload)
+        # 阶段进度文件 + 轮询线程（worker 写阶段，线程转发到任务进度通道）
+        progress_file = out_dir / "_progress.json"
+        stop_evt = threading.Event()
+        poller = threading.Thread(target=_progress_poller,
+                                  args=(_task, progress_file, lang, tr, stop_evt),
+                                  daemon=True)
+        poller.start()
         try:
-            result = self.voice_client.separate(source, mode=mode, output_dir=str(out_dir),
-                                                denoise=denoise, prefix=ts)
+            result = self.voice_client.separate(
+                source, mode=mode, output_dir=str(out_dir), denoise=denoise,
+                prefix=ts, progress_file=str(progress_file),
+                cancel_event=_task.cancel_event)
         except Exception:
             # worker 抛异常：回收本次已建但未入历史的衍生目录，再向上抛原始错误
             self._recycle_created_derived(out_dir)
             raise
+        finally:
+            stop_evt.set()
+            try:
+                progress_file.unlink(missing_ok=True)  # 清理进度文件，产物文件夹不留中间状态
+            except Exception:
+                pass
         if _task.cancel_event.is_set():
             self._recycle_created_derived(out_dir)
             raise TaskCancelledError("任务已取消")
         if not result.ok:
             self._recycle_created_derived(out_dir)
+            # 取消来源两路：主 app cancel_event（UI 取消按钮）或 worker 侧 cancelled
+            # （直接 POST /api/cancel 等）——任一命中都映射为"已取消"而非"任务失败"
+            if _task.cancel_event.is_set() or result.cancelled:
+                raise TaskCancelledError("任务已取消")
             raise RuntimeError(result.error or "音轨分离失败")
         # 换算音频时长（取 vocals 轨）；并收集各轨供历史查看/回放
         products = result.products or {}
@@ -222,29 +305,53 @@ class VoiceHandlers:
     def cover_worker(self, _task, source: str, ref: str, accompaniment: str,
                      semi_tone: int, diffusion_steps: int, gain_db: float,
                      denoise: bool = False,
-                     root_task_id: str = "", lang: str = "zh", tr=None, **kwargs) -> dict:
+                     root_task_id: str = "", lang: str = "zh", tr=None,
+                     source_vocals: str = "", source_acc: str = "",
+                     from_upload: bool = False, **kwargs) -> dict:
         """参考音色翻唱 worker：完整管线（换嗓+混音）+ 写历史记录。denoise=True 时对换嗓人声降噪。
 
         产物落 outputs/covers/<时间戳>_<短id>/，全部轨道平铺命名 <时间戳>_<类别>。
+        source_vocals/source_acc 非空时复用已有分离结果（跳过 Demucs 重复分离）。
+        阶段进度经 out_dir/_progress.json 轮询上报（分离中/换嗓中/降噪中/混音中）。
         """
         derived_from = root_task_id
         root = root_task_id or f"upload_{new_short_id()}"
         out_dir, ts = self._derived_dir("cover")
+        self._keep_source_copy(source, out_dir, ts, from_upload)
+        # 阶段进度文件 + 轮询线程（worker 写阶段，线程转发到任务进度通道）
+        progress_file = out_dir / "_progress.json"
+        stop_evt = threading.Event()
+        poller = threading.Thread(target=_progress_poller,
+                                  args=(_task, progress_file, lang, tr, stop_evt),
+                                  daemon=True)
+        poller.start()
         try:
             result = self.voice_client.convert(
                 source, ref, semi_tone=semi_tone, diffusion_steps=diffusion_steps,
                 accompaniment=accompaniment, gain_db=gain_db, output_dir=str(out_dir),
                 denoise=denoise, prefix=ts,
+                source_vocals=source_vocals, source_acc=source_acc,
+                progress_file=str(progress_file), cancel_event=_task.cancel_event,
             )
         except Exception:
             # worker 抛异常：回收本次已建但未入历史的衍生目录，再向上抛原始错误
             self._recycle_created_derived(out_dir)
             raise
+        finally:
+            stop_evt.set()
+            try:
+                progress_file.unlink(missing_ok=True)  # 清理进度文件，产物文件夹不留中间状态
+            except Exception:
+                pass
         if _task.cancel_event.is_set():
             self._recycle_created_derived(out_dir)
             raise TaskCancelledError("任务已取消")
         if not result.ok:
             self._recycle_created_derived(out_dir)
+            # 取消来源两路：主 app cancel_event（UI 取消按钮）或 worker 侧 cancelled
+            # （直接 POST /api/cancel 等）——任一命中都映射为"已取消"而非"任务失败"
+            if _task.cancel_event.is_set() or result.cancelled:
+                raise TaskCancelledError("任务已取消")
             raise RuntimeError(result.error or "翻唱失败")
         cover_path = result.products.get("cover", "")
         duration = _probe_duration(cover_path)
@@ -277,6 +384,36 @@ class VoiceHandlers:
         exts = (".wav", ".mp3", ".flac", ".m4a", ".ogg")
         return [str(p) for p in sorted(refs.glob("*")) if p.suffix.lower() in exts]
 
+    def delete_ref(self, path: str) -> None:
+        """删除音色库条目：移入系统回收站（文件级，不直接删除）。"""
+        from history import delete_files_to_recycle
+        p = Path(path)
+        if not p.exists():
+            raise FileNotFoundError(f"文件不存在: {path}")
+        delete_files_to_recycle([p])
+
+    def rename_ref(self, path: str, new_name: str) -> str:
+        """重命名音色库条目（保留 名_短id.wav 格式），返回新路径。
+
+        保留原文件名的短 id 后缀（_xxxx），保证唯一性约束不变；重名冲突时抛异常。
+        """
+        p = Path(path)
+        if not p.exists():
+            raise FileNotFoundError(f"文件不存在: {path}")
+        safe = "".join(c for c in new_name.strip() if c.isalnum() or c in "_- ").strip()
+        if not safe:
+            raise ValueError("名称不能为空")
+        # 提取原短 id（文件名最后一个 _ 后的 4 位短 id）；提取不到则新生成
+        stem = p.stem
+        old_id = stem.rsplit("_", 1)[-1] if "_" in stem else ""
+        short_id = old_id if len(old_id) == 4 and all(c in _SHORT_ID_CHARS for c in old_id) \
+            else new_short_id(4)
+        dest = p.parent / f"{safe}_{short_id}{p.suffix.lower()}"
+        if dest.exists() and dest.resolve() != p.resolve():
+            raise FileExistsError(f"已存在同名条目: {dest.name}")
+        p.rename(dest)
+        return str(dest)
+
     # ---------------------------------------------------------------- 上传干音历史（第二来源）
     def dry_dir(self) -> Path:
         """上传已验证干音留存目录（voice-tools/dry_uploads），不存在则创建。"""
@@ -285,9 +422,31 @@ class VoiceHandlers:
         return d
 
     def save_dry_upload(self, src_path: str) -> str:
-        """把上传且检测通过的人声干音留存到 dry_uploads，返回落盘路径（重复上传覆盖）。"""
+        """把上传且检测通过的人声干音留存到 dry_uploads，返回落盘路径。
+
+        按文件内容 md5 去重：同一干声重复上传或多任务复用时直接返回已有文件，
+        避免 dry_uploads 目录无限膨胀。比对失败回退直接拷贝（保底不拦截任务）。
+        """
+        import hashlib
         import shutil
         src = Path(src_path)
+
+        def _md5(p: Path) -> str:
+            # 分块读取计算 md5，避免大文件一次读入内存
+            h = hashlib.md5()
+            with open(p, "rb") as f:
+                for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                    h.update(chunk)
+            return h.hexdigest()
+
+        try:
+            digest = _md5(src)
+            exts = (".wav", ".mp3", ".flac", ".m4a", ".ogg")
+            for p in sorted(self.dry_dir().glob("*")):
+                if p.suffix.lower() in exts and p.is_file() and _md5(p) == digest:
+                    return str(p)  # 内容相同：复用已有文件，不再拷贝
+        except Exception:
+            logger.exception("干声 md5 去重比对失败，回退直接拷贝")
         dest = self.dry_dir() / f"dry_{new_short_id(4)}{src.suffix.lower() or '.wav'}"
         shutil.copyfile(src, dest)
         return str(dest)
@@ -334,6 +493,35 @@ class VoiceHandlers:
                 name, stype = stem, "other"
             out.append((name, stype, str(p)))
         return out
+
+    def delete_stem(self, path: str) -> None:
+        """删除素材库条目：移入系统回收站（文件级，不直接删除）。"""
+        from history import delete_files_to_recycle
+        p = Path(path)
+        if not p.exists():
+            raise FileNotFoundError(f"文件不存在: {path}")
+        delete_files_to_recycle([p])
+
+    def rename_stem(self, path: str, new_name: str) -> str:
+        """重命名素材库条目（保留 名__轨道类型.ext 格式），返回新路径。
+
+        轨道类型从原文件名解析并保留（重命名只改显示名，不改轨道归属）。
+        """
+        p = Path(path)
+        if not p.exists():
+            raise FileNotFoundError(f"文件不存在: {path}")
+        safe = "".join(c for c in new_name.strip() if c.isalnum() or c in "_- ").strip()
+        if not safe:
+            raise ValueError("名称不能为空")
+        # 从原文件名解析轨道类型；解析不到回退 other
+        _, _, stype = p.stem.rpartition("__")
+        if stype not in self.STEM_TYPES:
+            stype = "other"
+        dest = p.parent / f"{safe}__{stype}{p.suffix.lower()}"
+        if dest.exists() and dest.resolve() != p.resolve():
+            raise FileExistsError(f"已存在同名条目: {dest.name}")
+        p.rename(dest)
+        return str(dest)
 
 
 def _probe_duration(path: str) -> float:

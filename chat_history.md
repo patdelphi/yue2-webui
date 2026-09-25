@@ -320,3 +320,106 @@
 - 浏览器端到端验证（English 界面）：点击 Start separator 后按钮 disabled=true，info 实时显示 "Separate stems · Running... · 9s" 秒表推进；10.3s 完成后按钮恢复、显示 "Separation done · Saved to history"，sep-audio-0/1 挂载并填充 20260925_083325_vocals.wav / _accompaniment.wav（label Vocals/Accompaniment）。服务日志无错误。
 - 服务已重启（端口 9898，job-2a6c4a935bda4abd9209da5d605332d8），浏览器需强刷。
 - 未执行：git commit/push（需用户批准）；翻唱侧真实推理验证（生成器逻辑与分离侧完全对称，单测已覆盖）。
+
+---
+## 2026-09-25 修复：翻唱换嗓干声音量与原声不匹配（人声被伴奏盖住）+ commit b5e182b
+- commit b5e182b：音色工坊产物独立目录+播放器组+历史整组回放+实时进度与按钮禁用（13 文件，未 push）。
+- 用户 bug：翻唱后换嗓干声音量与原声干音不匹配（例子偏小），混音成品人声听不清。
+- 复现测量（用户例子 cover_20260925_085616_mv0p）：原声干声 RMS=-20.6dB、换嗓干声 RMS=-35.1dB（差 14.5dB，比伴奏小 17.4dB → 被盖住）。
+- 修复（voice-tools/worker.py）：混音前人声响度匹配——新增 `_rms_db()`（ffmpeg astats 测整段 RMS，静音 -inf/缺失返回 None）；测原声干声与换嗓干声 RMS，将换嗓人声增益到与原声干声一致（双向，钳制 ±18dB），volume 后接 `alimiter=limit=0.98:level=false` 防增益削波；测量不可用回退 0dB 不阻断。
+- 验证：① `_rms_db` 临时脚本单测——两已知电平文件差精确 10dB、静音/不存在返回 None、match_db 计算与 ±钳制正确；② 真实翻唱端到端（任务 20260925_090801_ni6d，68s）——本次换嗓输出偏大 8.9dB（Seed-VC 电平方向不定），匹配逻辑正确反向衰减；cover.flac RMS=-30.4dB 符合匹配后混合期望（未匹配应约 -24dB），匹配确认生效。
+- 说明：换嗓干声单轨产物（<ts>_converted_vocals.wav）保留原始电平，匹配增益仅作用于混音（cover.flac）；如需单轨也匹配可后续再议。
+- worker 部署注意：改 worker.py 后需杀 8190 端口旧进程（已杀，pid 38028），下次请求自动拉起新代码；主 app 无需重启。
+- 未执行：本次修复的 git commit（需用户批准）；push（需批准）。
+
+---
+## 2026-09-25 排查修复：翻唱音质劣化（响度匹配放大导致 alimiter 削顶失真）
+- 用户反馈：翻唱音质下降厉害。
+- 排查（任务 20260925_091456_au9c，用户开启降噪）：换嗓干声 mean=-34.9dB/peak=-11.8dB vs 原声干声 mean=-20.6dB/peak=-1.3dB——响度匹配放大 +14.3dB 后换嗓人声峰值冲到 **+2.5dBFS**，alimiter(limit=0.98) 大量硬压 → 波形拍扁（削顶失真），混入成品即音质劣化。客观证据：旧增益链人声 peak 精确卡在 -0.175dB（=limit 阈值，贴限硬压特征）。
+- 修复（voice-tools/worker.py）：
+  - 新增 `_peak_db()`（ffmpeg astats Peak level，缺失返回 None）；
+  - 响度匹配加峰值防削波：增益上限 = -1dB - 换嗓峰值（保证放大后峰值 ≤ -1dBFS），超限则收窄增益（RMS 匹配优先、峰值安全兜底）；alimiter 仅作极端兜底，正常不再触发。091456 场景：+14.3dB → +10.8dB（放大后峰值 -1.0dB）。
+- 验证：① 091456 数据复算——旧增益放大后峰值 +2.5dB 超限，新增益 -1.0dB 安全；② 新旧增益人声链 astats 对比——旧 peak=-0.175dB（贴限硬压）vs 新 peak=-0.998dB（limiter 未触发）；③ 按新逻辑重混 091456 产物为对比版 `outputs/covers/20260925_091456_au9c/_verify_new_cover.flac` 供试听。
+- 次要因素（待用户听感确认）：本次开启降噪（ffmpeg anlmdn 轻量降噪），若新版仍有"水声/金属感"则来自降噪环节，可关闭降噪对比。
+- 部署：已杀 8190 旧 worker，下次请求自动用新代码；主 app 无需重启。
+- 未执行：git commit/push（需用户批准）。
+
+---
+## 2026-09-25 修复：翻唱人声偏弱（改用 loudnorm 响度归一化）
+- 用户反馈：峰值防削波版翻唱人声又变小了。
+- 定位：静态增益受峰值余量限制——091456 换嗓人声峰值 -11.8dB，防削波把 +14.3dB 收窄到 +10.8dB，人声 RMS 比原声干声低 3.5dB、比伴奏低 6.4dB → 偏弱。静态增益无法同时满足“平均电平到位 + 峰值不超限”。
+- 修复（voice-tools/worker.py）：
+  - 新增 `_lufs()`：ffmpeg loudnorm print_format=json 解析 input_i（BS.1770 积分响度），失败/静音返回 None；
+  - 混音链人声段优先 loudnorm 响度归一：`aresample=48000,pan=stereo|c0=c0|c1=c1,loudnorm=I=<原声LUFS>:TP=-1.5:LRA=11,aresample=48000`——动态归一可在真峰值不超限（TP=-1.5dB）前提下把响度拉到位；pan 在 loudnorm 之前，保证与原声干声（立体声）的 LUFS 声道求和口径一致；loudnorm 内部升采样 192k，链尾 aresample 回 48k；
+  - LUFS 测量失败时回退原 RMS+峰值钳制静态增益逻辑（保底不劣化）。
+- 验证：① 091456 实测——loudnorm 后换嗓人声 RMS=-21.3dB（原声干声 -20.6dB，差 0.7dB 匹配）peak=-1.5dB 无削波，比旧静态方案响 2.8dB；② 按新链重混 091456 产物为对比版 `outputs/covers/20260925_091456_au9c/_verify_loudnorm_cover.flac`（混音 peak=-3.6dB 安全）供试听；③ py_compile 通过；④ pytest 51 passed + test_i18n 自检 17 通过（test_i18n 为独立脚本，pytest 收集会因模块级 sys.exit 中断，需 --ignore 排除后单独跑）。
+- 部署：已杀 8190 旧 worker（PID 26240），下次请求自动用新代码；主 app 无需重启。
+- 未执行：git commit/push（需用户批准）；上一轮对比文件 `_verify_new_cover.flac` 暂保留供 A/B 试听，确认后删除。
+
+
+---
+
+## 2026-09-25 11:05 — 分离/翻唱管线 11 项优化（按顺序全部完成）
+
+**用户指令**：「你看看还有什么要优化的，包括分离与翻唱」→ 审查产出 11 项清单 →「按顺序全部完成」。
+
+**完成内容**（11/11）：
+
+1. HTTP 超时动态放大：`_timeout_for` = max(900s, 源时长×20)。
+2. worker 日志落盘：`voice-tools/worker.log`（10MB 轮转 + PYTHONIOENCODING=utf-8）。
+3. 翻唱源复用分离历史：下拉 `[分离]` 条目 + `sep_task:` 前缀解析 + worker 跳过 Demucs。
+4. 任务完成后自动刷新历史下拉（outputs +1 元素，所有 yield 同步 +1）。
+5. 阶段进度上报：worker 写 `_progress.json` → handler 轮询线程 → `task.push_progress` → 前端展示。
+6. 运行中取消：`/api/cancel` 在 `_lock` 外处理（防死锁）+ Seed-VC 子进程可中断 + 两 Tab 取消按钮 + `_register_task/_unregister_task` 挂接。
+7. `_lufs/_rms_db/_peak_db` 单元测试：`tests/test_voice_loudness.py` 10 项（正弦波峰因子 3.01dB 物理断言规避 sine 源非满刻度问题）。
+8. 音色库/素材库管理：试听 + 删除（`delete_files_to_recycle` 回收站）+ 重命名（保留短 id/轨道类型）。
+9. dry_uploads md5 内容去重（分块读取比对）。
+10. 上传源副本留存产物文件夹（`_keep_source_copy`，仅 from_upload 时拷贝）。
+11. 自定义伴奏 LUFS 对齐源伴奏（clamp ±18dB 并入混音链）。
+
+**验证**：py_compile 全通过；pytest 61 passed（--ignore=test_i18n）；i18n 自检 17 通过；主 app 9898 已重启（需浏览器刷新）；worker 8190 未运行，下次请求懒启动新代码。
+
+**未执行**：git commit/push（待用户批准）；翻唱端到端推理验证（需真实 GPU 任务）。
+
+## 2026-09-25 端到端真实任务测试 — 分离/翻唱管线 11 项优化
+
+用 gradio_client 对主 app（9898）提交真实 GPU 任务，验证 11 项优化的关键链路：
+
+**TEST1 分离（耗时 12s）**：源 `outputs/covers/20260925_093343_5i6i/20260925_093343_cover.flac`，vocals 双轨模式 → 人声/伴奏播放器组填充、提示"分离完成 · 写入历史"、历史下拉 choices 7→9（任务完成自动刷新生效）。
+
+**TEST2 翻唱复用分离结果（耗时 46s）**：翻唱源选 `[分离]` 记录（value=`sep_task:separation_20260925_083325_4831f3`）、参考干声取 083325 人声轨 → "翻唱完成 · 写入历史"、翻唱历史下拉 choices 5→6；4 轨产物中伴奏/分离人声直接复用 083325 分离文件（文件时间戳证明跳过 Demucs，省分钟级 GPU 时间）。
+
+**TEST3 协作取消**：翻唱任务（diffusion_steps=30，换嗓阶段长）运行 20s 后 POST `http://127.0.0.1:8190/api/cancel` → 21s 快速中止、covers 目录零残留文件。
+
+**辅助验证**：
+- 响度对齐：换嗓干声 -22.54 vs 源人声 -23.30 LUFS（差 0.76 LUFS，loudnorm 生效；cover 成品 -27.45）。
+- worker.log 落盘（UTF-8）：含"复用已有分离结果（跳过 Demucs）： 人声=20260925_083325_vocals.wav 伴奏=20260925_083325_accompaniment.wav"、"收到取消信号"、"处理失败: 任务已取消"等关键日志。
+
+**发现并修复 bug（worker.py L522-527）**：业务失败（含协作取消）原返回 HTTP 500，客户端 urllib 抛 HTTPError 丢 body，文案退化为"无法连接推理 worker（Internal Server Error）"，误导排障方向 → 改为 HTTP 200 + `{"ok": false, "error": ...}`；重启 worker 后重跑取消测试，文案正确显示"任务失败： 任务已取消"。
+
+**说明**：直接 POST worker `/api/cancel` 不置主 app 侧 cancel_event，故显示"任务失败"而非"已取消"；真实 UI 取消按钮先置 cancel_event 再通知 worker，文案映射正确。分离任务取消仅在开头检查一次（Demucs 推理中不可中断），对翻唱阶段边界和排队任务有效，属设计内行为。
+
+测试后已清理临时脚本（_tmp_api.py / _tmp_e2e.py / _tmp_cancel.py）。
+
+## 2026-09-25 取消链路修复 — 全部修复 + 双途径真实验证
+
+用户指令"全部修复"：修复上轮汇报的两个取消链路局限。
+
+**修复内容（4 文件 + 2 测试文件）**：
+1. worker.py：`_TaskCancelled` 专用异常 + do_POST 响应 `cancelled` 标志 + `_separate` 检查点加密（模型加载后/每轨落盘前）。
+2. voice_client.py：`VoiceResult.cancelled` 字段 + `_run` 解析。
+3. voice_ui_handlers.py：分离/翻唱失败分支两路取消来源（cancel_event 或 result.cancelled）→ TaskCancelledError。
+4. app.py：两生成器 `except TaskCancelledError` 分支（显示"任务已取消"+恢复按钮+正常收尾不弹错误窗）。
+5. tests：新增 3 项单测（separate/cover 的 worker cancelled 映射、VoiceResult cancelled 解析）。
+
+**验证**：py_compile 6 文件通过；pytest 64 passed（61+3）。
+
+**端到端真实验证（双途径）**：
+- C1（gradio_client 提交翻唱 + 直接 POST worker /api/cancel）：终态输出"任务已取消"、`job.result()` 正常返回（不抛 AppError）、1.3s 中止、covers 目录零残留。服务端日志 `cancelled by worker`。
+- C2（Chrome DevTools 真实浏览器：选复用分离源 + 分离人声参考 → 开始翻唱 → 点"取消任务"）：info 区显示"任务已取消"、"开始翻唱"按钮恢复可用、无错误弹窗；服务端链路 `cancel signal sent` → `已通知 worker 取消` → `cancelled by worker`（0.7s）。
+
+**过程中发现并修复的次生 bug**：app.py 取消分支 yield 后缺 `return`，落入成功路径导致 `result=None` 的 `.get` 崩溃（AttributeError）——补 return 后 C1 通过。
+
+**排查记录**：① 系统 HTTP_PROXY(7890) 劫持 127.0.0.1 请求返回 502 → urllib 用 `ProxyHandler({})` 禁代理；② Gradio 5 Dropdown 严格校验 choices，脚本传小写盘符路径不匹配（choices 为大写 Y: 绝对路径）；③ gradio_client `outputs()` 中间流不含终态 yield，终态以 `job.result()` 为准（UI 实际显示正确）；④ `/on_voice_cancel` 回调为 lambda 绑定无 api_name，gradio_client 调不到 → C2 改用真实浏览器验证。
+
+**未执行**：git commit/push（待用户批准）。

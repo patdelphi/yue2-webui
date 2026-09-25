@@ -22,14 +22,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import voice_ui_handlers  # noqa: E402  供 monkeypatch 替换模块级 queue_manager
 from voice_ui_handlers import VoiceHandlers, new_short_id, detect_voice, _voice_score  # noqa: E402
 from history import HistoryManager  # noqa: E402
-from queue_manager import TaskType, TaskStatus  # noqa: E402
+from queue_manager import TaskType, TaskStatus, TaskCancelledError  # noqa: E402
 
 
 class _FakeResult:
-    def __init__(self, ok=True, products=None, error=None):
+    def __init__(self, ok=True, products=None, error=None, cancelled=False):
         self.ok = ok
         self.products = products or {}
         self.error = error
+        self.cancelled = cancelled
 
 
 class _FakeVoiceClient:
@@ -130,6 +131,29 @@ def test_separate_failure_raises(tmp_path):
     with pytest.raises(RuntimeError, match="boom"):
         h.separate_worker(t, source="a.wav", mode="2", root_task_id="r")
     assert h.history_mgr.list_all() == []  # 失败不写历史
+
+
+def test_separate_worker_cancelled_by_worker_maps_to_cancelled(tmp_path):
+    """worker 侧协作取消（cancelled=True，如直接 POST /api/cancel）：
+    应映射为 TaskCancelledError 而非 RuntimeError，UI 才能显示"已取消"而非"任务失败"。"""
+    vc = _FakeVoiceClient(_FakeResult(ok=False, error="任务已取消", cancelled=True))
+    h = _make_handlers(tmp_path, vc)
+    t = _FakeTask("t002")
+    with pytest.raises(TaskCancelledError):
+        h.separate_worker(t, source="a.wav", mode="2", root_task_id="r")
+    assert h.history_mgr.list_all() == []  # 取消不写历史
+
+
+def test_cover_worker_cancelled_by_worker_maps_to_cancelled(tmp_path):
+    """翻唱同路：worker 侧 cancelled=True → TaskCancelledError，取消不写历史。"""
+    vc = _FakeVoiceClient(_FakeResult(ok=False, error="任务已取消", cancelled=True))
+    h = _make_handlers(tmp_path, vc)
+    t = _FakeTask("t003")
+    with pytest.raises(TaskCancelledError):
+        h.cover_worker(t, source="s.wav", ref="r.wav", accompaniment="a.wav",
+                       semi_tone=0, diffusion_steps=30, gain_db=0.0,
+                       root_task_id="g")
+    assert h.history_mgr.list_all() == []
 
 
 def test_refs_save_and_list(tmp_path):

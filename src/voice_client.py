@@ -13,6 +13,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -40,6 +41,9 @@ class VoiceResult:
     ok: bool
     products: dict = field(default_factory=dict)
     error: Optional[str] = None
+    # worker 侧协作取消标志（/api/cancel 置位后任务在阶段边界中止）。
+    # 与主 app 侧 cancel_event 相互独立：任一来源的取消都应映射为"已取消"
+    cancelled: bool = False
 
 
 class VoiceClient:
@@ -53,6 +57,7 @@ class VoiceClient:
         self.venv_python: Optional[Path] = None
         self.seedvc_dir: Optional[Path] = None
         self._cfg = None
+        self._worker_log = None  # worker 日志文件句柄（进程存活期间保持打开）
 
     # ---------------------------------------------------------------- 配置
     def _load_cfg(self) -> dict:
@@ -118,6 +123,19 @@ class VoiceClient:
         base_port = int(cfg["worker_port"])
         env = dict(os.environ)
         env["SEEDVC_DIR"] = str(self.seedvc_dir)
+        env["PYTHONIOENCODING"] = "utf-8"  # worker print 中文统一按 UTF-8 写日志文件
+        # worker 日志落盘：DEVNULL 会丢弃 _log 全部输出（响度匹配数值/失败详情），
+        # 排查全靠猜；改为追加写 voice-tools/worker.log，超 10MB 轮转为 .old（单份保留）
+        if self._worker_log is None:
+            try:
+                log_path = self.webui_root / "voice-tools" / "worker.log"
+                if log_path.exists() and log_path.stat().st_size > 10 * 1024 * 1024:
+                    log_path.replace(log_path.with_suffix(".log.old"))
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                self._worker_log = open(log_path, "ab")
+            except Exception:
+                logger.exception("打开 worker 日志文件失败，回退丢弃输出")
+                self._worker_log = None
         last_err = None
         for off in range(5):
             port = base_port + off
@@ -126,8 +144,8 @@ class VoiceClient:
                 [str(self.venv_python), str(WORKER_SCRIPT)],
                 cwd=str(self.webui_root),
                 env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=self._worker_log if self._worker_log is not None else subprocess.DEVNULL,
+                stderr=subprocess.STDOUT if self._worker_log is not None else subprocess.DEVNULL,
             )
             # 等健康检查（最多 ~30s）
             if self._wait_health(port, timeout=30):
@@ -172,6 +190,13 @@ class VoiceClient:
             except Exception:
                 pass
             self.worker_proc = None
+        # 关闭日志句柄（下次 ensure_running 重新打开，实现简单轮转点）
+        if self._worker_log is not None:
+            try:
+                self._worker_log.close()
+            except Exception:
+                pass
+            self._worker_log = None
 
     # ---------------------------------------------------------------- HTTP 请求
     def _request(self, method: str, url: str, payload: dict, timeout: float = 300) -> dict:
@@ -187,26 +212,77 @@ class VoiceClient:
         except Exception as e:
             raise VoiceError(f"worker 请求失败: {e}")
 
-    def _run(self, api: str, payload: dict) -> VoiceResult:
-        """执行一次 worker 调用，统一解析返回，异常收敛为 VoiceResult。"""
+    def _run(self, api: str, payload: dict, timeout: Optional[float] = None,
+             cancel_event: Optional[threading.Event] = None) -> VoiceResult:
+        """执行一次 worker 调用，统一解析返回，异常收敛为 VoiceResult。
+
+        timeout 为 None 时用默认 300s；长任务（分离/翻唱）应传按源时长估算的动态值。
+        cancel_event 触发时通过后台线程尽力通知 worker 协作中止（worker 在阶段边界检查）。
+        """
         try:
             self.ensure_running()
-            data = self._request("POST", f"http://127.0.0.1:{self.port}{api}", payload)
+            # 取消监视线程：阻塞等 cancel_event，触发后 POST /api/cancel 通知 worker
+            # 尽快中止（daemon 线程，任务正常结束最多空等 30 分钟后自行退出，不阻碍进程）
+            if cancel_event is not None:
+                threading.Thread(target=self._cancel_notify, args=(cancel_event,),
+                                 daemon=True).start()
+            data = self._request("POST", f"http://127.0.0.1:{self.port}{api}", payload,
+                                 timeout=timeout if timeout else 300)
             if data.get("ok"):
                 return VoiceResult(ok=True, products=data.get("products", {}))
-            return VoiceResult(ok=False, error=str(data.get("error", "未知错误")))
+            # cancelled 由 worker 在取消异常时标记，供上层把这类失败映射为"已取消"
+            return VoiceResult(ok=False, error=str(data.get("error", "未知错误")),
+                               cancelled=bool(data.get("cancelled", False)))
         except VoiceError as e:
             return VoiceResult(ok=False, error=str(e))
         except Exception as e:  # 兜底：任何未预期异常都不应打断主 app
             logger.exception("voice task failed unexpectedly")
             return VoiceResult(ok=False, error=f"音色工坊任务异常: {e}")
 
+    def _cancel_notify(self, cancel_event: threading.Event) -> None:
+        """等待取消信号并尽力通知 worker 中止（协作式取消的客户端半边）。"""
+        if not cancel_event.wait(timeout=1800):
+            return  # 任务已正常结束（事件未触发），空等超时自然退出
+        try:
+            self._request("POST", f"http://127.0.0.1:{self.port}/api/cancel", {}, timeout=5)
+            logger.info("已通知 worker 取消当前任务")
+        except Exception:
+            pass  # worker 可能已停止，忽略
+
+    @staticmethod
+    def _probe_duration(path: str) -> float:
+        """用 ffprobe 测音频时长（秒）；失败/文件不存在返回 0。仅用于超时估算。"""
+        if not path or not Path(path).exists():
+            return 0.0
+        try:
+            out = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "csv=p=0", path],
+                capture_output=True, text=True, timeout=15,
+            )
+            return float(out.stdout.strip()) if out.stdout.strip() else 0.0
+        except Exception:
+            return 0.0
+
+    def _timeout_for(self, *paths: str) -> float:
+        """按源音频时长估算 HTTP 超时：每秒音频给 20s 处理预算，下限 900s。
+
+        翻唱 = 分离 + 换嗓 + 混音，3-4 分钟歌曲全流程可超 5 分钟，固定 300s 会
+        在长曲上超时（worker 仍在跑、结果拿不到、历史不写）；动态放大消除该风险。
+        """
+        dur = max((self._probe_duration(p) for p in paths), default=0.0)
+        return max(900.0, dur * 20.0)
+
     # ---------------------------------------------------------------- 业务接口
     def separate(self, input_path: str, mode: str = "2", output_dir: str = "",
-                 denoise: bool = False, prefix: str = "") -> VoiceResult:
+                 denoise: bool = False, prefix: str = "",
+                 progress_file: str = "",
+                 cancel_event: Optional[threading.Event] = None) -> VoiceResult:
         """音轨分离。mode: 2=双轨 4=四轨。denoise=True 时对输出人声降噪。返回产物路径字典。
 
         prefix（时间戳前缀）传给 worker，产物命名 <prefix>_<类别>.wav（可空回退短名）。
+        progress_file 为阶段进度文件路径（worker 在分离/降噪边界写入，供 UI 轮询展示）。
+        cancel_event 触发时尽力通知 worker 协作中止。
         参数强校验：mode/denoise 入口即做类型归一，非法值回退默认并记录警告，及早报错，
         不依赖 worker 兜底（约束：JSON 字段易出现字符串/空值）。
         """
@@ -226,16 +302,22 @@ class VoiceClient:
         return self._run("/api/separate", {
             "input": str(input_path), "mode": m, "output_dir": str(output_dir),
             "denoise": d, "denoise_strength": self._load_cfg().get("denoise_strength"),
-            "prefix": str(prefix or ""),
-        })
+            "prefix": str(prefix or ""), "progress_file": str(progress_file or ""),
+        }, timeout=self._timeout_for(input_path), cancel_event=cancel_event)
 
     def convert(self, source: str, ref: str, semi_tone: int = 0,
                 diffusion_steps: int = 30, accompaniment: str = "",
                 gain_db: float = 0.0, output_dir: str = "",
-                denoise: bool = False, prefix: str = "") -> VoiceResult:
+                denoise: bool = False, prefix: str = "",
+                source_vocals: str = "", source_acc: str = "",
+                progress_file: str = "",
+                cancel_event: Optional[threading.Event] = None) -> VoiceResult:
         """参考音色翻唱。source=换嗓人声来源, ref=参考干声, accompaniment=伴奏。denoise=True 时对换嗓人声降噪。
 
         prefix（时间戳前缀）传给 worker，全部产物平铺 output_dir 并命名 <prefix>_<类别>（可空回退短名）。
+        source_vocals/source_acc 非空时复用已有分离结果（跳过 Demucs 重复分离）：
+        source_vocals=源人声干声轨, source_acc=源伴奏轨（未提供自定义伴奏时兼作混音伴奏）。
+        progress_file 为阶段进度文件路径；cancel_event 触发时尽力通知 worker 协作中止。
         """
         # 数值入参强校验：非法（含 None/空串/非数字）回退默认并告警，避免 worker 端崩溃
         def _int_or(v, default):
@@ -264,7 +346,10 @@ class VoiceClient:
             "output_dir": str(output_dir), "denoise": den,
             "denoise_strength": self._load_cfg().get("denoise_strength"),
             "prefix": str(prefix or ""),
-        })
+            "source_vocals": str(source_vocals or ""), "source_acc": str(source_acc or ""),
+            "progress_file": str(progress_file or ""),
+        }, timeout=self._timeout_for(source, source_vocals or source, ref),
+           cancel_event=cancel_event)
 
 
 # 兼容 from voice_client import tr 的场景不存在；此处避免误导

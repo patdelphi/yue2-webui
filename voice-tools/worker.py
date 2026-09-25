@@ -15,6 +15,7 @@
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -47,10 +48,41 @@ _demucs_model = None
 _seedvc_module = None
 _seedvc_loaded = False
 _last_activity = time.time()
+# 协作式取消标志：/api/cancel 置位，任务在阶段边界检查并中止
+# （注意：必须在串行锁 _lock 之外处理 cancel 请求，否则会被正在执行的任务阻塞）
+_cancel_flag = threading.Event()
 
 
 def _log(msg: str) -> None:
     print(f"[worker] {msg}", flush=True)
+
+
+def _write_progress(progress_file: str, stage: str) -> None:
+    """把当前阶段写入进度文件（JSON），供主 app 轮询展示阶段进度。
+
+    写失败仅记日志——进度展示是尽力而为，不能影响任务本体。
+    """
+    if not progress_file:
+        return
+    try:
+        with open(progress_file, "w", encoding="utf-8") as f:
+            json.dump({"stage": stage, "ts": time.time()}, f)
+    except Exception as e:
+        _log(f"进度写入失败(忽略): {e}")
+
+
+class _TaskCancelled(Exception):
+    """worker 侧协作取消异常：/api/cancel 置位后由 _check_cancelled 在阶段边界抛出。
+
+    独立异常类型供 do_POST 异常路径识别（isinstance），在响应中标记 cancelled=True，
+    让主 app 把这类失败映射为"已取消"而非"任务失败"（文案与状态均正确）。
+    """
+
+
+def _check_cancelled() -> None:
+    """协作式取消检查：已置取消标志则抛异常中止当前任务（在阶段边界调用）。"""
+    if _cancel_flag.is_set():
+        raise _TaskCancelled("任务已取消")
 
 
 # ---------------------------------------------------------------- 模型加载
@@ -87,15 +119,20 @@ def _load_seedvc(seed_dir: str):
 
 # ---------------------------------------------------------------- 分离
 def _separate(input_path: str, mode: str, output_dir: str, denoise: bool = False,
-              denoise_strength=None, prefix: str = "") -> dict:
+              denoise_strength=None, prefix: str = "",
+              progress_file: str = "") -> dict:
     """执行 Demucs 分离，返回产物路径字典。denoise=True 时对人声轨降噪输出。
 
     prefix（时间戳前缀）非空时产物按 <prefix>_<类别>.wav 命名（如 20260924_201805_vocals.wav），
     与产物文件夹名对齐，便于按文件名辨识人声/伴奏等轨；为空时回退无前缀短名。
+    progress_file 非空时在分离/降噪阶段边界写入阶段进度，供 UI 轮询展示。
     """
     global _demucs_model
+    _check_cancelled()
+    _write_progress(progress_file, "separating")
     mode = "4" if mode == "4" else "2"
     _load_demucs(mode)
+    _check_cancelled()  # 模型加载可耗时 30s+，进入推理前再查一次取消
 
     src = Path(input_path)
     out_root = Path(output_dir)
@@ -124,14 +161,19 @@ def _separate(input_path: str, mode: str, output_dir: str, denoise: bool = False
         vocals_idx = stems.index("vocals")
         vocals = sources[vocals_idx]
         accompaniment = sum(s for i, s in enumerate(sources) if i != vocals_idx)
+        # 推理完成落盘前检查：取消则不写半套产物（主 app 侧会回收整个产物目录）
+        _check_cancelled()
         _save_track(out_root / f"{pfx}vocals.wav", vocals, sr, result, "vocals")
         _save_track(out_root / f"{pfx}accompaniment.wav", accompaniment, sr, result, "accompaniment")
     else:
-        # 四轨：独立保存每轨
+        # 四轨：独立保存每轨（逐轨边界检查，取消时少写后续轨的无效 IO）
         for i, name in enumerate(stems):
+            _check_cancelled()
             _save_track(out_root / f"{pfx}{name}.wav", sources[i], sr, result, name)
     # 可选降噪：仅作用于人声轨，失败时回退原轨不阻断；降噪写独立文件保留源 vocals
     if denoise and result.get("vocals"):
+        _check_cancelled()
+        _write_progress(progress_file, "denoising")
         result["vocals"] = denoise_audio(result["vocals"], str(out_root / f"{pfx}vocals_denoised.wav"),
                                          strength=denoise_strength)
     return result
@@ -174,16 +216,81 @@ def denoise_audio(src: str, dst: str, strength=None) -> str:
 
 
 # ---------------------------------------------------------------- 换嗓
+def _rms_db(path: str):
+    """用 ffmpeg astats 测整段 RMS 电平（dB）。失败/静音(-inf)/无法解析时返回 None。"""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return None
+    try:
+        proc = subprocess.run(
+            [ffmpeg, "-i", path,
+             "-af", "astats=measure_perchannel=0:measure_overall=RMS_level",
+             "-f", "null", "-"],
+            capture_output=True, text=True,
+        )
+    except Exception:
+        return None
+    # astats 输出形如 "Overall RMS level dB:  -18.23"；静音为 -inf（正则不匹配 → None）
+    m = re.search(r"RMS level dB:\s*(-?\d+(?:\.\d+)?)", proc.stderr)
+    return float(m.group(1)) if m else None
+
+
+def _peak_db(path: str):
+    """用 ffmpeg astats 测整段峰值电平（dBFS）。失败/无法解析时返回 None。"""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return None
+    try:
+        proc = subprocess.run(
+            [ffmpeg, "-i", path,
+             "-af", "astats=measure_perchannel=0:measure_overall=Peak_level",
+             "-f", "null", "-"],
+            capture_output=True, text=True,
+        )
+    except Exception:
+        return None
+    m = re.search(r"Peak level dB:\s*(-?\d+(?:\.\d+)?)", proc.stderr)
+    return float(m.group(1)) if m else None
+
+
+def _lufs(path: str):
+    """用 ffmpeg loudnorm 测整段积分响度 LUFS（BS.1770 口径，含响度门限）。
+
+    原理：loudnorm 以 print_format=json 跑一遍空输出，从 stderr 末尾的 JSON 块
+    解析 input_i（积分响度）。失败/静音(-inf)/无法解析时返回 None。
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return None
+    try:
+        proc = subprocess.run(
+            [ffmpeg, "-i", path,
+             "-af", "loudnorm=print_format=json",
+             "-f", "null", "-"],
+            capture_output=True, text=True,
+        )
+    except Exception:
+        return None
+    # JSON 形如 { "input_i" : "-16.53", ... }；-inf 不被正则匹配 → None
+    m = re.search(r"\"input_i\"\s*:\s*\"(-?\d+(?:\.\d+)?)\"", proc.stderr)
+    return float(m.group(1)) if m else None
+
+
 def _convert(seed_dir: str, source: str, ref: str, semi_tone: int,
              diffusion_steps: int, accompaniment: str, output_dir: str,
              gain_db: float = 0.0, denoise: bool = False,
-             denoise_strength=None, prefix: str = "") -> dict:
+             denoise_strength=None, prefix: str = "",
+             source_vocals_path: str = "", source_acc_path: str = "",
+             progress_file: str = "") -> dict:
     """执行翻唱：分离 + Seed-VC 换嗓 + ffmpeg 混音。
 
     source=被翻唱整曲；ref=参考干声；accompaniment=自定义伴奏（空则用分离出的伴奏）。
     denoise=True 时对换嗓后的人声降噪，并用降噪后人声参与混音。
     prefix（时间戳前缀）非空时全部产物平铺在 output_dir 下，统一命名
     <prefix>_<类别>（如 20260924_201805_cover.flac），便于按文件夹整组回放/下载。
+    source_vocals_path/source_acc_path 非空时复用已有分离结果（跳过 Demucs 重复分离，
+    "先分离听过 → 满意后翻唱"场景省 GPU 分钟级时间）；此时 source_acc 兼作默认伴奏。
+    progress_file 非空时在换嗓/降噪/混音阶段边界写入阶段进度，供 UI 轮询展示。
     """
     _load_seedvc(seed_dir)
 
@@ -191,14 +298,28 @@ def _convert(seed_dir: str, source: str, ref: str, semi_tone: int,
     out_root.mkdir(parents=True, exist_ok=True)
     pfx = f"{prefix}_" if prefix else ""  # 时间戳前缀（可空）
 
-    # 0) 分离源整曲：产物直接平铺在 out_root（人声轨供换嗓、伴奏轨供混音；
-    #    Seed-VC 需要干净人声，不能用整曲）
-    sep_products = _separate(source, "2", str(out_root),
-                             denoise_strength=denoise_strength, prefix=prefix)
-    source_vocals = sep_products["vocals"]
-    if not accompaniment:
-        # 未提供自定义伴奏：混音用分离出的原曲伴奏
-        accompaniment = sep_products["accompaniment"]
+    _check_cancelled()
+    # 0) 获取源人声/伴奏：优先复用已有分离结果（跳过 Demucs），否则现场分离整曲
+    #    （Seed-VC 需要干净人声，不能用整曲）
+    ref_acc = ""  # 源曲伴奏参照（供自定义伴奏响度对齐）
+    if source_vocals_path and Path(source_vocals_path).exists():
+        source_vocals = source_vocals_path
+        ref_acc = source_acc_path if source_acc_path and Path(source_acc_path).exists() else ""
+        if not accompaniment:
+            if not ref_acc:
+                raise RuntimeError("复用分离结果作翻唱源时必须提供源伴奏轨")
+            accompaniment = ref_acc
+        _log(f"复用已有分离结果（跳过 Demucs）: 人声={Path(source_vocals).name} "
+             f"伴奏={Path(accompaniment).name}")
+    else:
+        sep_products = _separate(source, "2", str(out_root),
+                                 denoise_strength=denoise_strength, prefix=prefix,
+                                 progress_file=progress_file)
+        source_vocals = sep_products["vocals"]
+        ref_acc = sep_products["accompaniment"]
+        if not accompaniment:
+            # 未提供自定义伴奏：混音用分离出的原曲伴奏
+            accompaniment = sep_products["accompaniment"]
 
     # 1) 换嗓（subprocess 调 inference.py）：原始输出进临时子目录，随后拷贝为带前缀的确定性文件名
     venv_python = sys.executable
@@ -217,11 +338,28 @@ def _convert(seed_dir: str, source: str, ref: str, semi_tone: int,
     ]
     _log("运行 Seed-VC 换嗓: " + " ".join(cmd))
     # cwd=seed_dir：inference.py 依赖相对 cwd 定位检查点目录，用子进程级 cwd 替代进程级 chdir
-    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=seed_dir)
+    # Popen + 1s 轮询：取消信号触发时 terminate 子进程（Seed-VC 内部无法中断，
+    # 换嗓常占全流程大半时间，可中断是"运行中取消"的主要收益点）
+    _write_progress(progress_file, "converting")
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, cwd=seed_dir)
+    while True:
+        try:
+            stdout, stderr = proc.communicate(timeout=1.0)
+            break
+        except subprocess.TimeoutExpired:
+            if _cancel_flag.is_set():
+                proc.terminate()
+                try:
+                    proc.communicate(timeout=5)
+                except Exception:
+                    proc.kill()
+                shutil.rmtree(conv_tmp, ignore_errors=True)
+                raise _TaskCancelled("任务已取消")
     if proc.returncode != 0:
         # 失败也清理临时子目录，避免失败大 wav 堆积污染产物文件夹
         shutil.rmtree(conv_tmp, ignore_errors=True)
-        raise RuntimeError(f"Seed-VC 换嗓失败: {proc.stderr[-2000:] or '无输出'}")
+        raise RuntimeError(f"Seed-VC 换嗓失败: {stderr[-2000:] or '无输出'}")
 
     # 定位换嗓输出：不按 sorted(glob())[0] 猜测文件名（多个文件时取序易取错轨）。
     # 取目录内修改时间最新的 wav，整体拷贝为确定性文件名 <pfx>converted_vocals.wav
@@ -245,15 +383,64 @@ def _convert(seed_dir: str, source: str, ref: str, semi_tone: int,
     # 可选降噪：输出写 <pfx>converted_vocals_denoised.wav（与源并存，不覆盖），失败回退原声；
     # 后续混音与产物均用（可能降噪后的）该文件
     if denoise:
+        _check_cancelled()
+        _write_progress(progress_file, "denoising")
         converted_vocals = denoise_audio(converted_vocals,
                                          str(out_root / f"{pfx}converted_vocals_denoised.wav"),
                                          strength=denoise_strength)
 
     # 2) 用伴奏混音 -> 48kHz 立体声 FLAC（+ 可选伴奏增益），平铺为 <pfx>cover.flac
+    #    换嗓人声先做响度匹配：Seed-VC 换嗓输出电平常显著低于原声干声（实测可差 14dB+），
+    #    不匹配会被伴奏完全盖住。优先 loudnorm 响度归一（LUFS 对齐原声干声 + 真峰值 TP 防削波）：
+    #    静态增益受峰值余量限制拉不满平均电平（换嗓人声峰值高、平均低，实测收窄后人声偏弱），
+    #    动态归一可在峰值不超限的前提下把响度拉到位；LUFS 测量失败时回退 RMS+峰值钳制静态增益。
+    _check_cancelled()
+    _write_progress(progress_file, "mixing")
     cover_flac = out_root / f"{pfx}cover.flac"
+    # 自定义伴奏响度对齐：素材库伴奏电平未知，与源曲伴奏差可超 10dB（换伴奏翻唱失衡）。
+    # 把自定义伴奏 LUFS 静态增益对齐到源伴奏 LUFS（限 ±18dB）；测量失败回退 0dB 不处理
+    acc_gain_db = 0.0
+    if accompaniment and ref_acc and \
+            Path(accompaniment).resolve() != Path(ref_acc).resolve():
+        acc_lufs = _lufs(accompaniment)
+        ref_lufs = _lufs(ref_acc)
+        if acc_lufs is not None and ref_lufs is not None:
+            acc_gain_db = max(-18.0, min(18.0, ref_lufs - acc_lufs))
+            _log(f"自定义伴奏响度对齐: {acc_gain_db:+.1f}dB"
+                 f"（素材 {acc_lufs:.1f} -> 源 {ref_lufs:.1f} LUFS）")
+    src_lufs = _lufs(source_vocals)
+    if src_lufs is not None:
+        _log(f"人声响度匹配: loudnorm 归一到 {src_lufs:.1f} LUFS（原声干声，TP=-1.5dB）")
+        # 注意 pan 在 loudnorm 之前：换嗓输出为单声道，先复制成立体声再归一，
+        # 与原声干声（立体声）的 LUFS 声道求和口径一致；loudnorm 内部升 192k，需 aresample 回 48k
+        a0_chain = (f"[0:a]aresample=48000,pan=stereo|c0=c0|c1=c1,"
+                    f"loudnorm=I={src_lufs:.2f}:TP=-1.5:LRA=11,aresample=48000[a0]")
+    else:
+        match_db = 0.0
+        src_rms = _rms_db(source_vocals)
+        conv_rms = _rms_db(converted_vocals)
+        if src_rms is not None and conv_rms is not None:
+            match_db = max(-18.0, min(18.0, src_rms - conv_rms))
+            # 峰值防削波：放大后峰值不超过 -1dBFS。换嗓电平常远低于原声（差 14dB+），
+            # 若只按 RMS 匹配，放大后峰值会冲破 0dBFS，alimiter 大量触发 → 削顶失真。
+            # 此处收窄增益到峰值安全范围，alimiter 仅作兜底。
+            conv_peak = _peak_db(converted_vocals)
+            if conv_peak is not None and match_db > 0:
+                ceiling = -1.0 - conv_peak  # 保证 peak + gain <= -1dB
+                if match_db > ceiling:
+                    _log(f"人声响度匹配: 峰值防削波收窄增益 {match_db:+.1f}dB -> {ceiling:+.1f}dB"
+                         f"（换嗓峰值 {conv_peak:.1f}dB）")
+                    match_db = ceiling
+            _log(f"人声响度匹配: 原声干声RMS={src_rms:.1f}dB 换嗓RMS={conv_rms:.1f}dB"
+                 f" -> 增益 {match_db:+.1f}dB")
+        else:
+            _log("人声响度匹配: RMS 测量不可用，跳过（增益 0dB）")
+        a0_chain = (f"[0:a]aresample=48000,pan=stereo|c0=c0|c1=c1,"
+                    f"volume={match_db:+.1f}dB,alimiter=limit=0.98:level=false[a0]")
     amix_filter = (
-        f"[1:a]aresample=48000,pan=stereo|c0=c0|c1=c1,volume={gain_db:.1f}dB[a1];"
-        "[0:a]aresample=48000,pan=stereo|c0=c0|c1=c1[a0];"
+        f"[1:a]aresample=48000,pan=stereo|c0=c0|c1=c1,"
+        f"volume={gain_db + acc_gain_db:+.1f}dB[a1];"
+        f"{a0_chain};"
         "[a0][a1]amix=inputs=2:duration=longest:dropout_transition=0.05"
     )
     ffmpeg = shutil.which("ffmpeg")
@@ -309,13 +496,22 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, {"error": f"bad request: {e}"})
             return
         try:
+            # 取消信号必须在串行锁 _lock 之外处理：任务持锁执行时，cancel 请求
+            # 若也排队等锁就永远等到任务结束，协作取消完全失效
+            if url.path == "/api/cancel":
+                _cancel_flag.set()
+                _log("收到取消信号")
+                self._send(200, {"ok": True})
+                return
             # 串行处理：模型推理只能单线程（显存安全）
             with _lock:
+                _cancel_flag.clear()  # 新任务开始：重置取消标志
                 if url.path == "/api/separate":
                     result = _separate(body["input"], body.get("mode", "2"),
                                        body["output_dir"], bool(body.get("denoise", False)),
                                        body.get("denoise_strength"),
-                                       str(body.get("prefix", "")))
+                                       str(body.get("prefix", "")),
+                                       str(body.get("progress_file", "")))
                     self._send(200, {"ok": True, "products": result})
                 elif url.path == "/api/convert":
                     result = _convert(
@@ -328,13 +524,21 @@ class Handler(BaseHTTPRequestHandler):
                         bool(body.get("denoise", False)),
                         body.get("denoise_strength"),
                         str(body.get("prefix", "")),
+                        str(body.get("source_vocals", "")),
+                        str(body.get("source_acc", "")),
+                        str(body.get("progress_file", "")),
                     )
                     self._send(200, {"ok": True, "products": result})
                 else:
                     self._send(404, {"error": "not found"})
         except Exception as e:
             _log(f"处理失败: {e}")
-            self._send(500, {"error": str(e)})
+            # 业务失败（含协作取消"任务已取消"）用 200 + ok:false 返回：
+            # HTTP 500 会让客户端 urllib 抛 HTTPError 丢失 body，文案退化为
+            # "无法连接推理 worker"，误导排障方向
+            # cancelled=True 标记本次失败源于协作取消，主 app 据此显示"已取消"
+            self._send(200, {"ok": False, "error": str(e),
+                             "cancelled": isinstance(e, _TaskCancelled)})
 
 
 def _health() -> dict:

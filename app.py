@@ -889,6 +889,30 @@ def _voice_source_history_choices(lang="zh", limit=50):
     return choices
 
 
+def _voice_cover_source_choices(lang="zh", limit=50):
+    """翻唱源下拉：generation/cover 记录 + 可复用的分离记录（需同时有人声+伴奏轨）。
+
+    分离记录 value 用 sep_task:<task_id> 前缀区分，供 on_voice_cover 解析后
+    传 source_vocals/source_acc 复用分离结果（worker 跳过重复 Demucs 分离）。
+    """
+    choices = []
+    for rec in history_mgr.list_all():
+        if rec.record_type in ("generation", "cover") and rec.audio_path \
+                and Path(rec.audio_path).exists():
+            choices.append((f"{rec.record_type} · {Path(rec.audio_path).name}", rec.audio_path))
+        elif rec.record_type == "separation":
+            # 换嗓需人声轨、混音需伴奏轨，两者齐备才可复用
+            stems = {s.get("type"): s.get("path", "") for s in (rec.stems or [])
+                     if isinstance(s, dict)}
+            v, a = stems.get("vocals", ""), stems.get("accompaniment", "")
+            if v and a and Path(v).exists() and Path(a).exists():
+                folder = Path(rec.output_dir).name if rec.output_dir else Path(v).stem
+                choices.append((f"[{tr(lang, '分离')}] {folder}", f"sep_task:{rec.task_id}"))
+        if len(choices) >= limit:
+            break
+    return choices
+
+
 def _voice_dry_sep_choices(lang="zh", limit=50):
     """干声来源1：分离历史记录的人声干声（separation 记录的 audio_path 即 vocals 轨）。"""
     choices = []
@@ -1018,16 +1042,22 @@ def on_voice_dry_src_mode(dry_src):
 
 
 def _resolve_voice_source(history_val, upload_val):
-    """从「历史记录 / 上传」两入口取实际音频路径，两者均无效则抛错。"""
-    path = upload_val if upload_val and Path(upload_val).exists() else history_val
-    if not path or not Path(path).exists():
-        raise gr.Error(tr(_CUR_LANG, "请先选择源音频"))
-    return str(path)
+    """从「历史记录 / 上传」两入口取实际音频路径，返回 (路径, 是否上传源)。
+
+    上传源标记供 worker 拷贝源副本入产物文件夹（Gradio 临时文件会被清理，
+    不拷贝则历史记录无法追溯源音频）。两者均无效则抛错。
+    """
+    if upload_val and Path(upload_val).exists():
+        return str(upload_val), True
+    if history_val and Path(history_val).exists():
+        return str(history_val), False
+    raise gr.Error(tr(_CUR_LANG, "请先选择源音频"))
 
 
 def _voice_running_outputs(text):
-    """任务运行中的中间态输出：播放器组保持现状（空更新）+ 进度文案 + 按钮保持禁用。"""
-    return (*[gr.update()] * VOICE_PLAYER_COUNT, text, gr.update(interactive=False))
+    """任务运行中的中间态输出：播放器组+历史下拉保持现状 + 进度文案 + 按钮保持禁用。"""
+    return (*[gr.update()] * VOICE_PLAYER_COUNT, text,
+            gr.update(interactive=False), gr.update())
 
 
 def on_voice_separate(source_history, source_upload, sep_mode="vocals",
@@ -1035,19 +1065,23 @@ def on_voice_separate(source_history, source_upload, sep_mode="vocals",
     """音轨分离（生成器回调）：入队 Demucs，实时显示排队/执行进度。
 
     提交即禁用按钮（防运行期间重复提交）并清空播放器组；info 区实时显示
-    排队位置/执行秒表；完成恢复按钮、按产物数量填充播放器组；失败也恢复按钮。
-    分离成功自动写入历史（含全部轨）；产物落独立文件夹并按 <时间戳>_<类别> 命名。
+    排队位置/执行秒表/阶段进度（分离中/降噪中）；完成恢复按钮、按产物数量
+    填充播放器组并刷新历史下拉；失败/取消也恢复按钮。上传源自动拷贝副本入
+    产物文件夹（Gradio 临时文件不持久）。
     """
-    source = _resolve_voice_source(source_history, source_upload)
+    source, from_upload = _resolve_voice_source(source_history, source_upload)
     vote = "2" if sep_mode == "vocals" else "4"
     lang = _CUR_LANG
     # 提交前先反馈：清空播放器组 + 禁用按钮
     yield (*_fill_voice_players([]), tr(lang, "排队中..."),
-           gr.update(interactive=False))
+           gr.update(interactive=False), gr.update())
     gen = voice_handlers.run_in_queue_stream(
         TaskType.SEPARATION, voice_handlers.separate_worker,
         lang, tr, "音轨分离",
-        source=source, mode=vote, root_task_id="", denoise=bool(denoise))
+        on_submit=lambda tid: _register_task("separation", tid),
+        on_finish=lambda tid: _unregister_task("separation", tid),
+        source=source, mode=vote, root_task_id="", denoise=bool(denoise),
+        from_upload=from_upload)
     try:
         result = None
         while True:  # 消费状态流：每条文案 → 播放器保持 + 进度文案 + 按钮保持禁用
@@ -1057,15 +1091,22 @@ def on_voice_separate(source_history, source_upload, sep_mode="vocals",
                 result = stop.value
                 break
             yield _voice_running_outputs(text)
+    except TaskCancelledError:
+        # 用户主动取消：恢复按钮 + info 显示"任务已取消"，正常收尾不弹错误窗
+        # （必须 return：否则会落进下方成功路径，result=None 导致 .get 崩溃）
+        yield (*[gr.update()] * VOICE_PLAYER_COUNT, tr(lang, "任务已取消"),
+               gr.update(interactive=True), gr.update())
+        return
     except Exception:
-        # 失败/取消也必须恢复按钮；info 区给出失败提示后向上抛（Gradio 弹错误）
+        # 失败必须恢复按钮；info 区给出失败提示后向上抛（Gradio 弹错误）
         yield (*[gr.update()] * VOICE_PLAYER_COUNT, tr(lang, "任务失败"),
-               gr.update(interactive=True))
+               gr.update(interactive=True), gr.update())
         raise
-    # 按产物数量填充播放器组（每轨一个播放器，label 为轨道名）
+    # 按产物数量填充播放器组（每轨一个播放器，label 为轨道名）+ 刷新历史下拉
     items = _voice_stem_items(result.get("stems"))
     note = tr(lang, "分离完成") + " · " + tr(lang, "写入历史")
-    yield (*_fill_voice_players(items), note, gr.update(interactive=True))
+    yield (*_fill_voice_players(items), note, gr.update(interactive=True),
+           gr.update(choices=_voice_task_history_choices("separation", lang)))
 
 
 def on_voice_cover(source_history, source_upload, ref_library, ref_dry_upload,
@@ -1074,11 +1115,29 @@ def on_voice_cover(source_history, source_upload, ref_library, ref_dry_upload,
                    denoise=False):
     """参考音色翻唱（生成器回调）：入队 分离+换嗓+混音 全流程，实时显示进度。
 
-    提交即禁用按钮并清空播放器组；完成恢复按钮、填充成品/中间产物播放器组。
-    custom_acc=自定义伴奏路径（素材库），留空则用源曲分离出的原伴奏。
-    denoise=True 时对换嗓后的人声降噪。
+    提交即禁用按钮并清空播放器组；完成恢复按钮、填充成品/中间产物播放器组
+    并刷新历史下拉。源选分离记录（sep_task: 前缀）时复用其人声/伴奏轨，
+    worker 跳过重复 Demucs 分离。custom_acc=自定义伴奏路径（素材库），
+    留空则用源曲分离出的原伴奏。denoise=True 时对换嗓后的人声降噪。
     """
-    source = _resolve_voice_source(source_history, source_upload)
+    # 源解析：上传优先；历史值带 sep_task: 前缀 → 复用分离结果（跳过重复分离）
+    src_val = source_upload if source_upload and Path(source_upload).exists() \
+        else source_history
+    source_vocals = source_acc = ""
+    root_task_id = ""
+    if isinstance(src_val, str) and src_val.startswith("sep_task:"):
+        entry = history_mgr.get(src_val.split(":", 1)[1])
+        stems = {s.get("type"): s.get("path", "") for s in (getattr(entry, "stems", None) or [])
+                 if isinstance(s, dict)}
+        source_vocals = stems.get("vocals", "")
+        source_acc = stems.get("accompaniment", "")
+        if not (source_vocals and Path(source_vocals).exists()
+                and source_acc and Path(source_acc).exists()):
+            raise gr.Error(tr(_CUR_LANG, "该分离记录缺少人声/伴奏轨，无法复用"))
+        source, from_upload = source_vocals, False  # 源即已分离人声轨
+        root_task_id = entry.task_id  # 追溯到分离任务
+    else:
+        source, from_upload = _resolve_voice_source(source_history, source_upload)
     # 参考音色解析优先级：上传 → 上传干声 → 分离人声 → 音色库
     ref = None
     for cand in (ref_upload, ref_dry_upload, ref_dry_sep, ref_library):
@@ -1092,14 +1151,18 @@ def on_voice_cover(source_history, source_upload, ref_library, ref_dry_upload,
     lang = _CUR_LANG
     # 提交前先反馈：清空播放器组 + 禁用按钮
     yield (*_fill_voice_players([]), tr(lang, "排队中..."),
-           gr.update(interactive=False))
+           gr.update(interactive=False), gr.update())
     gen = voice_handlers.run_in_queue_stream(
         TaskType.COVER, voice_handlers.cover_worker,
         lang, tr, "参考音色翻唱",
+        on_submit=lambda tid: _register_task("cover", tid),
+        on_finish=lambda tid: _unregister_task("cover", tid),
         source=source, ref=str(ref),
         accompaniment=acc, semi_tone=int(semi_tone or 0),
         diffusion_steps=int(steps or 30), gain_db=float(gain_db or 0.0),
-        root_task_id="", denoise=bool(denoise),
+        root_task_id=root_task_id, denoise=bool(denoise),
+        source_vocals=source_vocals, source_acc=source_acc,
+        from_upload=from_upload,
     )
     try:
         result = None
@@ -1110,15 +1173,93 @@ def on_voice_cover(source_history, source_upload, ref_library, ref_dry_upload,
                 result = stop.value
                 break
             yield _voice_running_outputs(text)
+    except TaskCancelledError:
+        # 用户主动取消：恢复按钮 + info 显示"任务已取消"，正常收尾不弹错误窗
+        # （必须 return：否则会落进下方成功路径，result=None 导致 .get 崩溃）
+        yield (*[gr.update()] * VOICE_PLAYER_COUNT, tr(lang, "任务已取消"),
+               gr.update(interactive=True), gr.update())
+        return
     except Exception:
-        # 失败/取消也必须恢复按钮；info 区给出失败提示后向上抛（Gradio 弹错误）
+        # 失败必须恢复按钮；info 区给出失败提示后向上抛（Gradio 弹错误）
         yield (*[gr.update()] * VOICE_PLAYER_COUNT, tr(lang, "任务失败"),
-               gr.update(interactive=True))
+               gr.update(interactive=True), gr.update())
         raise
-    # 按产物数量填充播放器组（翻唱成品/换嗓干声/伴奏/分离人声，每轨一个播放器）
+    # 按产物数量填充播放器组（翻唱成品/换嗓干声/伴奏/分离人声）+ 刷新历史下拉
     items = _voice_stem_items(result.get("stems"))
     note = tr(lang, "翻唱完成") + " · " + tr(lang, "写入历史")
-    yield (*_fill_voice_players(items), note, gr.update(interactive=True))
+    yield (*_fill_voice_players(items), note, gr.update(interactive=True),
+           gr.update(choices=_voice_task_history_choices("cover", lang)))
+
+
+def on_voice_cancel(channel):
+    """音色工坊取消按钮：按通道（separation/cover）取消正在排队/运行的任务。
+
+    取消为协作式：QUEUED 直接移除；RUNNING 经 cancel_event 通知 worker
+    在阶段边界中止（换嗓子进程可被 terminate，产物目录一并回收）。
+    """
+    with _active_tasks_lock:
+        task_ids = _active_tasks.pop(channel, set())
+    for task_id in task_ids:
+        queue_manager.cancel_task_by_id(task_id)
+    if task_ids:
+        return tr(_CUR_LANG, "正在取消...")
+    return tr(_CUR_LANG, "没有正在运行的任务")
+
+
+def on_voice_ref_delete(path):
+    """删除音色库选中条目（移系统回收站），返回(试听清空, 音色库下拉刷新)。"""
+    if not path:
+        raise gr.Error(tr(_CUR_LANG, "请先选择条目"))
+    try:
+        voice_handlers.delete_ref(path)
+    except Exception as e:
+        raise gr.Error(f"{tr(_CUR_LANG, '删除失败')}: {e}")
+    gr.Info(tr(_CUR_LANG, "已删除"))
+    return gr.update(value=None, visible=False), \
+        gr.update(choices=_voice_ref_choices(_CUR_LANG), value=None)
+
+
+def on_voice_ref_rename(path, new_name):
+    """重命名音色库选中条目，返回(试听清空, 音色库下拉刷新)。"""
+    if not path:
+        raise gr.Error(tr(_CUR_LANG, "请先选择条目"))
+    name = (new_name or "").strip()
+    if not name:
+        raise gr.Error(tr(_CUR_LANG, "请输入新名称"))
+    try:
+        voice_handlers.rename_ref(path, name)
+    except Exception as e:
+        raise gr.Error(f"{tr(_CUR_LANG, '重命名失败')}: {e}")
+    gr.Info(tr(_CUR_LANG, "已重命名"))
+    return gr.update(value=None, visible=False), \
+        gr.update(choices=_voice_ref_choices(_CUR_LANG), value=None)
+
+
+def on_voice_stem_delete(path):
+    """删除素材库选中条目（移系统回收站），返回素材库下拉刷新。"""
+    if not path:
+        raise gr.Error(tr(_CUR_LANG, "请先选择条目"))
+    try:
+        voice_handlers.delete_stem(path)
+    except Exception as e:
+        raise gr.Error(f"{tr(_CUR_LANG, '删除失败')}: {e}")
+    gr.Info(tr(_CUR_LANG, "已删除"))
+    return gr.update(choices=_voice_stem_choices(_CUR_LANG), value=None)
+
+
+def on_voice_stem_rename(path, new_name):
+    """重命名素材库选中条目，返回素材库下拉刷新。"""
+    if not path:
+        raise gr.Error(tr(_CUR_LANG, "请先选择条目"))
+    name = (new_name or "").strip()
+    if not name:
+        raise gr.Error(tr(_CUR_LANG, "请输入新名称"))
+    try:
+        voice_handlers.rename_stem(path, name)
+    except Exception as e:
+        raise gr.Error(f"{tr(_CUR_LANG, '重命名失败')}: {e}")
+    gr.Info(tr(_CUR_LANG, "已重命名"))
+    return gr.update(choices=_voice_stem_choices(_CUR_LANG), value=None)
 
 
 def on_random_seed():
@@ -2160,8 +2301,11 @@ def build_ui():
                                                   info=_t("开启后对输出人声降噪"))
                         _reg(sep_denoise, lambda lang: gr.update(
                             label=tr(lang, "降噪"), info=tr(lang, "开启后对输出人声降噪")))
-                        sep_btn = gr.Button(_t("开始分离"), variant="primary")
-                        _reg(sep_btn, lambda lang: gr.update(value=tr(lang, "开始分离")))
+                        with gr.Row():
+                            sep_btn = gr.Button(_t("开始分离"), variant="primary", scale=3)
+                            _reg(sep_btn, lambda lang: gr.update(value=tr(lang, "开始分离")))
+                            sep_cancel_btn = gr.Button(_t("取消任务"), variant="stop", scale=2)
+                            _reg(sep_cancel_btn, lambda lang: gr.update(value=tr(lang, "取消任务")))
                         sep_info = gr.Markdown()
                         # 输出产物播放器组：按产物数量逐个显示（与其他 Tab 播放器同组件，
                         # PlayerZoom 个性化定制按 elem_id 前缀 sep-audio- 统一接管）；label 动态为轨道名
@@ -2194,7 +2338,10 @@ def build_ui():
                                     outputs=[sep_src_history, sep_src_upload])
                 sep_btn.click(fn=on_voice_separate,
                               inputs=[sep_src_history, sep_src_upload, sep_stem_mode, sep_denoise],
-                              outputs=[*sep_audios, sep_info, sep_btn])
+                              outputs=[*sep_audios, sep_info, sep_btn, sep_history_dd])
+                # 取消按钮：协作式取消本 Tab 排队中/运行中的任务（info 区反馈结果）
+                sep_cancel_btn.click(fn=lambda: on_voice_cancel("separation"),
+                                     outputs=[sep_info])
 
             with gr.Tab(_t("音色翻唱")) as tab_cover:
                 _reg(tab_cover, lambda lang: gr.update(label=tr(lang, "音色翻唱")))
@@ -2213,10 +2360,10 @@ def build_ui():
                             label=tr(lang, "当前源")))
 
                         cover_src_history = gr.Dropdown(
-                            choices=_voice_source_history_choices(_CUR_LANG),
+                            choices=_voice_cover_source_choices(_CUR_LANG),
                             label=_t("从历史记录选择"), interactive=True)
                         _reg(cover_src_history, lambda lang: gr.update(
-                            choices=_voice_source_history_choices(lang),
+                            choices=_voice_cover_source_choices(lang),
                             label=tr(lang, "从历史记录选择")))
 
                         cover_src_upload = gr.Audio(label=_t("上传音频"), type="filepath",
@@ -2243,6 +2390,20 @@ def build_ui():
                             interactive=True)
                         _reg(cover_ref_dropdown, lambda lang: gr.update(
                             choices=_voice_ref_choices(lang), label=tr(lang, "音色库选择")))
+                        # —— 音色库管理：选中即试听；支持删除（回收站）与重命名 ——
+                        cover_ref_preview = gr.Audio(
+                            label=_t("试听"), type="filepath",
+                            elem_id="cover-ref-preview", visible=False,
+                            show_download_button=False)
+                        _reg(cover_ref_preview, lambda lang: gr.update(label=tr(lang, "试听")))
+                        with gr.Row():
+                            cover_ref_del_btn = gr.Button(_t("删除选中"), size="sm", variant="stop")
+                            _reg(cover_ref_del_btn, lambda lang: gr.update(value=tr(lang, "删除选中")))
+                            cover_ref_rename_input = gr.Textbox(
+                                label=_t("重命名为"), elem_id="cover-ref-rename")
+                            _reg(cover_ref_rename_input, lambda lang: gr.update(label=tr(lang, "重命名为")))
+                            cover_ref_rename_btn = gr.Button(_t("重命名"), size="sm")
+                            _reg(cover_ref_rename_btn, lambda lang: gr.update(value=tr(lang, "重命名")))
 
                         # 干声历史入口：radio 选来源（分离人声/上传干声），再在下拉选文件（默认隐藏）
                         with gr.Column(visible=False) as cover_ref_dry_panel:
@@ -2290,6 +2451,21 @@ def build_ui():
                             choices=_voice_stem_choices(lang),
                             label=tr(lang, "自定义伴奏(可选)"),
                             info=tr(lang, "留空自动使用源伴奏")))
+                        # —— 素材库管理：选中即试听；支持删除（回收站）与重命名 ——
+                        cover_acc_preview = gr.Audio(
+                            label=_t("试听"), type="filepath",
+                            elem_id="cover-acc-preview", visible=False,
+                            show_download_button=False)
+                        _reg(cover_acc_preview, lambda lang: gr.update(label=tr(lang, "试听")))
+                        with gr.Row():
+                            cover_acc_del_btn = gr.Button(_t("删除选中"), size="sm", variant="stop")
+                            _reg(cover_acc_del_btn, lambda lang: gr.update(value=tr(lang, "删除选中")))
+                            cover_acc_rename_input = gr.Textbox(
+                                label=_t("重命名为"), elem_id="cover-acc-rename")
+                            _reg(cover_acc_rename_input, lambda lang: gr.update(label=tr(lang, "重命名为")))
+                            cover_acc_rename_btn = gr.Button(_t("重命名"), size="sm")
+                            _reg(cover_acc_rename_btn, lambda lang: gr.update(value=tr(lang, "重命名")))
+                        cover_acc_info = gr.Markdown()
 
                         # —— 翻唱参数 ——
                         cover_semi = gr.Slider(-12, 12, value=0, step=1, label=_t("半音偏移"))
@@ -2310,8 +2486,11 @@ def build_ui():
                                                     info=_t("开启后对输出人声降噪"))
                         _reg(cover_denoise, lambda lang: gr.update(
                             label=tr(lang, "降噪"), info=tr(lang, "开启后对输出人声降噪")))
-                        cover_btn = gr.Button(_t("开始翻唱"), variant="primary")
-                        _reg(cover_btn, lambda lang: gr.update(value=tr(lang, "开始翻唱")))
+                        with gr.Row():
+                            cover_btn = gr.Button(_t("开始翻唱"), variant="primary", scale=3)
+                            _reg(cover_btn, lambda lang: gr.update(value=tr(lang, "开始翻唱")))
+                            cover_cancel_btn = gr.Button(_t("取消任务"), variant="stop", scale=2)
+                            _reg(cover_cancel_btn, lambda lang: gr.update(value=tr(lang, "取消任务")))
                         cover_info = gr.Markdown()
                         # 输出产物播放器组：按产物数量逐个显示（与其他 Tab 播放器同组件，
                         # PlayerZoom 按 elem_id 前缀 cover-audio- 接管）；label 动态为轨道名
@@ -2360,7 +2539,27 @@ def build_ui():
                                         cover_ref_upload,
                                         cover_semi, cover_steps, cover_gain, cover_acc_dd,
                                         cover_denoise],
-                                outputs=[*cover_audios, cover_info, cover_btn])
+                                outputs=[*cover_audios, cover_info, cover_btn, cover_history_dd])
+                # 取消按钮：协作式取消本 Tab 排队中/运行中的任务（info 区反馈结果）
+                cover_cancel_btn.click(fn=lambda: on_voice_cancel("cover"),
+                                       outputs=[cover_info])
+                # 音色库管理：选中即试听；删除/重命名（回收站）后刷新下拉并清空试听
+                cover_ref_dropdown.change(fn=lambda p: gr.update(value=p, visible=bool(p)),
+                                          inputs=cover_ref_dropdown,
+                                          outputs=[cover_ref_preview])
+                cover_ref_del_btn.click(fn=on_voice_ref_delete, inputs=[cover_ref_dropdown],
+                                        outputs=[cover_ref_preview, cover_ref_dropdown])
+                cover_ref_rename_btn.click(fn=on_voice_ref_rename,
+                                           inputs=[cover_ref_dropdown, cover_ref_rename_input],
+                                           outputs=[cover_ref_preview, cover_ref_dropdown])
+                # 素材库管理：选中即试听；删除/重命名（回收站）后刷新下拉
+                cover_acc_dd.change(fn=lambda p: gr.update(value=p, visible=bool(p)),
+                                    inputs=cover_acc_dd, outputs=[cover_acc_preview])
+                cover_acc_del_btn.click(fn=on_voice_stem_delete, inputs=[cover_acc_dd],
+                                        outputs=[cover_acc_dd])
+                cover_acc_rename_btn.click(fn=on_voice_stem_rename,
+                                           inputs=[cover_acc_dd, cover_acc_rename_input],
+                                           outputs=[cover_acc_dd])
 
                 # 任务历史回放（按文件夹）：选任务 → 整组播放器填充全部轨道
                 sep_history_dd.change(fn=on_voice_task_history_pick, inputs=sep_history_dd,
@@ -2372,14 +2571,16 @@ def build_ui():
                 tab_sep.select(fn=lambda: gr.update(
                     choices=_voice_task_history_choices("separation")),
                     outputs=[sep_history_dd])
-                # 每次切到翻唱 Tab 时刷新音色库/伴奏/干声两来源/翻唱历史下拉（衔接「分离入库 → 翻唱选用」）
+                # 每次切到翻唱 Tab 时刷新翻唱源/音色库/伴奏/干声两来源/翻唱历史下拉
+                # （衔接「分离入库 → 翻唱选用/复用」；翻唱源含可复用的分离记录）
                 # 注意：必须用 gr.update 包裹 choices，裸列表会被 Gradio 5 当作 value 赋值导致 not in choices 报错
-                tab_cover.select(fn=lambda: (gr.update(choices=_voice_ref_choices(_CUR_LANG)),
+                tab_cover.select(fn=lambda: (gr.update(choices=_voice_cover_source_choices(_CUR_LANG)),
+                                             gr.update(choices=_voice_ref_choices(_CUR_LANG)),
                                              gr.update(choices=_voice_stem_choices(_CUR_LANG)),
                                              gr.update(choices=_voice_dry_sep_choices(_CUR_LANG)),
                                              gr.update(choices=_voice_dry_upload_choices(_CUR_LANG)),
                                              gr.update(choices=_voice_task_history_choices("cover"))),
-                                 outputs=[cover_ref_dropdown, cover_acc_dd,
+                                 outputs=[cover_src_history, cover_ref_dropdown, cover_acc_dd,
                                           cover_ref_dry_sep, cover_ref_dry_upload,
                                           cover_history_dd])
 

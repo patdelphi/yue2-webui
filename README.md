@@ -25,7 +25,7 @@
 - 🎚️ **完整采样参数控制**：ABC 阶段（Stage 1）与语义 Token 阶段（Stage 2）独立温度 / Top-P / Top-K / 重复惩罚等
 - 📜 **生成历史管理**：分页浏览、试听、歌词同步、乐谱预览，自动清理缺失文件记录，可删除/清空
 - 🎚️ **预设系统**：5 套内置参数预设，支持自定义预设的保存与加载
-- 🎛️ **音色工坊**：音轨分离（Demucs）拆分任意音频为人声/伴奏，参考音色翻唱（Demucs + Seed-VC）将歌曲换嗓后与伴奏混音，支持历史/上传源与参考音色库（可选功能，独立安装）
+- 🎛️ **音色工坊**：音轨分离（Demucs）拆分任意音频为人声/伴奏，参考音色翻唱（Demucs + Seed-VC）将歌曲换嗓后与伴奏混音；翻唱可复用分离结果跳过重复分离，任务支持阶段进度显示与运行中取消（可选功能，独立安装）
 - 🌐 **中英双语界面**：右上角即时切换，含 Gradio 内置文案（上传提示/页脚）同步切换；模型路径外置 `config.cfg` 配置
 
 ---
@@ -51,10 +51,11 @@
 - 自动清理缺失文件的历史记录；支持删除选中、清空全部、刷新。
 
 ### 🎛️ 音色工坊（可选）
-- **音轨分离**：把任意音频拆为人声/伴奏（2 轨）或鼓/贝斯/其他（4 轨），使用 Demucs。
-- **参考音色翻唱**：完整歌曲 → 分离人声 → 换成参考音色（Seed-VC）→ 与伴奏混音，支持半音移调 / 扩散步数 / 伴奏增益。
-- **源与参考**：可从生成历史选择源音频或直接上传；参考干声可一键存入音色库复用。
-- 产物自动聚合到源任务目录并写入历史；需独立安装（见 setup.md 第 6 节）。
+- **音轨分离**：把任意音频拆为人声/伴奏（2 轨）或鼓/贝斯/其他（4 轨），使用 Demucs，可选人声降噪。
+- **参考音色翻唱**：完整歌曲 → 分离人声 → 换成参考音色（Seed-VC）→ 与伴奏混音，支持半音移调 / 扩散步数 / 伴奏增益；翻唱源可直接选历史分离记录（复用人声/伴奏，跳过重复分离），自定义伴奏自动对齐源伴奏响度。
+- **源与参考**：可从生成历史选择源音频或直接上传（上传源自动留存副本）；参考干声支持上传 / 分离人声 / 音色库三来源，音色库与素材库支持试听 / 删除 / 重命名管理。
+- **任务管理**：阶段进度实时显示（分离中 / 换嗓中 / 降噪中 / 混音中），运行中可取消（换嗓阶段即时中断），长曲超时按源时长自适应。
+- 产物独立目录存放（`outputs/separations|covers/<时间戳>_<短id>/`）并写入历史，历史按文件夹整组回放、逐轨试听与下载；需独立安装（见 setup.md 第 6 节）。
 
 ### ⚙️ 设置
 - **系统状态**：检查模型文件是否就绪（模型 GGUF / VAE GGUF）。
@@ -200,7 +201,7 @@ This is the **YuE2 music generation WebUI** project. Built on the YuE2 model joi
 - 🎚️ **Full sampling control**: independent temperature / Top-P / Top-K / repetition penalty for the ABC stage (Stage 1) and semantic-token stage (Stage 2)
 - 📜 **Generation history**: paginated browsing, playback, lyric sync, score preview; auto-cleans records with missing files; delete/clear supported
 - 🎚️ **Preset system**: 5 built-in parameter presets plus save/load of custom presets
-- 🎛️ **Voice Studio**: stem separation (Demucs) splits any audio into vocals/accompaniment, and reference-timbre covers (Demucs + Seed-VC) re-voice a song and mix it with the accompaniment; supports history/upload sources and a reference-timbre library (optional feature, installed separately)
+- 🎛️ **Voice Studio**: stem separation (Demucs) splits any audio into vocals/accompaniment, and reference-timbre covers (Demucs + Seed-VC) re-voice a song and mix it with the accompaniment; covers can reuse past separation results to skip re-separating, with live stage progress and in-run cancellation (optional feature, installed separately)
 - 🌐 **Bilingual UI (Chinese/English)**: instant switch at the top right, including Gradio built-in texts (upload hints / footer); model paths configured via external `config.cfg`
 
 ---
@@ -226,10 +227,11 @@ This is the **YuE2 music generation WebUI** project. Built on the YuE2 model joi
 - Records with missing files are cleaned automatically; delete selected / clear all / refresh supported.
 
 ### 🎛️ Voice Studio (optional)
-- **Stem separation**: split any audio into vocals/accompaniment (2 stems) or drums/bass/other (4 stems) with Demucs.
-- **Reference-timbre cover**: full song → separate vocals → re-voice with a reference timbre (Seed-VC) → mix with the accompaniment; supports semitone shift / diffusion steps / accompaniment gain.
-- **Sources & references**: pick the source from generation history or upload directly; save a reference dry vocal to the timbre library with one click.
-- Outputs are aggregated into the source task folder and written to history; requires a separate install (see setup.md §6).
+- **Stem separation**: split any audio into vocals/accompaniment (2 stems) or drums/bass/other (4 stems) with Demucs, with optional vocal denoising.
+- **Reference-timbre cover**: full song → separate vocals → re-voice with a reference timbre (Seed-VC) → mix with the accompaniment; supports semitone shift / diffusion steps / accompaniment gain; the source can be a past separation record (reusing vocals + accompaniment to skip re-separation), and custom accompaniments are loudness-matched to the source.
+- **Sources & references**: pick the source from generation history or upload directly (uploaded sources keep a copy); reference dry vocals come from upload / separated vocals / timbre library, and both libraries support preview / delete / rename.
+- **Task management**: live stage progress (separating / converting / denoising / mixing), in-run cancellation (instant interrupt during conversion), and duration-adaptive timeouts for long tracks.
+- Outputs live in dedicated folders (`outputs/separations|covers/<timestamp>_<short-id>/`) and are written to history for folder-grouped playback, per-stem preview and download; requires a separate install (see setup.md §6).
 
 ### ⚙️ Settings
 - **System status**: check whether model files are ready (main GGUF / VAE GGUF).

@@ -112,3 +112,32 @@ def test_success_path(monkeypatch):
                           accompaniment="a.wav", output_dir=str(tmp / "cov"))
     assert res2.ok
     assert all(k in res2.products for k in ("cover", "converted_vocals", "accompaniment"))
+
+
+def test_cancelled_flag_parsed(monkeypatch):
+    """worker 响应含 cancelled=True（协作取消）时，VoiceResult 应携带该标志，
+    供上层把这类失败映射为"已取消"而非"任务失败"。"""
+    tmp, webui = _make_roots()
+    svc = tmp / "seed-vc"
+    svc.mkdir()
+    (webui / "config.cfg").write_text("\n[voice]\nseedvc_dir = seed-vc\n", encoding="utf-8")
+    client = _make_client(tmp)
+
+    monkeypatch.setattr(client, "ensure_running", lambda: None)
+    monkeypatch.setattr(client, "port", 8190)
+
+    # worker 取消响应：ok=false + cancelled=true
+    monkeypatch.setattr(client, "_request",
+                        lambda method, url, payload, timeout=300: {
+                            "ok": False, "error": "任务已取消", "cancelled": True})
+    res = client.separate("in.wav", mode="2", output_dir=str(tmp / "out"))
+    assert res.ok is False
+    assert res.cancelled is True
+
+    # 普通业务失败响应：不带 cancelled 字段 → cancelled 保持 False
+    monkeypatch.setattr(client, "_request",
+                        lambda method, url, payload, timeout=300: {
+                            "ok": False, "error": "boom"})
+    res2 = client.convert("s.wav", "ref.wav", output_dir=str(tmp / "cov"))
+    assert res2.ok is False
+    assert res2.cancelled is False

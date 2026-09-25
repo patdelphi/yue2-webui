@@ -351,6 +351,24 @@ EN_TABLE: Dict[str, str] = {
     "半音快捷原调": "Original key",
     "降噪": "Denoise",
     "开启后对输出人声降噪": "Denoise the output vocals when enabled",
+    # —— 音色工坊批次2新增：阶段进度 / 取消 / 库管理 / 分离复用 ——
+    "分离中...": "Separating...",
+    "换嗓中...": "Converting vocals...",
+    "降噪中...": "Denoising...",
+    "混音中...": "Mixing...",
+    "取消任务": "Cancel task",
+    "试听": "Preview",
+    "删除选中": "Delete selected",
+    "重命名": "Rename",
+    "重命名为": "Rename to",
+    "已删除": "Deleted",
+    "已重命名": "Renamed",
+    "请先选择条目": "Please select an item first",
+    "请输入新名称": "Please enter a new name",
+    "删除失败": "Delete failed",
+    "重命名失败": "Rename failed",
+    "分离": "Separation",
+    "该分离记录缺少人声/伴奏轨，无法复用": "This separation record lacks vocals/accompaniment stems and cannot be reused",
 }
 
 
