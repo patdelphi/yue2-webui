@@ -968,6 +968,17 @@ def _voice_task_history_choices(record_type, lang="zh", limit=50):
     return choices
 
 
+def _dd_update(choices):
+    """构建 Dropdown 的 gr.update，同时传递 value 为首项（避免 Gradio 6 重置 value 为 None）。
+
+    Gradio 6 中 gr.update(choices=[...]) 不传 value 会把当前 value 重置，
+    导致 Dropdown 显示 placeholder 但前端残留旧 label，形成"假选中"状态。
+    本函数自动取 choices 首项的 value 作为新默认值（choices 为空则 value=None）。
+    """
+    first_val = choices[0][1] if choices else None  # (label, value) 元组取 value 部分
+    return gr.update(choices=choices, value=first_val)
+
+
 # 音色工坊播放器组槽位数：分离最多 4 轨（+降噪变体）、翻唱 4 产物，取 6 留余量
 VOICE_PLAYER_COUNT = 6
 
@@ -1019,7 +1030,7 @@ def on_voice_task_history_pick(task_id):
 def on_voice_task_rename(task_id, new_name, record_type):
     """分离/翻唱任务历史：改项目名（重命名项目目录文件，保留时间戳）。
 
-    返回 (历史下拉刷新, 播放器组保持, 新项目名输入清空)。
+    返回 (历史下拉刷新, State 保持当前 task_id, 播放器组保持, 新项目名输入清空)。
     """
     if not task_id:
         raise gr.Error(tr(_CUR_LANG, "请先选择任务"))
@@ -1031,13 +1042,14 @@ def on_voice_task_rename(task_id, new_name, record_type):
     # 播放器里的旧路径已失效：按记录 stems 重新填充
     items = _voice_stem_items(getattr(entry, "stems", None))
     return (gr.update(choices=_voice_task_history_choices(record_type)),
+            task_id,  # State 组件：改名后 task_id 不变
             *_fill_voice_players(items), "")
 
 
 def on_voice_task_delete(task_id, record_type):
     """分离/翻唱任务历史：删除项目（整目录移入回收站，移除该目录全部记录）。
 
-    返回 (历史下拉刷新+清空选中, 播放器组清空)。
+    返回 (历史下拉刷新, State 更新为剩余首条记录的 task_id 或 None, 播放器组清空)。
     """
     if not task_id:
         raise gr.Error(tr(_CUR_LANG, "请先选择任务"))
@@ -1048,7 +1060,11 @@ def on_voice_task_delete(task_id, record_type):
     if n <= 0:
         raise gr.Error(tr(_CUR_LANG, "删除失败"))
     gr.Info(f"{tr(_CUR_LANG, '已删除项目')} · {n} {tr(_CUR_LANG, '条记录')}")
-    return (gr.update(choices=_voice_task_history_choices(record_type), value=None),
+    # 删除后 State 应更新为剩余首条记录的 task_id（如果还有的话）
+    remaining = _voice_task_history_choices(record_type)
+    new_state_value = remaining[0][1] if remaining else None
+    return (gr.update(choices=remaining, value=None),
+            new_state_value,
             *_fill_voice_players([]))
 
 
@@ -2565,7 +2581,7 @@ def build_ui():
                         # PlayerZoom 个性化定制按 elem_id 前缀 sep-audio- 统一接管）；label 动态为轨道名
                         sep_audios = [
                             gr.Audio(type="filepath", label="", elem_id=f"sep-audio-{i}",
-                                     visible=False, show_download_button=True)
+                                     visible=False)
                             for i in range(VOICE_PLAYER_COUNT)
                         ]
 
@@ -2580,10 +2596,14 @@ def build_ui():
                         _reg(sep_history_dd, lambda lang: gr.update(
                             choices=_voice_task_history_choices("separation", lang),
                             label=tr(lang, "选择分离任务")))
+                        # 隐藏 State 组件：保存当前选中的 task_id，供删除/改名按钮正确读取
+                        # （Gradio 6 中 Tab 切换更新 choices 会把 Dropdown 的 value 重置为 None，
+                        # 必须用 State 组件显式保存用户选中的值，与历史页 history_state 模式一致）
+                        sep_selected_task = gr.State(value=None)
                         # 历史回放播放器组：选中任务后按文件夹填充全部轨道（每轨可下载）
                         sep_hist_audios = [
                             gr.Audio(type="filepath", label="", elem_id=f"sep-history-audio-{i}",
-                                     visible=False, show_download_button=True)
+                                     visible=False)
                             for i in range(VOICE_PLAYER_COUNT)
                         ]
                         # 项目管理（文件管理重构）：改项目名（保留时间戳）/ 删除项目（整目录入回收站）
@@ -2610,7 +2630,7 @@ def build_ui():
                         lib_stem_preview = gr.Audio(
                             label=_t("试听"), type="filepath",
                             elem_id="lib-stem-preview", visible=False,
-                            show_download_button=False)
+                           )
                         _reg(lib_stem_preview, lambda lang: gr.update(label=tr(lang, "试听")))
                         with gr.Row():
                             lib_stem_del_btn = gr.Button(_t("删除选中"), size="sm", variant="stop")
@@ -2629,7 +2649,7 @@ def build_ui():
                         lib_ref_preview = gr.Audio(
                             label=_t("试听"), type="filepath",
                             elem_id="lib-ref-preview", visible=False,
-                            show_download_button=False)
+                           )
                         _reg(lib_ref_preview, lambda lang: gr.update(label=tr(lang, "试听")))
                         with gr.Row():
                             lib_ref_del_btn = gr.Button(_t("删除选中"), size="sm", variant="stop")
@@ -2701,7 +2721,7 @@ def build_ui():
                         cover_ref_preview = gr.Audio(
                             label=_t("试听"), type="filepath",
                             elem_id="cover-ref-preview", visible=False,
-                            show_download_button=False)
+                           )
                         _reg(cover_ref_preview, lambda lang: gr.update(label=tr(lang, "试听")))
 
                         # 干声历史入口：radio 选来源（分离人声/上传干声），再在下拉选文件（默认隐藏）
@@ -2754,7 +2774,7 @@ def build_ui():
                         cover_acc_preview = gr.Audio(
                             label=_t("试听"), type="filepath",
                             elem_id="cover-acc-preview", visible=False,
-                            show_download_button=False)
+                           )
                         _reg(cover_acc_preview, lambda lang: gr.update(label=tr(lang, "试听")))
 
                         # —— 翻唱参数 ——
@@ -2786,7 +2806,7 @@ def build_ui():
                         # PlayerZoom 按 elem_id 前缀 cover-audio- 接管）；label 动态为轨道名
                         cover_audios = [
                             gr.Audio(type="filepath", label="", elem_id=f"cover-audio-{i}",
-                                     visible=False, show_download_button=True)
+                                     visible=False)
                             for i in range(VOICE_PLAYER_COUNT)
                         ]
                         # —— 翻唱任务历史：按文件夹选择，整组播放器回放全部轨道 ——
@@ -2798,10 +2818,11 @@ def build_ui():
                         _reg(cover_history_dd, lambda lang: gr.update(
                             choices=_voice_task_history_choices("cover", lang),
                             label=tr(lang, "选择翻唱任务")))
+                        cover_selected_task = gr.State(value=None)
                         # 历史回放播放器组：选中任务后按文件夹填充全部轨道（每轨可下载）
                         cover_hist_audios = [
                             gr.Audio(type="filepath", label="", elem_id=f"cover-history-audio-{i}",
-                                     visible=False, show_download_button=True)
+                                     visible=False)
                             for i in range(VOICE_PLAYER_COUNT)
                         ]
                         # 项目管理（文件管理重构）：改项目名（保留时间戳）/ 删除项目（整目录入回收站）
@@ -2869,44 +2890,60 @@ def build_ui():
                 # 任务历史回放（按文件夹）：选任务 → 整组播放器填充全部轨道
                 sep_history_dd.change(fn=on_voice_task_history_pick, inputs=sep_history_dd,
                                       outputs=[*sep_hist_audios])
+                # 额外绑定：用户手动选下拉时，同步更新隐藏 State 组件
+                # （后续删除/改名按钮从 State 读 task_id，避免 Dropdown 被重置）
+                sep_history_dd.change(fn=lambda tid: tid, inputs=sep_history_dd,
+                                      outputs=sep_selected_task)
                 cover_history_dd.change(fn=on_voice_task_history_pick, inputs=cover_history_dd,
                                         outputs=[*cover_hist_audios])
+                cover_history_dd.change(fn=lambda tid: tid, inputs=cover_history_dd,
+                                        outputs=cover_selected_task)
 
                 # 项目管理（文件管理重构）：改项目名（重命名文件保留时间戳）/ 删除项目（整目录入回收站）
+                # 关键修复：inputs 用隐藏 State 组件而非 Dropdown，
+                # 因为 Gradio 6 中 Tab 切换更新 choices 会把 Dropdown.value 重置为 None
                 sep_rename_btn.click(fn=lambda tid, name: on_voice_task_rename(tid, name, "separation"),
-                                     inputs=[sep_history_dd, sep_rename_input],
-                                     outputs=[sep_history_dd, *sep_hist_audios, sep_rename_input])
+                                     inputs=[sep_selected_task, sep_rename_input],
+                                     outputs=[sep_history_dd, sep_selected_task, *sep_hist_audios, sep_rename_input])
                 sep_del_btn.click(fn=lambda tid: on_voice_task_delete(tid, "separation"),
-                                  inputs=sep_history_dd,
+                                  inputs=sep_selected_task,
                                   js=_DEL_PROJECT_CONFIRM_JS,
-                                  outputs=[sep_history_dd, *sep_hist_audios])
+                                  outputs=[sep_history_dd, sep_selected_task, *sep_hist_audios])
                 cover_rename_btn.click(fn=lambda tid, name: on_voice_task_rename(tid, name, "cover"),
-                                       inputs=[cover_history_dd, cover_rename_input],
-                                       outputs=[cover_history_dd, *cover_hist_audios, cover_rename_input])
+                                       inputs=[cover_selected_task, cover_rename_input],
+                                       outputs=[cover_history_dd, cover_selected_task, *cover_hist_audios, cover_rename_input])
                 cover_del_btn.click(fn=lambda tid: on_voice_task_delete(tid, "cover"),
-                                    inputs=cover_history_dd,
+                                    inputs=cover_selected_task,
                                     js=_DEL_PROJECT_CONFIRM_JS,
-                                    outputs=[cover_history_dd, *cover_hist_audios])
+                                    outputs=[cover_history_dd, cover_selected_task, *cover_hist_audios])
 
                 # 每次切到分离 Tab 时刷新源下拉 + 分离任务历史 + 库管理两下拉
                 # （翻唱页删除后保持同步；新生成的歌曲也要能立即作为分离源，无需刷新页面）
-                tab_sep.select(fn=lambda: (gr.update(choices=_voice_source_history_choices(_CUR_LANG)),
-                                           gr.update(choices=_voice_task_history_choices("separation")),
-                                           gr.update(choices=_voice_stem_choices(_CUR_LANG)),
-                                           gr.update(choices=_voice_ref_choices(_CUR_LANG))),
-                               outputs=[sep_src_history, sep_history_dd, lib_stem_dd, lib_ref_dd])
+                # 注意：Gradio 6 中 gr.update(choices=...) 不传 value 会把 Dropdown 值重置，
+                # 必须用 _dd_update 同时传递 value=首项值。
+                # 同时更新隐藏 State：保存第一条任务记录的 task_id，供删除/改名按钮正确读取
+                tab_sep.select(fn=lambda: (
+                    _dd_update(_voice_source_history_choices(_CUR_LANG)),
+                    _dd_update(_voice_task_history_choices("separation")),
+                    _dd_update(_voice_stem_choices(_CUR_LANG)),
+                    _dd_update(_voice_ref_choices(_CUR_LANG)),
+                    (_voice_task_history_choices("separation")[0][1]
+                     if _voice_task_history_choices("separation") else None)),
+                               outputs=[sep_src_history, sep_history_dd, lib_stem_dd, lib_ref_dd,
+                                        sep_selected_task])
                 # 每次切到翻唱 Tab 时刷新翻唱源/音色库/伴奏/干声两来源/翻唱历史下拉
-                # （衔接「分离入库 → 翻唱选用/复用」；翻唱源含可复用的分离记录）
-                # 注意：必须用 gr.update 包裹 choices，裸列表会被 Gradio 5 当作 value 赋值导致 not in choices 报错
-                tab_cover.select(fn=lambda: (gr.update(choices=_voice_cover_source_choices(_CUR_LANG)),
-                                             gr.update(choices=_voice_ref_choices(_CUR_LANG)),
-                                             gr.update(choices=_voice_stem_choices(_CUR_LANG)),
-                                             gr.update(choices=_voice_dry_sep_choices(_CUR_LANG)),
-                                             gr.update(choices=_voice_dry_upload_choices(_CUR_LANG)),
-                                             gr.update(choices=_voice_task_history_choices("cover"))),
+                tab_cover.select(fn=lambda: (
+                    _dd_update(_voice_cover_source_choices(_CUR_LANG)),
+                    _dd_update(_voice_ref_choices(_CUR_LANG)),
+                    _dd_update(_voice_stem_choices(_CUR_LANG)),
+                    _dd_update(_voice_dry_sep_choices(_CUR_LANG)),
+                    _dd_update(_voice_dry_upload_choices(_CUR_LANG)),
+                    _dd_update(_voice_task_history_choices("cover")),
+                    (_voice_task_history_choices("cover")[0][1]
+                     if _voice_task_history_choices("cover") else None)),
                                  outputs=[cover_src_history, cover_ref_dropdown, cover_acc_dd,
                                           cover_ref_dry_sep, cover_ref_dry_upload,
-                                          cover_history_dd])
+                                          cover_history_dd, cover_selected_task])
 
             with gr.Tab(_t("系统设置")) as tab_settings:
                 _reg(tab_settings, lambda lang: gr.update(label=tr(lang, "系统设置")))
