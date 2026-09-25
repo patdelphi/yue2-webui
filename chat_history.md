@@ -136,3 +136,187 @@
 - 验证：三文件 py_compile 通过；test_i18n.py 15 通过；voice 三套件 21 passed；重启 5.7s HTTP 200；浏览器实测历史页正常（无 separation 记录时轨道回放区隐藏属预期）；日志无错误。
 - 服务保持运行（job-fcc11655405d45fd9276017a71c37527）。
 - 待办：真实端到端分离/翻唱验证（首次点「开始分离」懒启动 worker），届时历史页轨道回放下拉可见并可回放。
+
+---
+## 2026-09-24 翻唱上传干音轻量人声检测（方案B）
+
+- 用户确认采用方案B：上传参考干声后轻量信号特征判断是否人声（秒级、不占显存、仅提示不拦截）。
+- voice_ui_handlers.py：新增模块级 detect_voice(path)（ffmpeg 解码 mono 16kHz PCM）+ _voice_score(x, sr) 纯 DSP 打分：人声频带(80-1000Hz)能量占比 0.65 + 谱平坦度反向 0.35，阈值 0.5；跳过静音帧；异常/短音频返回 None（无法检测）。
+- app.py：新增 on_voice_ref_upload_check 回调；上传组件下方新增 cover_ref_check_md 检测提示；绑定 cover_ref_upload.change 触发检测。修复：detect_voice 为模块级函数，导入改为 from voice_ui_handlers import VoiceHandlers, detect_voice。
+- i18n.py：新增词条 人声检测: 通过 / 人声检测: 疑似非人声，建议上传清唱干声 / 无法检测。
+- tests/test_voice_handlers.py：新增 3 用例（谐波信号判人声/白噪声判非人声/文件不存在返回 None）。
+- 验证：py_compile 通过；i18n 15 通过；voice 三套件 24 passed；ffmpeg 全链路（人声样 0.92/粉噪 0.29）；浏览器真实上传实测：check_voice.wav 显示「人声检测: 通过 (p=0.92)」，check_noise.wav 显示「人声检测: 疑似非人声，建议上传清唱干声 (p=0.30)」；测试音频已清理。
+- 服务保持运行（job-cbd94f5cfa58417197133203af6f66a0）。
+---
+## 2026-09-24 干声历史两来源拆除下拉+翻唱参考入口验证
+
+- 用户明确「不要混一起」：干声历史来源拆为两级——先 gr.Radio 选来源（分离历史 / 上传干音），再在对应 gr.Dropdown 选文件，不再聚合到一个下拉。
+- app.py：干声历史入口重建为 cover_ref_dry_panel（gr.Column，含 cover_ref_dry_src radio + cover_ref_dry_sep / cover_ref_dry_upload 两个独立下拉）；新增 on_voice_dry_src_mode 回调按 dry_src 显隐对应下拉；choices 拆分 _voice_dry_sep_choices / _voice_dry_upload_choices；on_voice_cover 签名扩为 6 个参考输入，按 (ref_upload, ref_dry_upload, ref_dry_sep, ref_library) 顺序取第一个有效值。
+- 一致性修复：cover_ref_dry_src 原用 .select，统一改为 .change（与 cover_ref_mode / cover_src_mode 一致）——gradio5 Radio 用 change。
+- voice_ui_handlers.py：dry_dir/save_dry_upload/list_dry_uploads 留存上传干音（voice-tools/dry_uploads/dry_<id>.<ext>）；上传格式白名单 wav/mp3/flac/m4a/ogg(主) + aac/wma；on_voice_ref_upload_check 通过后留存并入 uploads 下拉。
+- i18n.py：新增 干声历史来源/分离历史/上传干音/分离历史干声/上传历史干音/不支持格式提示 等词条。
+- 验证：gradio_client predict 确认 dry_src(sep)/(upload) 两级显隐正确返回；抓 /config 前端 dependencies 确认三者均以 change 触发、输出含 Column 面板（ref_mode out=[320,321,326]，dry_src out=[324,323]）——Column 显隐在配置层完整可用；此前浏览器点 radio「时灵时不灵」实为 CDP 合成事件无法可靠触发 gradio Radio，非代码 bug，须人工刷新浏览器点击确认。
+- 服务保持运行（job-20a236f26d4e41f5a8823e5216376194）。
+
+---
+## 2026-09-24 整体检查与测试（全绿）
+
+- 用户要求整体检查代码与流程。逐项执行：
+- 编译：全部项目 .py（app/src/tests/voice-tools/worker）py_compile 通过。
+- 测试：pytest 49 passed（0 error）+ i18n 15 通过 = 64 项全绿。
+  - 修复 tests\test_queue.py：helper 函数 test_task 被 pytest 误收集为 test 报「fixture _task not found」，改名 task_worker（非 test_ 前缀）后队列套件 5 passed。
+  - test_i18n.py 为脚本式（模块级 sys.exit），pytest 无法收集，排除后用 python 单独执行 15 通过。
+- 服务：HTTP 200，页面 533KB 正常加载；python 进程运行中。
+- gradio 配置完整性：/on_voice_cover 10 参数，前 6 个参考输入（source_history/source_upload/ref_library/ref_dry_upload/ref_dry_sep/ref_upload）顺序与函数签名一致；参考解析优先级 上传→上传干音历史→分离干声→音色库；自定义伴奏缺失回退原伴奏。
+- 流程复查：worker _convert 始终先分离源曲（行151），再用自定义或原伴奏混音，cover 管线完整；voice_ui_handlers 干音留存（dry_dir/save_dry_upload/list_dry_uploads）与素材库（save_stem/list_stems）逻辑正确。
+- 唯一代码改动：tests\test_queue.py 的 task_worker 重命名（不影响行为）。
+- 未执行：真实端到端分离/翻唱推理（需 GPU/lazy worker）；git commit/push（需用户批准）。
+- 服务保持运行（job-20a236f26d4e41f5a8823e5216376194）。
+
+---
+## 2026-09-24 翻唱/分离新增降噪选项（默认关闭）
+
+- 需求：分离出来的人声常带背景噪音，Demucs 是音源分离非降噪，用户要求加可选降噪。已确认：分离页+翻唱页都加，默认关闭手动开启，用 ffmpeg anlmdn。
+- worker.py：新增 denoise_audio(src,dst) 助手（ffmpeg -af anlmdn，异常回退原文件不阻断）；_separate/_convert 加 denoise:bool=False——分离时对人声轨降噪替换 vocals，翻唱时对换嗓 converted_vocals 降噪后参与混音；HTTP /api/separate、/api/convert 读取 body denoise 透传。
+- voice_client.py：separate/convert 加 denoise 入 payload。
+- voice_ui_handlers.py：separate_worker/cover_worker 加 denoise 透传到 voice_client。
+- app.py：分离页 sep_denoise、翻唱页 cover_denoise 各一个 gr.Checkbox(label=降噪,value=False)+_reg 语言注册；on_voice_separate/on_voice_cover 加 denoise=False 参数入队；两按钮 .click inputs 追加对应 checkbox，顺序与回调签名一致。
+- i18n.py：新增 降噪/开启后对输出人声降噪（中英成对）。
+- 验证：py_compile 全过；pytest 49 passed；i18n 15 通过。默认关闭时输出与之前完全一致，降噪失败自动回退原文件。
+- 未执行：真实端到端推理（需 CUDA/Seed-VC）；git commit/push（需批准）。
+
+---
+## 2026-09-24 音色工坊流程优化（用户：降噪保留源文件 / 不用硬链接）
+
+- 用户审阅流程优化清单后拍板：降噪源文件必须保留、素材库/干音库不用硬链接（保持 copyfile），其余优化项实施。
+- history.py：新增 _derived_dir_for（安全判定 sep/cover 专属 derived 目录：仅 separation/cover、形态 outputs/<root>/derived/<kind>_xxx 且在 outputs_root 下）+ _recycle_derived（先逐文件移回收站，再自底向上 rmdir 空目录）；在 delete/clear/auto_prune 统一调用，消除 denoise 孤儿轨/换嗓中间文件/目录堆积。prune_missing：主轨缺失但任一 stem 存在即保留记录。
+- voice_config.py：外置魔法数字 6 键（denoise_strength/voice_detect_threshold/detect_sample_rate/detect_frame_len/voice_band/detect_seconds）及 _float/_band 解析；worker denoise_audio 支持 strength；voice_ui_handlers 检测参数抽默认引用。
+- worker.py：移除进程级 os.chdir 改 subprocess cwd=seed_dir；换嗓/降噪输出确定性命名（copyfile 为 converted_vocals.wav/_denoised.wav，源文件一律保留）。
+- voice_client.py：separate/convert 入口 mode/denoise/数值强校验，非法回退默认并 warning。
+- queue_manager.py：cancel 仅注释说明限制——Task 不持 Popen（走 VoiceClient HTTP 调独立 worker），未改终止子进程。
+- 验证：py_compile 全过；pytest 49 passed + i18n 15 + test_voice_config 7 通过；抽查确认整目录回收判定与降噪保留源文件。
+- 未执行：真实端到端推理；git commit/push（需批准）。
+
+---
+## 2026-09-24 复审后修复三项（执行）
+
+- 复审无硬性回归，本null落地3项：
+- 1)检测配置生效：voice_ui_handlers _parse_cfg_defaults(cfg=None) 改为接收 load_voice_config() 规范化 dict，缺失键回退默认；detect_voice(path, project_root=None) 传入 project_root 时读 config.cfg [voice]；app.py 传 PROJECT_ROOT 接通。用户改 voice_band/threshold/sr/帧长/时长 生效（与 denoise_strength 口径一致）。
+- 2)失败任务 derived 孤儿目录回收：新增 _recycle_created_derived(out_dir)（文件移回收站+空目录 rmdir，不用 rm）；separate_worker/cover_worker 在异常、cancel_event、not result.ok 三分支均回收，try/except 不掩盖原始错误。解决失败/取消任务目录永不清理。
+- 3)band 顺序校验：voice_config _band 解析 lo>hi 时交换，非法回退 (80,1000)，防止 band_mask 空致 voice_ratio 恒 0 误判。
+- 验证：py_compile 过；pytest 49 passed + test_voice_config 通过 + 复跑 voice 两套件 18 passed；抽查 grep 确认三处改动落地。
+- 未执行：队列取消终止子进程（需重构进程句柄）、换嗓文件名白名单（更大改动）、真实e2e、git commit/push（需批准）。
+
+---
+## 2026-09-24 移除参考干声的「分离历史」来源
+
+- 用户澄清定位：音轨分离的历史记录属于历史页（与生成历史并列），用途是轨道回放，不应出现在参考干声的选择里。
+- app.py：翻唱页参考音色「干声历史」入口简化——删除二级 radio（分离历史/上传干音）与「分离历史干声」下拉（cover_ref_dry_sep）、on_voice_dry_src_mode 回调及事件绑定；面板仅保留「上传历史干音」下拉（cover_ref_dry_upload）。on_voice_cover 签名由 6 参参考输入改 5 参（去 ref_dry_sep），解析优先级：上传 → 上传干音历史 → 音色库。tab_cover.select 刷新 outputs 同步精简。删除 _voice_dry_sep_choices；_voice_dry_history_choices 改为仅聚合上传干音。
+- i18n.py：删除废词条（干声历史来源/分离历史/上传干音/分离历史干声），保留「上传历史干音」等在用词条。
+- 衔接说明：分离出的 vocals 要用作参考，走分离 Tab「另存为人声参考」存入音色库（既有链路不变）；上传干音检测通过后自动留存 dry_uploads 并入干声历史下拉（不变）。
+- 验证：py_compile 过；pytest 49 passed + i18n 15 通过；服务重启探活 HTTP 200（先清理占用 9898 的旧 python 进程）。启动无 NameError，证明无残留引用。
+- 未执行：git commit/push（需批准）；浏览器端手动确认需刷新页面。
+
+---
+## 2026-09-24 分离/翻唱 Tab 结构最终定稿（用户明确产品逻辑）
+
+- 用户定义结构：1) 分离 Tab：源=生成历史(generation/cover)或上传；新增「分离任务历史」list 可选择回放分离结果。2) 翻唱页：歌曲源=生成历史或上传（不变）；参考干声=分离的人声结果 或 上传干声；新增「翻唱任务历史」list 可选择回放。
+- app.py：新增 _voice_task_history_choices(record_type)（value=task_id）、_voice_task_stem_choices(task_id)（stems 全轨优先，无则回退主轨）、on_voice_task_history_pick(task_id)（填轨道下拉+播第一轨）。
+- 分离 Tab 右栏新增「### 分离任务历史」区块：选择分离任务 Dropdown + 回放轨道 Dropdown + 回放 Audio；tab_sep.select 刷新。
+- 翻唱页右栏新增「### 翻唱任务历史」区块：选择翻唱任务 Dropdown + 回放轨道 Dropdown + 回放 Audio；tab_cover.select 一并刷新。
+- 参考干声恢复两来源：干声历史面板内 radio「从分离人声选择/从上传干声选择」→ 各自下拉（_voice_dry_sep_choices 列 separation 记录 vocals；_voice_dry_upload_choices 列 dry_uploads）；恢复 on_voice_dry_src_mode；on_voice_cover 恢复 6 参考输入，优先级：上传 → 上传干声 → 分离人声 → 音色库。
+- on_voice_ref_upload_check 刷新目标改为 _voice_dry_upload_choices（原聚合函数 _voice_dry_history_choices 删除）。
+- i18n.py：新增 13 词条（干声来源/从分离人声选择/从上传干声选择/分离人声/上传干声/### 分离任务历史/选择分离任务/### 翻唱任务历史/选择翻唱任务/回放轨道/回放等）。
+- 验证：py_compile 过；pytest 49 passed + i18n 15 通过；服务重启探活 200；gradio_client 验证 on_voice_dry_src_mode sep/upload 两方向显隐正确；on_voice_task_history_pick 空历史时被 Dropdown 入参校验拦截（符合预期，当前无分离/翻唱记录）。
+- 未执行：git commit/push（需批准）；真实端到端分离/翻唱推理；浏览器手动确认需刷新页面。
+
+---
+## 2026-09-24 顶部菜单重排改名
+
+- 用户要求：创作→歌曲创作；历史→歌曲历史并移到第二位；设置→系统设置；英文同步。
+- app.py：三个 Tab 改名（歌曲创作/歌曲历史/系统设置，含 _reg 语言切换注册）；「音频转谱」整块下移到歌曲历史之后，新顺序：歌曲创作 → 歌曲历史 → 音频转谱 → 音轨分离 → 音色翻唱 → 系统设置。
+- i18n.py：词条改名 歌曲创作/Song Creation、歌曲历史/Song History、系统设置/System Settings（删除旧词条 创作/历史/设置）。
+- tests/test_i18n.py：词条测试同步改为新键（4 断言，15→17 通过）。
+- 验证：py_compile 过；pytest 49 passed；i18n 17 通过；服务重启探活 200；抓 /config 确认 tabitem 顺序与中文名完全正确。
+- 未执行：git commit/push（需批准）；README/Docs 中 UI 描述的 Tab 名称同步（可后续文档更新时一并处理）。
+
+---
+## 2026-09-24 音轨分离：执行与输出组件移到左列 + 点击验证
+
+- 用户反馈：分离页「提交与执行结果组件」应放左边；点击开始分离没反应。
+- app.py：音轨分离 Tab 布局调整——把「降噪/开始分离按钮/输出产物(sep_info/sep_files)」从左列外的右栏移到左列（紧跟分离参数之后）；右栏保留「保存分离轨到库」与「分离任务历史」。
+- 点击「没反应」排查：通过运行中服务的 /config 确认按钮(299).click → on_voice_separate，inputs=[历史下拉294,上传295,分离模式297,降噪298] 绑定完好；gradio_client 模拟点击返回 AppError「请先选择源音频」（无源时的正确提示）——后端与绑定均正常。
+- 结论：点击无反馈大概率是浏览器未刷新(旧页面缓存)或未选源音频；已刷新/选源即可。
+- 验证：py_compile 过；pytest 49 passed；i18n 17 通过；重启后 /config 确认按钮绑定与输入映射正确。
+- 未执行：git commit/push（需批准）；真实端到端分离推理。
+
+---
+## 2026-09-24 移除「保存分离轨到库」，分离产物靠文件名区分直接供使用
+
+- 用户澄清：不需要单独的库（音色库/素材库），分离成功都应记录历史，通过文件名区分人声轨直接供使用。
+- app.py：移除分离页「保存分离轨到库」区块（sep_products_state/sep_ref_md/sep_stem_dd/sep_ref_name/sep_save_btn/sep_save_info）；输出产物(sep_files/sep_info)保留在左列；右栏只留「分离任务历史」；sep_btn.click outputs 精简为 [sep_files, sep_info]；on_voice_separate 返回精简为 (files, note)；删除 on_voice_sep_save_ref。
+- i18n.py：删除废词条（### 保存分离轨到库/选择轨道/命名/保存到库/已保存到素材库）；保留 自定义伴奏(可选)/保存到音色库（cover 上传参考仍用）。
+- 说明：分离成功仍自动写历史（含全部轨，依赖 worker 不变）；参考干声「从分离人声选择」已按 separation 记录的 vocals 轨直接选文件（靠文件名/记录），无需手动入库；自定义伴奏(可选)仍从素材库 _voice_stem_choices 选（save_stem/list_stems 函数与测试保留）。
+- 验证：py_compile 过；pytest 49 passed + i18n 17 通过；服务重启探活 200，日志无 Error/Traceback。
+- 未执行：git commit/push（需批准）；真实端到端分离/翻唱推理。
+
+---
+## 2026-09-24 修复前端挂载中断：历史表格消失 + 点击分离无反应
+
+- 用户报告：1) 歌曲历史 10 条表格消失；2) 选生成歌曲点开始分离无反应。
+- 排查（Chrome DevTools 真实浏览器复现）：
+  - 后端 /config 正常（dataframe 242 含 10 行数据、按钮绑定完好、后端日志无任何用户请求——点击根本没到后端）。
+  - 前端 DOM：history-table(Dataframe)、sep-files/cover-files(gr.Files) 及隐藏面板组件均未挂载；console 有 Uncaught(in promise) at handle_mount。
+  - 最小复现 + 二分 + navigate_page initScript 捕获真实错误：SyntaxError: Unexpected token ';' at new AsyncFunction。
+- 根因：Gradio 5.x Blocks 级 js= 会被包装为 await (js)(); 要求「函数表达式」。_LOCALE_SYNC_JS 原为 IIFE (function(){...})();，尾部分号使包装后代码语法错误，在组件挂载流程中抛出并中断后续组件挂载（Dataframe/Files 等丢失）。该 js 为本会话新增（launch css/js 参数报错后移入 Blocks），从未成功执行过。
+- 修复：_LOCALE_SYNC_JS 改为箭头函数表达式 () => {...}，并加注释说明 Gradio js= 禁止 IIFE。
+- 验证：重启后浏览器实测——挂载错误消失；歌曲历史表格恢复（10 行+表头）；分离页输出产物组件恢复；真实点击开始分离 -> 任务 separation_20260924_201805_00b215 入队、worker 懒启动(端口8190)、36.4s 完成；UI 展示 vocals/no_vocals 两轨(各18MB)；history.json 新增 separation 记录含 stems(人声/伴奏)。历史共 27 条。
+- 清理：删除临时诊断文件 _tmp_df_test.py/_tmp_gen_check.py/_tmp_check.js，停掉 9917/9918 复现服务。
+- 未执行：git commit/push（需批准）。
+
+## 2026-09-24 分离/翻唱产物独立目录 + 时间戳命名 + 播放器组
+- 用户需求三点：1) 分离产出单独建文件夹，文件名=时间戳+分离类别；2) 产出后按文件数量显示多个播放器，与其他 Tab 统一组件且有个性化定制；3) 历史 by 文件夹，选中后一组播放器播放并可下载。
+- 产物目录重构（voice_ui_handlers.py `_derived_dir`）：独立目录 `outputs/separations/<ts>_<短id>/`、`outputs/covers/<ts>_<短id>/`；worker.py `_separate/_convert` 产物命名 `<ts>_vocals.wav`、`<ts>_accompaniment.wav`（2轨）/ `<ts>_<类别>.wav`（4轨）、`<ts>_converted_vocals.wav`、`<ts>_cover.flac`；cover 改平铺结构（换嗓临时子目录用后即删）；voice_client.py 两 API 透传 prefix；history.py `_derived_dir_for` 适配新结构并兼容旧 `derived/<kind>_<id>` 形态。
+- 播放器组（app.py）：预建 6 槽 gr.Audio（show_download_button=True），elem_id 为 sep-audio-N / cover-audio-N / sep-history-audio-N / cover-history-audio-N；`_voice_stem_items` 将 stems 转 [(label,path)]（_denoised 追加"已降噪"），`_fill_voice_players` 按数量前 n 可见、其余 visible=False；分离/翻唱回调与历史选中回调均返回整组 update；历史下拉显示名改为文件夹名；移除旧 gr.Files 与"回放轨道"下拉。
+- 个性化定制（static/js/app.js）：PLAYER_IDS 扩充 24 个新播放器 id；initAudioTimeDisplay 选择器覆盖新 elem_id；watchPlayer 改 poll(1s)+boundRoot 重绑，支持 Gradio 显隐切换导致的 DOM 销毁重建；app.py 脚本引用 v=10→v=11（修复浏览器缓存旧 JS 导致 PlayerZoom 不生效）。
+- i18n：删"回放轨道"，增"已降噪"。
+- 验证：pytest 49 passed（--ignore=test_i18n.py）+ test_i18n.py 17 通过；py_compile 全部改动文件通过；浏览器实测——分离任务（源=历史 generation，模式=人声/伴奏）9.7s 完成，磁盘产物 `outputs/separations/20260924_205055_icme/20260924_205055_{vocals,accompaniment}.wav`；产出双播放器 label 人声/伴奏、含下载按钮；历史下拉显示文件夹名，选中新任务后 sep-history-audio-0/1 填充（下载 URL 指向 <ts>_vocals.wav/<ts>_accompaniment.wav）、PlayerZoom 接管（适应宽度/±缩放按钮、时间码 0:00/0:50）、zoomWraps=2；旧记录 sep_x7y2 兼容回放（vocals/no_vocals）；翻唱页布局快照正常。
+- 未执行：git commit/push（需批准）；翻唱端到端真实推理未跑。
+
+## 2026-09-25 翻唱端到端验证 + 修复 tab_cover.select 裸列表报错
+- 用户指令"翻唱一样逻辑"：对翻唱侧按分离侧的三点需求（独立文件夹+时间戳命名/按产物数量多播放器/历史 by 文件夹回放+下载）做端到端验证。
+- 真实翻唱推理：源=历史 generation 20260923_180303_song.wav，参考音色=分离 vocals（翻唱页"从干声历史选择→从分离人声选择"下拉选 20260924_205055_vocals.wav，半音0/扩散30步/无降噪）；任务 cover_20260925_041157_28d794 128.3s 完成。
+- 磁盘产物（需求1 ✓）：`outputs/covers/20260925_041157_urtm/` 下 `20260925_041157_vocals.wav`（分离人声）、`..._accompaniment.wav`（分离伴奏）、`..._converted_vocals.wav`（换嗓干声）、`..._cover.flac`（翻唱成品），平铺+时间戳+类别命名，`_seedvc_tmp` 换嗓临时目录用后已删。
+- UI 产出播放器组（需求2 ✓）：cover-audio-0/1/2/3 按产物数量 4 个挂载（label 翻唱成品/换嗓干声/伴奏/分离人声，含音频+下载按钮），PlayerZoom 接管（zoom 生效）。
+- 历史（需求3 ✓）：下拉显示文件夹名 `20260925_041157_urtm`；被翻唱歌曲下拉自动出现 `cover · 20260925_041157_cover.flac`（cover 记录可作下次翻唱源）；后端回调验证 on_voice_task_history_pick 对 cover 任务返回 6 槽 update（前 4 槽 visible+label+音频路径，含下载）。
+- 修复 bug（app.py L2337-2346）：tab_cover.select 刷新回调返回裸 choices 列表，Gradio 5 将其当作 Dropdown value 赋值导致 `Value not in the list of choices: []` 报错（新增 cover 记录后才暴露）；改为 gr.update(choices=...) 包裹（与分离页 tab_sep.select 一致）。验证修复后切 tab 无报错、下拉正常显示文件夹名。
+- 验证方式补充：浏览器 CDP 无法触发"单选项下拉"的 value 变化 change，改用 Gradio call API（api_name=on_voice_task_history_pick_1，依赖 id 121）直接调用回调验证后端填充逻辑。
+- 服务已重启（端口 9898，v=11 脚本引用不变）。
+- 遗留：临时裁剪文件 `yue2-webui/tmp_ref_vocals.wav`（用于尝试上传参考干声，因浏览器工作区限制未用，待用户确认后删除）。
+
+---
+## 2026-09-25 整体 review 测试（音色工坊）
+- 用户指令"整体review测试一下"：对音色工坊（分离/翻唱）做整体代码审查 + 测试回归。
+- 静态检查：py_compile 全部改动文件通过（app.py / voice-tools/worker.py / src/voice_ui_handlers.py / src/history.py / src/i18n.py 等 7 个）。
+- 测试回归：pytest 49 passed + test_i18n.py 17 通过（-p no:cacheprovider 规避 atexit PermissionError 无害告警）。
+- 子代理代码审查（检查 7 项：播放器组数量恒定、回收安全、prefix 无冲突、watchPlayer 无泄漏等）确认：产物目录/命名/回收/history 兼容旧记录均安全；发现 2 个一般问题并修复。
+- 本轮修复 3 处：
+  1) worker.py `_convert` 失败分支清理——Seed-VC 换嗓失败或未产出时 shutil.rmtree(conv_tmp) 清理临时子目录，避免失败大 wav 堆积污染产物文件夹（L223/232/240/244）；
+  2) app.py `_voice_stem_items` 轨道 label 走 tr 国际化（历史记录 stems 存中文原文，显示时按当前语言翻译；_denoised 追加"已降噪"）；
+  3) i18n.py 补词条：换嗓人声/换嗓干声=Converted vocals、翻唱成品=Cover（L340-341）。
+- 英文界面验证：切 English 后 Gradio call API 调 on_voice_task_history_pick_1 返回 label=Cover/Converted vocals/Accompaniment/Vocals from separation——i18n label 修复生效。
+- 服务已重启（端口 9898），浏览器需强刷加载新脚本。
+- 未执行：git commit/push（需用户批准）；app.py L1079 死代码 products = result.get("products") 未使用（review 发现，仅汇报未清理）；临时文件 yue2-webui/tmp_ref_vocals.wav 待用户确认后删除。
+
+---
+## 2026-09-25 分离/翻唱提交后进度反馈 + 按钮禁用
+- 用户反馈：音轨分离提交后看不出进度（无 gradio 组件显示），按钮应变灰不可点击。
+- 根因：on_voice_separate/on_voice_cover 为同步阻塞回调，仅靠 gr.Progress 弹窗（无细粒度进度值，观感为无反馈），且运行期间按钮仍可点击。
+- 改造（回调式 → 生成器流式）：
+  - voice_ui_handlers.py：`run_in_queue` 重构为生成器 `run_in_queue_stream`——yield 排队（前面还有 N 个任务/正在等待）与执行中（附秒表 `· Ns`，worker 无细粒度进度，用耗时反馈）文案，完成 return 结果 dict；相邻重复文案自动去重。
+  - app.py：两个回调改生成器——提交即清空播放器组 + 按钮禁用（gr.update(interactive=False)）；运行中每条状态流映射为（播放器空更新 + 进度文案到 sep_info/cover_info + 按钮保持禁用）；完成/失败均恢复按钮，失败先 yield 失败文案再向上抛（Gradio 弹错误）；新增 `_voice_running_outputs` 辅助；按钮绑定 outputs 追加按钮自身（sep_btn/cover_btn）。顺带移除翻唱回调中未使用的死代码 `products = result.get("products")`。
+  - i18n 无新增（复用 排队中.../正在等待.../执行中.../任务失败/分离完成/翻唱完成/写入历史 等现有词条）。
+- 测试（先写测试后实现）：tests/test_voice_handlers.py 新增 _FakeStreamTask/_FakeQueueManager/_drain_stream 与 2 个用例——stream 进度文案（排队/执行/秒表）+ 结果 return + 入参透传；FAILED 状态抛 RuntimeError 含错误信息。pytest 51 passed（含新增 2）+ i18n 17 通过。
+- 浏览器端到端验证（English 界面）：点击 Start separator 后按钮 disabled=true，info 实时显示 "Separate stems · Running... · 9s" 秒表推进；10.3s 完成后按钮恢复、显示 "Separation done · Saved to history"，sep-audio-0/1 挂载并填充 20260925_083325_vocals.wav / _accompaniment.wav（label Vocals/Accompaniment）。服务日志无错误。
+- 服务已重启（端口 9898，job-2a6c4a935bda4abd9209da5d605332d8），浏览器需强刷。
+- 未执行：git commit/push（需用户批准）；翻唱侧真实推理验证（生成器逻辑与分离侧完全对称，单测已覆盖）。

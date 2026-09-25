@@ -2,11 +2,13 @@
 """voice_ui_handlers 单元测试（mock voice_client，不触发真实 worker/进程）。
 
 验证点：
-1. separate_worker：产物目录聚合到 outputs/<root>/derived/sep_XXXX，写入 history 记录
-2. cover_worker：cover 记录写入，root_task_id/derived_from 正确
+1. separate_worker：产物落独立文件夹 outputs/separations/<时间戳>_<短id>/，写入 history 记录；
+   时间戳前缀传给 worker（产物命名 <时间戳>_<类别>.wav），返回 dict 含 stems
+2. cover_worker：cover 记录写入 outputs/covers/...，root_task_id/derived_from 正确
 3. 分离失败时（ok=False）抛 RuntimeError，不写历史
 4. 音色库 save_ref/list_refs 正常落盘与列出
 5. 短 id 唯一性/长度基本约束
+6. run_in_queue_stream（生成器版队列提交）：yield 排队/执行进度文案并 return 结果；失败抛错
 """
 
 import sys
@@ -17,9 +19,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from voice_ui_handlers import VoiceHandlers, new_short_id  # noqa: E402
+import voice_ui_handlers  # noqa: E402  供 monkeypatch 替换模块级 queue_manager
+from voice_ui_handlers import VoiceHandlers, new_short_id, detect_voice, _voice_score  # noqa: E402
 from history import HistoryManager  # noqa: E402
-from queue_manager import TaskType  # noqa: E402
+from queue_manager import TaskType, TaskStatus  # noqa: E402
 
 
 class _FakeResult:
@@ -72,18 +75,26 @@ def test_separate_worker_writes_history(tmp_path):
     t = _FakeTask("sep001")
     Path(tmp_path / "vocals.wav").write_bytes(b"\x00")
     out = h.separate_worker(t, source="a.wav", mode="2", root_task_id="root_task")
-    # 产物目录聚合在 derived/sep_xxxx 下
-    derived = Path(tmp_path / "yue2-webui" / "outputs" / "root_task" / "derived")
-    assert derived.is_dir()
-    assert (derived / "sep_") in [p.parent for p in derived.rglob("*")] or any(
-        p.is_dir() and p.name.startswith("sep_") for p in derived.iterdir())
-    # 历史记录写入
+    # 产物落独立文件夹 outputs/separations/<时间戳>_<短id>/
+    seps = tmp_path / "yue2-webui" / "outputs" / "separations"
+    assert seps.is_dir() and any(p.is_dir() for p in seps.iterdir())
+    # 历史记录写入，output_dir 指向该独立文件夹
     recs = h.history_mgr.list_all()
     assert len(recs) == 1
     assert recs[0].record_type == "separation"
     assert recs[0].root_task_id == "root_task"
     assert recs[0].derived_from == "root_task"
     assert recs[0].audio_path.endswith("vocals.wav")
+    # output_dir 为相对 webui_root 的路径，指向独立产物文件夹
+    assert (tmp_path / "yue2-webui" / recs[0].output_dir).is_dir()
+    # 时间戳前缀传给 worker（产物命名 <时间戳>_<类别>.wav），目录名与之对齐
+    call = vc.calls[0]
+    assert call[0] == "separate"
+    prefix = call[2].get("prefix", "")
+    assert len(prefix) == 15 and prefix[8] == "_"  # 形如 20260924_201805
+    assert prefix in Path(recs[0].output_dir).name
+    # 返回 dict 含 stems（供 UI 播放器组填充）
+    assert out["stems"] and out["stems"][0]["type"] == "vocals"
 
 
 def test_cover_worker_writes_history(tmp_path):
@@ -102,9 +113,14 @@ def test_cover_worker_writes_history(tmp_path):
     assert recs[0].root_task_id == "gen_root"
     # 配音至 cover 产物
     assert recs[0].audio_path.endswith("cover.flac")
-    # 短 id 聚合目录
-    derived = Path(tmp_path / "yue2-webui" / "outputs" / "gen_root" / "derived")
-    assert any(p.is_dir() and p.name.startswith("cover_") for p in derived.iterdir())
+    # 产物落独立文件夹 outputs/covers/<时间戳>_<短id>/，时间戳前缀传给 worker
+    covers = tmp_path / "yue2-webui" / "outputs" / "covers"
+    assert covers.is_dir() and any(p.is_dir() for p in covers.iterdir())
+    call = vc.calls[0]
+    assert call[0] == "convert"
+    prefix = call[2].get("prefix", "")
+    assert prefix and prefix in Path(recs[0].output_dir).name
+    assert out["stems"]
 
 
 def test_separate_failure_raises(tmp_path):
@@ -163,3 +179,107 @@ def test_stems_list_fallback_for_legacy_name(tmp_path):
     legacy.write_bytes(b"\x00")
     stems = h.list_stems()
     assert stems == [("legacy_track", "other", str(legacy))]
+
+
+# ---------------------------------------------------------------- 生成器版队列提交（run_in_queue_stream）
+class _FakeStreamTask(_FakeTask):
+    """带 result 与 drain_progress 的假任务（供 run_in_queue_stream 消费）。"""
+    def __init__(self, tid, result=None):
+        super().__init__(tid)
+        self.result = result
+
+    def drain_progress(self):
+        return []
+
+
+class _FakeQueueManager:
+    """假队列管理器：submit 记录入参并返回预置任务；get_status 按序列吐状态，耗尽后 COMPLETED。"""
+    def __init__(self, statuses, task):
+        self._statuses = list(statuses)
+        self.task = task
+        self.submitted = None
+
+    def submit(self, task_type, func, cancel_event=None, **kwargs):
+        self.submitted = (task_type, kwargs)
+        return self.task
+
+    def get_status(self, t):
+        if self._statuses:
+            return self._statuses.pop(0)
+        return {"status": TaskStatus.COMPLETED, "position": -1}
+
+
+def _drain_stream(gen):
+    """消费生成器到结束，返回 (yield 文案列表, return 值)。"""
+    texts = []
+    while True:
+        try:
+            texts.append(next(gen))
+        except StopIteration as stop:
+            return texts, stop.value
+
+
+def test_run_in_queue_stream_progress_and_result(tmp_path, monkeypatch):
+    """生成器版队列提交：yield 排队→执行文案（含秒表），return worker 结果；入参透传。"""
+    vc = _FakeVoiceClient()
+    h = _make_handlers(tmp_path, vc)
+    task = _FakeStreamTask("q1", result={"stems": ["x"]})
+    fq = _FakeQueueManager(
+        [{"status": TaskStatus.QUEUED, "position": 2},   # 前面还有 1 个任务
+         {"status": TaskStatus.RUNNING, "position": 0},
+         {"status": TaskStatus.RUNNING, "position": 0}],  # 秒表推进（同文案去重）
+        task)
+    monkeypatch.setattr(voice_ui_handlers, "queue_manager", fq)
+    monkeypatch.setattr(voice_ui_handlers.time, "sleep", lambda s: None)  # 提速：跳过轮询等待
+    texts, result = _drain_stream(h.run_in_queue_stream(
+        TaskType.SEPARATION, h.separate_worker, "zh", lambda l, s: s, "音轨分离",
+        source="a.wav", mode="2"))
+    # 排队与执行文案均有产出
+    assert any("前面还有 1 个" in t for t in texts)
+    assert any("执行中" in t for t in texts)
+    # worker 入参透传（source）
+    assert fq.submitted[1]["source"] == "a.wav"
+    # return 携带 worker 结果
+    assert result == {"stems": ["x"]}
+
+
+def test_run_in_queue_stream_failure_raises(tmp_path, monkeypatch):
+    """任务失败：get_status 返回 FAILED 时抛 RuntimeError（含错误信息）。"""
+    vc = _FakeVoiceClient()
+    h = _make_handlers(tmp_path, vc)
+    task = _FakeStreamTask("q2")
+    fq = _FakeQueueManager([{"status": TaskStatus.FAILED, "position": -1, "error": "boom"}], task)
+    monkeypatch.setattr(voice_ui_handlers, "queue_manager", fq)
+    gen = h.run_in_queue_stream(
+        TaskType.SEPARATION, h.separate_worker, "zh", lambda l, s: s, "音轨分离",
+        source="a.wav", mode="2")
+    with pytest.raises(RuntimeError, match="boom"):
+        for _ in gen:
+            pass
+
+
+# ---------------------------------------------------------------- 轻量人声检测（方案B）
+def test_voice_score_harmonic_is_voice():
+    """谐波丰富的人声样信号（150Hz 基频 + 谐波）应判定为人声。"""
+    import numpy as np
+    sr = 16000
+    t = np.arange(sr * 2) / sr  # 2 秒
+    x = (0.5 * np.sin(2 * np.pi * 150 * t)
+         + 0.3 * np.sin(2 * np.pi * 300 * t)
+         + 0.2 * np.sin(2 * np.pi * 450 * t))
+    ok, score = _voice_score(x.astype(np.float32), sr)
+    assert ok is True and score > 0.5
+
+
+def test_voice_score_white_noise_not_voice():
+    """白噪声（能量分散、谱平坦）应判定为非人声。"""
+    import numpy as np
+    rng = np.random.default_rng(42)
+    x = rng.standard_normal(16000 * 2).astype(np.float32) * 0.3
+    ok, score = _voice_score(x, 16000)
+    assert ok is False and score < 0.5
+
+
+def test_detect_voice_missing_file():
+    """文件不存在返回 None（不判定、不抛异常）。"""
+    assert detect_voice(str(Path("Z:/no/such/file.wav"))) is None

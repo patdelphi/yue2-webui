@@ -25,9 +25,11 @@ def check(name, cond):
 check("tr-unknown-zh", tr("zh", "@@NO_SUCH_KEY@@") == "@@NO_SUCH_KEY@@")
 check("tr-unknown-en", tr("en", "@@NO_SUCH_KEY@@") == "@@NO_SUCH_KEY@@")
 
-# 2) tr 双语已知词条
-check("tr-zh-创作", tr("zh", "创作") == "创作")
-check("tr-en-创作", tr("en", "创作") == "Create")
+# 2) tr 双语已知词条（Tab 改名后：歌曲创作/歌曲历史/系统设置）
+check("tr-zh-歌曲创作", tr("zh", "歌曲创作") == "歌曲创作")
+check("tr-en-歌曲创作", tr("en", "歌曲创作") == "Song Creation")
+check("tr-en-歌曲历史", tr("en", "歌曲历史") == "Song History")
+check("tr-en-系统设置", tr("en", "系统设置") == "System Settings")
 
 # 3) normalize_lang 多种输入归一
 check("norm-zh", normalize_lang("zh") == "zh")

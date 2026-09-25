@@ -9,8 +9,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from queue_manager import queue_manager, TaskType, TaskStatus, TaskCancelledError
 
 
-def test_task(_task, duration, name):
-    """Simulate a task that takes time."""
+def task_worker(_task, duration, name):
+    """Simulate a task that takes time.（工作回调，非测试，避免 pytest 误收集）"""
     print(f"[{name}] Starting...")
     for i in range(int(duration)):
         if _task.cancel_event.is_set():
@@ -40,17 +40,17 @@ def test_queue():
     print("=== Testing Queue Manager ===\n")
     
     # Submit 3 tasks
-    task1 = queue_manager.submit(TaskType.GENERATION, test_task, duration=3, name="Task1")
+    task1 = queue_manager.submit(TaskType.GENERATION, task_worker, duration=3, name="Task1")
     print(f"Submitted {task1.task_id}")
     
     time.sleep(0.5)
     
-    task2 = queue_manager.submit(TaskType.TRANSCRIPTION, test_task, duration=2, name="Task2")
+    task2 = queue_manager.submit(TaskType.TRANSCRIPTION, task_worker, duration=2, name="Task2")
     print(f"Submitted {task2.task_id}")
     
     time.sleep(0.5)
     
-    task3 = queue_manager.submit(TaskType.GENERATION, test_task, duration=2, name="Task3")
+    task3 = queue_manager.submit(TaskType.GENERATION, task_worker, duration=2, name="Task3")
     print(f"Submitted {task3.task_id}")
     
     print("\n=== Queue Info ===")
@@ -104,8 +104,8 @@ def test_cancel_running():
 def test_cancel_queued():
     """Cancel a task while it is still queued behind a running one."""
     print("=== Testing cancel of queued task ===\n")
-    blocker = queue_manager.submit(TaskType.GENERATION, test_task, duration=4, name="Blocker")
-    queued = queue_manager.submit(TaskType.TRANSCRIPTION, test_task, duration=2, name="Queued")
+    blocker = queue_manager.submit(TaskType.GENERATION, task_worker, duration=4, name="Blocker")
+    queued = queue_manager.submit(TaskType.TRANSCRIPTION, task_worker, duration=2, name="Queued")
     time.sleep(0.5)
     ok = queue_manager.cancel_task_by_id(queued.task_id)
     print(f"cancel_task_by_id returned: {ok}")
@@ -151,8 +151,8 @@ def test_failed():
 def test_queue_snapshot():
     """get_queue_snapshot：运行中/排队/最近历史三段快照（进度只读不清空 drain 流）。"""
     print("=== Testing queue snapshot ===\n")
-    t1 = queue_manager.submit(TaskType.GENERATION, test_task, duration=1, name="Snap1")
-    t2 = queue_manager.submit(TaskType.TRANSCRIPTION, test_task, duration=0.6, name="Snap2")
+    t1 = queue_manager.submit(TaskType.GENERATION, task_worker, duration=1, name="Snap1")
+    t2 = queue_manager.submit(TaskType.TRANSCRIPTION, task_worker, duration=0.6, name="Snap2")
     time.sleep(0.4)  # t1 运行中、t2 排队
 
     snap = queue_manager.get_queue_snapshot()
@@ -187,3 +187,4 @@ if __name__ == "__main__":
     test_failed()
     test_queue_snapshot()
     print("=== All queue manager tests passed ===")
+

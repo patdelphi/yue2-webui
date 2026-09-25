@@ -202,21 +202,68 @@ class VoiceClient:
             return VoiceResult(ok=False, error=f"音色工坊任务异常: {e}")
 
     # ---------------------------------------------------------------- 业务接口
-    def separate(self, input_path: str, mode: str = "2", output_dir: str = "") -> VoiceResult:
-        """音轨分离。mode: 2=双轨 4=四轨。返回产物路径字典。"""
+    def separate(self, input_path: str, mode: str = "2", output_dir: str = "",
+                 denoise: bool = False, prefix: str = "") -> VoiceResult:
+        """音轨分离。mode: 2=双轨 4=四轨。denoise=True 时对输出人声降噪。返回产物路径字典。
+
+        prefix（时间戳前缀）传给 worker，产物命名 <prefix>_<类别>.wav（可空回退短名）。
+        参数强校验：mode/denoise 入口即做类型归一，非法值回退默认并记录警告，及早报错，
+        不依赖 worker 兜底（约束：JSON 字段易出现字符串/空值）。
+        """
+        # mode 强校验：仅接受 "2"/"4"（兼容去空白），其余回退 "2" 并告警
+        try:
+            m = str(mode).strip() if mode is not None else "2"
+        except Exception:
+            m = "2"
+        if m not in ("2", "4"):
+            logger.warning(f"separate: mode='{mode}' 非法，回退为 '2'")
+            m = "2"
+        # denoise 强校验：仅真值视为 True
+        try:
+            d = bool(denoise) and str(denoise).strip().lower() not in ("", "0", "false", "no", "off")
+        except Exception:
+            d = False
         return self._run("/api/separate", {
-            "input": str(input_path), "mode": mode, "output_dir": str(output_dir),
+            "input": str(input_path), "mode": m, "output_dir": str(output_dir),
+            "denoise": d, "denoise_strength": self._load_cfg().get("denoise_strength"),
+            "prefix": str(prefix or ""),
         })
 
     def convert(self, source: str, ref: str, semi_tone: int = 0,
                 diffusion_steps: int = 30, accompaniment: str = "",
-                gain_db: float = 0.0, output_dir: str = "") -> VoiceResult:
-        """参考音色翻唱。source=换嗓人声来源, ref=参考干声, accompaniment=伴奏。"""
+                gain_db: float = 0.0, output_dir: str = "",
+                denoise: bool = False, prefix: str = "") -> VoiceResult:
+        """参考音色翻唱。source=换嗓人声来源, ref=参考干声, accompaniment=伴奏。denoise=True 时对换嗓人声降噪。
+
+        prefix（时间戳前缀）传给 worker，全部产物平铺 output_dir 并命名 <prefix>_<类别>（可空回退短名）。
+        """
+        # 数值入参强校验：非法（含 None/空串/非数字）回退默认并告警，避免 worker 端崩溃
+        def _int_or(v, default):
+            try:
+                return int(str(v).strip() or default)
+            except (TypeError, ValueError):
+                logger.warning(f"convert: 数值入参 '{v}' 非法，回退为 {default}")
+                return default
+
+        def _float_or(v, default):
+            try:
+                return float(str(v).strip() or default)
+            except (TypeError, ValueError):
+                logger.warning(f"convert: 数值入参 '{v}' 非法，回退为 {default}")
+                return default
+
+        try:
+            den = bool(denoise) and str(denoise).strip().lower() not in ("", "0", "false", "no", "off")
+        except Exception:
+            den = False
         return self._run("/api/convert", {
             "source": str(source), "ref": str(ref),
-            "semi_tone": int(semi_tone), "diffusion_steps": int(diffusion_steps),
-            "accompaniment": str(accompaniment), "gain_db": float(gain_db),
-            "output_dir": str(output_dir),
+            "semi_tone": _int_or(semi_tone, 0),
+            "diffusion_steps": _int_or(diffusion_steps, 30),
+            "accompaniment": str(accompaniment), "gain_db": _float_or(gain_db, 0.0),
+            "output_dir": str(output_dir), "denoise": den,
+            "denoise_strength": self._load_cfg().get("denoise_strength"),
+            "prefix": str(prefix or ""),
         })
 
 

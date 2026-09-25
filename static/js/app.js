@@ -729,12 +729,15 @@
             initGenLyricSync();
 
             function initAudioTimeDisplay() {
+                // 覆盖所有波形播放器：主播放器（gen/history）+ 音色工坊播放器组
+                // （分离/翻唱产出 sep-audio-*/cover-audio-* 与任务历史回放 sep/cover-history-audio-*）
+                var SEL = '#gen-audio, #history-audio, [id^="sep-audio-"], [id^="cover-audio-"], [id^="sep-history-audio-"], [id^="cover-history-audio-"]';
                 var style = document.createElement('style');
-                style.textContent = '#gen-audio, #history-audio { overflow: visible !important; }' +
-                    '#gen-audio .component-wrapper, #history-audio .component-wrapper { overflow: visible !important; }' +
-                    '#gen-audio .waveform-container, #history-audio .waveform-container { overflow: visible !important; }' +
-                    '#gen-audio .timestamps, #history-audio .timestamps { visibility: visible !important; opacity: 1 !important; font-size: 15px !important; font-weight: bold !important; color: #fff !important; font-family: monospace !important; letter-spacing: 0.5px !important; text-shadow: 0 2px 4px rgba(0,0,0,0.5) !important; padding: 4px 12px !important; background: rgba(0,0,0,0.7) !important; border-radius: 4px !important; display: flex !important; justify-content: space-between !important; align-items: center !important; margin-top: 12px !important; width: 100% !important; box-sizing: border-box !important; }' +
-                    '#gen-audio .timestamps time, #history-audio .timestamps time { color: #4ade80 !important; font-size: 15px !important; }';
+                style.textContent = SEL + ' { overflow: visible !important; }' +
+                    SEL + ' .component-wrapper { overflow: visible !important; }' +
+                    SEL + ' .waveform-container { overflow: visible !important; }' +
+                    SEL + ' .timestamps { visibility: visible !important; opacity: 1 !important; font-size: 15px !important; font-weight: bold !important; color: #fff !important; font-family: monospace !important; letter-spacing: 0.5px !important; text-shadow: 0 2px 4px rgba(0,0,0,0.5) !important; padding: 4px 12px !important; background: rgba(0,0,0,0.7) !important; border-radius: 4px !important; display: flex !important; justify-content: space-between !important; align-items: center !important; margin-top: 12px !important; width: 100% !important; box-sizing: border-box !important; }' +
+                    SEL + ' .timestamps time { color: #4ade80 !important; font-size: 15px !important; }';
                 document.head.appendChild(style);
             }
             initAudioTimeDisplay();
@@ -745,7 +748,12 @@
                     return;
                 }
 
+                // 主播放器 + 音色工坊播放器组（固定槽位按 elem_id 前缀收集，
+                // 组件初始隐藏/按需显隐，由 watchPlayer 轮询接管）
                 var PLAYER_IDS = ['gen-audio', 'history-audio'];
+                ['sep-audio-', 'cover-audio-', 'sep-history-audio-', 'cover-history-audio-'].forEach(function(prefix) {
+                    for (var i = 0; i < 6; i++) PLAYER_IDS.push(prefix + i);
+                });
                 var STEPS = [0, 1, 2, 5, 10, 20, 40, 80, 160];
                 var DEFAULT_STEP = 0;
 
@@ -772,14 +780,9 @@
                 }
 
                 function watchPlayer(rootId) {
-                    var root = document.getElementById(rootId);
-                    if (!root) {
-                        setTimeout(function() { watchPlayer(rootId); }, 1000);
-                        return;
-                    }
-
                     var st = null; // active instance state
                     var mutating = false;
+                    var boundRoot = null; // 当前绑定的组件根（Gradio 显隐切换会销毁重建 DOM，需重绑）
 
                     function teardown() {
                         if (!st) return;
@@ -792,8 +795,10 @@
                             st.wrapEl.parentNode.removeChild(st.wrapEl);
                             mutating = false;
                         }
-                        var orig = root.querySelector('.waveform-container');
-                        if (orig) orig.classList.remove('yz-hidden');
+                        if (boundRoot) {
+                            var orig = boundRoot.querySelector('.waveform-container');
+                            if (orig) orig.classList.remove('yz-hidden');
+                        }
                         st = null;
                     }
 
@@ -809,9 +814,9 @@
                     }
 
                     function tryInit() {
-                        if (st) return;
-                        var container = root.querySelector('.waveform-container');
-                        var audioEl = getShadowAudio(root);
+                        if (st || !boundRoot) return;
+                        var container = boundRoot.querySelector('.waveform-container');
+                        var audioEl = getShadowAudio(boundRoot);
                         if (!container || !audioEl) return;
 
                         st = { ws: null, wrapEl: null, waveEl: null, labelEl: null,
@@ -887,7 +892,7 @@
                         }
 
                         st.ws.on('ready', function() {
-                            var orig = root.querySelector('.waveform-container');
+                            var orig = boundRoot.querySelector('.waveform-container');
                             if (orig) orig.classList.add('yz-hidden');
                             applyZoom();
                         });
@@ -906,10 +911,10 @@
                     }
 
                     var observer = new MutationObserver(function() {
-                        if (mutating) return;
-                        var audioNow = getShadowAudio(root);
+                        if (mutating || !boundRoot) return;
+                        var audioNow = getShadowAudio(boundRoot);
                         if (st) {
-                            if (audioNow !== st.audioEl || !root.contains(st.wrapEl)) {
+                            if (audioNow !== st.audioEl || !boundRoot.contains(st.wrapEl)) {
                                 teardown();
                                 tryInit();
                             }
@@ -917,9 +922,22 @@
                             tryInit();
                         }
                     });
-                    observer.observe(root, { childList: true, subtree: true });
 
-                    tryInit();
+                    // 轮询：组件根出现/销毁重建（Gradio 显隐切换）时重绑 observer 并重新初始化
+                    function poll() {
+                        var root = document.getElementById(rootId);
+                        if (root !== boundRoot) {
+                            observer.disconnect();
+                            boundRoot = root;
+                            if (st) teardown(); // 旧实例随旧 DOM 失效
+                            if (boundRoot) {
+                                observer.observe(boundRoot, { childList: true, subtree: true });
+                                tryInit();
+                            }
+                        }
+                        setTimeout(poll, 1000);
+                    }
+                    poll();
                 }
 
                 PLAYER_IDS.forEach(watchPlayer);

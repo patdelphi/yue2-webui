@@ -18,6 +18,13 @@ DEFAULT_VOICE_CONFIG = {
     "worker_port": "8190",      # worker 起始端口，被占用时自动 +1 重试
     "seedvc_dir": "",           # Seed-VC 源码目录（空 = 未安装，UI 显示安装指引）
     "max_input_minutes": "8",   # 输入音频时长上限（分钟），超限拒绝并提示
+    # --- 音色工坊算法参数（空/缺省时回退默认） ---
+    "denoise_strength": "",     # ffmpeg anlmdn 降噪强度（s= 参数）；空 = 用 ffmpeg 默认
+    "voice_detect_threshold": "0.5",    # 人声检测判定阈值
+    "detect_sample_rate": "16000",      # 人声检测采样率（Hz）
+    "detect_frame_len": "2048",         # 人声检测帧长（点）
+    "voice_band": "80-1000",            # 人声频带（Hz），格式 "低-高"
+    "detect_seconds": "30",             # 人声检测最长时长（秒）
 }
 
 
@@ -25,6 +32,9 @@ def load_voice_config(project_root: Path) -> dict:
     """读取 config.cfg 的 [voice] 段，返回语音工具配置。
 
     返回键: enabled(bool) / worker_port(int) / seedvc_dir(Path|None) / max_input_minutes(int)
+            denoise_strength(float|None) / voice_detect_threshold(float)
+            detect_sample_rate(int) / detect_frame_len(int) / voice_band((int,int))
+            detect_seconds(float)
     """
     cfg_path = Path(project_root) / "yue2-webui" / "config.cfg"
     values = dict(DEFAULT_VOICE_CONFIG)
@@ -55,6 +65,24 @@ def _normalize_values(values: dict, project_root: Path) -> dict:
         except (TypeError, ValueError):
             return default
 
+    def _float(v: str, default: float) -> float:
+        try:
+            return float(str(v).strip())
+        except (TypeError, ValueError):
+            return default
+
+    def _band(v: str) -> tuple:
+        # 解析 "低-高" 频带；lo>hi 时交换（避免 band_mask 为空致 voice_ratio 恒 0），
+        # 缺失/非法时回退默认 (80, 1000)
+        try:
+            lo, hi = str(v).strip().split("-")
+            lo, hi = int(float(lo)), int(float(hi))
+            if lo > hi:
+                lo, hi = hi, lo
+            return (lo, hi)
+        except (ValueError, TypeError):
+            return (80, 1000)
+
     seedvc_raw = str(values["seedvc_dir"] or "").strip()
     seedvc_dir: Union[Path, None] = None
     if seedvc_raw:
@@ -65,9 +93,19 @@ def _normalize_values(values: dict, project_root: Path) -> dict:
         if p.is_dir():
             seedvc_dir = p
 
+    # 降噪强度：空串（默认）表示为 None，由 worker 使用 ffmpeg anlmdn 默认值
+    dn = str(values["denoise_strength"] or "").strip() or ""
+    denoise_strength = _float(dn, None) if dn else None
+
     return {
         "enabled": _bool(values["enabled"]),
         "worker_port": _int(values["worker_port"], 8190),
         "seedvc_dir": seedvc_dir,
         "max_input_minutes": _int(values["max_input_minutes"], 8),
+        "denoise_strength": denoise_strength,
+        "voice_detect_threshold": _float(values["voice_detect_threshold"], 0.5),
+        "detect_sample_rate": _int(values["detect_sample_rate"], 16000),
+        "detect_frame_len": _int(values["detect_frame_len"], 2048),
+        "voice_band": _band(values["voice_band"]),
+        "detect_seconds": _float(values["detect_seconds"], 30.0),
     }

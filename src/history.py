@@ -126,15 +126,29 @@ class HistoryManager:
             self._entries = []
 
     def prune_missing(self) -> int:
-        """Drop entries whose audio file no longer exists on disk."""
+        """Drop entries whose audio file no longer exists on disk.
+
+        【副轨保留】判定不再只凭 audio_path 是否存在：若记录含 stems（音色工坊分离/翻唱
+        各轨）且任一 stem 文件仍存在于磁盘，即便主轨丢失也保留该记录，避免整条误删。
+        既无 audio_path 也无任何可用的 stem 时，才视为缺失并删除。
+        """
         with self._lock:
             kept = []
             removed = 0
             for e in self._entries:
+                # 主轨存在 -> 保留
                 if e.audio_path and Path(e.audio_path).exists():
                     kept.append(e)
-                else:
-                    removed += 1
+                    continue
+                # 主轨缺失但任一副轨仍在 -> 保留（副轨记录仍有回放价值）
+                stems = getattr(e, "stems", None) or []
+                if any(
+                    Path(s.get("path", "")).exists()
+                    for s in stems if isinstance(s, dict) and s.get("path")
+                ):
+                    kept.append(e)
+                    continue
+                removed += 1
             if removed:
                 self._entries = kept
                 self._save()
@@ -188,6 +202,75 @@ class HistoryManager:
             self._save()
             return True
 
+    def _derived_dir_for(self, entry) -> Optional[Path]:
+        """返回音色工坊记录专属的产物目录绝对路径，非专属（不可安全回收）时返回 None。
+
+        安全判定（避免误删共享目录／他人文件）：
+        - 仅 separation/cover 记录才可能产生专属产物目录；
+        - 新结构：output_dir 指向 outputs/separations/<dir> 或 outputs/covers/<dir>
+          （独立产物文件夹，整目录属于该记录）；
+        - 旧结构兼容：output_dir 指向 outputs/<root>/derived/<kind>_<shortid>
+          （派生目录名与记录类型匹配：separation->sep，cover->cover）；
+        - 该目录必须位于本 outputs_root 之下。满足才认为可整目录回收。
+        """
+        if getattr(entry, "record_type", "") not in ("separation", "cover"):
+            return None
+        if not getattr(entry, "output_dir", ""):
+            return None
+        # output_dir 为相对 webui_root（=outputs_root.parent）的路径
+        out_abs = (self.outputs_root.parent / entry.output_dir)
+        try:
+            out_abs = out_abs.resolve()
+        except OSError:
+            return None
+        # 必须位于 outputs_root 下
+        try:
+            rel = out_abs.relative_to(self.outputs_root)
+        except ValueError:
+            return None
+        # 新结构：outputs/<separations|covers>/<dir>（两段，独立产物文件夹）
+        kind_dir = "separations" if entry.record_type == "separation" else "covers"
+        if len(rel.parts) == 2 and rel.parts[0] == kind_dir:
+            if out_abs.is_dir():
+                return out_abs
+            return None
+        # 旧结构兼容：outputs/<root>/derived/<kind>_<xxx>（历史存量记录仍可整目录回收）
+        if len(rel.parts) >= 3 and rel.parts[-3] == "derived":
+            kind = "sep" if entry.record_type == "separation" else "cover"
+            dname = rel.parts[-2]  # 派生目录名
+            if not dname.startswith(f"{kind}_"):
+                return None
+            if out_abs.is_dir():
+                return out_abs
+        return None
+
+    def _recycle_derived(self, entry) -> int:
+        """整目录回收音色工坊记录专属的 derived 子目录，返回删除文件数。
+
+        对比逐文件 _files_for：覆盖 derived 内散落但未登记在 stems 的中间产物
+        （denoise 孤儿轨、换嗓中间文件等），避免目录无限堆积。
+        约束（项目要求）：不以 rm 直接删目录 —— 先逐个删除内部文件（移回收站），
+        再从最深到最浅 rmdir 空目录；中间任一非空目录 rmdir 失败则无害跳过。
+        """
+        out_abs = self._derived_dir_for(entry)
+        if out_abs is None:
+            return 0
+        files = [p for p in out_abs.rglob("*") if p.is_file()]
+        removed = delete_files_to_recycle(files)
+        # 自底向上删除变为空目录；非空目录 rmdir 会失败，天然避免误删他人文件
+        dirs = sorted((p for p in out_abs.rglob("*") if p.is_dir()),
+                      key=lambda p: len(p.parts), reverse=True)
+        for d in dirs:
+            try:
+                d.rmdir()
+            except OSError:
+                pass
+        try:
+            out_abs.rmdir()
+        except OSError:
+            pass
+        return removed
+
     def _files_for(self, entry) -> list:
         """收集一条记录关联的产出文件（音频 / MP3 / 乐谱 / 歌词 / 元数据）。"""
         files = []
@@ -213,13 +296,18 @@ class HistoryManager:
         return files
 
     def delete(self, task_id: str) -> bool:
-        """删除一条历史记录及其产出文件（文件级删除，移入系统回收站）。"""
+        """删除一条历史记录及其产出文件（文件级删除，移入系统回收站）。
+
+        separation/cover 记录在逐文件回收后，再整目录回收其专属 derived 子目录，
+        兜底清理未登记在 stems 的孤儿中间文件（denoise 轨、换嗓中间文件等）。
+        """
         with self._lock:
             entry = self.get(task_id)
             if not entry:
                 return False
 
             delete_files_to_recycle(self._files_for(entry))
+            self._recycle_derived(entry)
 
             self._entries = [e for e in self._entries if e.task_id != task_id]
             self._save()
@@ -230,6 +318,7 @@ class HistoryManager:
         with self._lock:
             for entry in self._entries:
                 delete_files_to_recycle(self._files_for(entry))
+                self._recycle_derived(entry)
             self._entries = []
             self._save()
 
@@ -244,6 +333,7 @@ class HistoryManager:
 
             for entry in to_remove:
                 delete_files_to_recycle(self._files_for(entry))
+                self._recycle_derived(entry)
 
             self._save()
 

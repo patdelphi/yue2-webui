@@ -34,7 +34,7 @@ from postprocess import postprocess_audio
 from queue_manager import queue_manager, TaskType, TaskStatus, TaskCancelledError
 from i18n import tr, normalize_lang
 from voice_client import VoiceClient
-from voice_ui_handlers import VoiceHandlers
+from voice_ui_handlers import VoiceHandlers, detect_voice
 
 PROJECT_ROOT = Path(__file__).parent.parent
 WEBUI_ROOT = PROJECT_ROOT / "yue2-webui"
@@ -889,16 +889,85 @@ def _voice_source_history_choices(lang="zh", limit=50):
     return choices
 
 
-def _voice_dry_history_choices(lang="zh", limit=50):
-    """生成「从干声历史选择」下拉：仅列人声分离产出的人声干声记录。"""
+def _voice_dry_sep_choices(lang="zh", limit=50):
+    """干声来源1：分离历史记录的人声干声（separation 记录的 audio_path 即 vocals 轨）。"""
     choices = []
     for rec in history_mgr.list_all():
         if rec.audio_path and Path(rec.audio_path).exists() \
                 and rec.record_type == "separation":
-            choices.append((f"separation · {Path(rec.audio_path).name}", rec.audio_path))
+            choices.append((f"{Path(rec.audio_path).name}", rec.audio_path))
         if len(choices) >= limit:
             break
     return choices
+
+
+def _voice_dry_upload_choices(lang="zh", limit=50):
+    """干声来源2：上传并验证为干音的留存。"""
+    return [(f"上传 · {Path(p).name}", p) for p in voice_handlers.list_dry_uploads()[:limit]]
+
+
+def _voice_task_history_choices(record_type, lang="zh", limit=50):
+    """按类型列出任务历史（separation/cover），value=task_id，用于 Tab 内选择回放。
+
+    显示名取产物文件夹名（新记录含时间戳，按文件夹辨识任务）。
+    """
+    choices = []
+    for rec in history_mgr.list_all():
+        if rec.record_type == record_type and rec.audio_path \
+                and Path(rec.audio_path).exists():
+            folder = Path(rec.output_dir).name if rec.output_dir else Path(rec.audio_path).stem
+            choices.append((folder, rec.task_id))
+        if len(choices) >= limit:
+            break
+    return choices
+
+
+# 音色工坊播放器组槽位数：分离最多 4 轨（+降噪变体）、翻唱 4 产物，取 6 留余量
+VOICE_PLAYER_COUNT = 6
+
+
+def _voice_stem_items(stems):
+    """把记录/产物的 stems 列表转为 [(label, path)]，仅收录磁盘存在的轨。
+
+    降噪轨（文件名含 _denoised）在标签上追加"已降噪"标识，便于区分源轨。
+    """
+    items = []
+    for s in stems or []:
+        p = s.get("path", "") if isinstance(s, dict) else ""
+        if not p or not Path(p).exists():
+            continue
+        # 轨道标签走 tr 国际化（历史记录的 stems 存中文原文，显示时按当前语言翻译）
+        label = tr(_CUR_LANG, s.get("label") or Path(p).stem)
+        if "_denoised" in Path(p).stem:
+            label = f"{label} · {tr(_CUR_LANG, '已降噪')}"
+        items.append((label, p))
+    return items
+
+
+def _fill_voice_players(items):
+    """把 [(label, path)] 填充为播放器组更新：前 n 个显示（带轨道名，可下载），其余隐藏。
+
+    与其他 Tab 的播放器为同一 gr.Audio 组件（个性化定制由 app.js PlayerZoom 按
+    elem_id 前缀统一接管）；按产物数量逐个显隐，空槽位不占界面。
+    """
+    updates = []
+    for i in range(VOICE_PLAYER_COUNT):
+        if i < len(items):
+            label, path = items[i]
+            updates.append(gr.update(value=path, label=label, visible=True))
+        else:
+            updates.append(gr.update(value=None, visible=False))
+    return updates
+
+
+def on_voice_task_history_pick(task_id):
+    """任务历史选择（按文件夹）：整组播放器回放该任务全部轨道（每轨可下载）。"""
+    entry = history_mgr.get(task_id) if task_id else None
+    items = _voice_stem_items(getattr(entry, "stems", None) if entry else None)
+    # 无 stems 的旧记录回退主轨
+    if not items and entry and entry.audio_path and Path(entry.audio_path).exists():
+        items.append((Path(entry.audio_path).name, entry.audio_path))
+    return _fill_voice_players(items)
 
 
 def on_voice_save_ref(src_upload, name_input):
@@ -908,6 +977,27 @@ def on_voice_save_ref(src_upload, name_input):
     name = (name_input or "").strip() or Path(src_upload).stem
     voice_handlers.save_ref(src_upload, name)
     return tr(_CUR_LANG, "已保存到音色库"), _voice_ref_choices(_CUR_LANG)
+
+
+def on_voice_ref_upload_check(path):
+    """上传参考干声后的轻量人声检测（方案B）：仅提示，不拦截流程。
+    检测通过的人声干音自动留存到 dry_uploads，并入「干声历史」第二来源。"""
+    if not path:
+        return "", gr.update(choices=_voice_dry_upload_choices(_CUR_LANG))
+    # 格式校验：仅支持 torchaudio/Seed-VC 可解码的常见格式
+    if Path(path).suffix.lower() not in (".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac", ".wma"):
+        return tr(_CUR_LANG, "不支持的文件格式，请上传 WAV/MP3/FLAC/M4A/OGG"), \
+            gr.update(choices=_voice_dry_upload_choices(_CUR_LANG))
+    r = detect_voice(path, project_root=PROJECT_ROOT)
+    if r is None:
+        return tr(_CUR_LANG, "无法检测"), gr.update(choices=_voice_dry_upload_choices(_CUR_LANG))
+    ok, score = r
+    if ok:
+        voice_handlers.save_dry_upload(path)
+        msg = f"{tr(_CUR_LANG, '人声检测: 通过')} (p={score:.2f})"
+    else:
+        msg = f"{tr(_CUR_LANG, '人声检测: 疑似非人声，建议上传清唱干声')} (p={score:.2f})"
+    return msg, gr.update(choices=_voice_dry_upload_choices(_CUR_LANG))
 
 
 def on_voice_src_mode(src_mode):
@@ -922,6 +1012,11 @@ def on_voice_ref_mode(ref_mode):
             gr.update(visible=(ref_mode == "upload")))
 
 
+def on_voice_dry_src_mode(dry_src):
+    """干声来源切换：分离人声 / 上传干声，显示对应下拉。"""
+    return gr.update(visible=(dry_src == "upload")), gr.update(visible=(dry_src == "sep"))
+
+
 def _resolve_voice_source(history_val, upload_val):
     """从「历史记录 / 上传」两入口取实际音频路径，两者均无效则抛错。"""
     path = upload_val if upload_val and Path(upload_val).exists() else history_val
@@ -930,60 +1025,63 @@ def _resolve_voice_source(history_val, upload_val):
     return str(path)
 
 
+def _voice_running_outputs(text):
+    """任务运行中的中间态输出：播放器组保持现状（空更新）+ 进度文案 + 按钮保持禁用。"""
+    return (*[gr.update()] * VOICE_PLAYER_COUNT, text, gr.update(interactive=False))
+
+
 def on_voice_separate(source_history, source_upload, sep_mode="vocals",
-                      progress=gr.Progress(track_tqdm=False)):
-    """音轨分离：入队 Demucs，返回产物(文件列表, 历史提示, 轨道下拉, 产物字典)。"""
+                      denoise=False):
+    """音轨分离（生成器回调）：入队 Demucs，实时显示排队/执行进度。
+
+    提交即禁用按钮（防运行期间重复提交）并清空播放器组；info 区实时显示
+    排队位置/执行秒表；完成恢复按钮、按产物数量填充播放器组；失败也恢复按钮。
+    分离成功自动写入历史（含全部轨）；产物落独立文件夹并按 <时间戳>_<类别> 命名。
+    """
     source = _resolve_voice_source(source_history, source_upload)
     vote = "2" if sep_mode == "vocals" else "4"
     lang = _CUR_LANG
-    result = voice_handlers.run_in_queue(
+    # 提交前先反馈：清空播放器组 + 禁用按钮
+    yield (*_fill_voice_players([]), tr(lang, "排队中..."),
+           gr.update(interactive=False))
+    gen = voice_handlers.run_in_queue_stream(
         TaskType.SEPARATION, voice_handlers.separate_worker,
         lang, tr, "音轨分离",
-        lambda v, d: progress(v, desc=d),
-        source=source, mode=vote, root_task_id="",
-    )
-    # 产物列表（存在才展示）
-    files = []
-    for p in sorted(result.get("products", {}).values()):
-        if isinstance(p, str) and Path(p).exists():
-            files.append(p)
+        source=source, mode=vote, root_task_id="", denoise=bool(denoise))
+    try:
+        result = None
+        while True:  # 消费状态流：每条文案 → 播放器保持 + 进度文案 + 按钮保持禁用
+            try:
+                text = next(gen)
+            except StopIteration as stop:
+                result = stop.value
+                break
+            yield _voice_running_outputs(text)
+    except Exception:
+        # 失败/取消也必须恢复按钮；info 区给出失败提示后向上抛（Gradio 弹错误）
+        yield (*[gr.update()] * VOICE_PLAYER_COUNT, tr(lang, "任务失败"),
+               gr.update(interactive=True))
+        raise
+    # 按产物数量填充播放器组（每轨一个播放器，label 为轨道名）
+    items = _voice_stem_items(result.get("stems"))
     note = tr(lang, "分离完成") + " · " + tr(lang, "写入历史")
-    # 轨道下拉 choices：label 用类型中文名，value 用产物路径（人声在前）
-    products = result.get("products", {})
-    items = [(tr(lang, _STEM_TYPE_LABELS.get(k, k)), v)
-             for k, v in products.items() if isinstance(v, str) and Path(v).exists()]
-    dd_update = gr.update(choices=items, value=items[0][1] if items else None)
-    return files, note, dd_update, products
+    yield (*_fill_voice_players(items), note, gr.update(interactive=True))
 
 
-def on_voice_sep_save_ref(stem_path, name_input, products):
-    """把选中的分离轨道存库：人声→音色库（Seed-VC 参考），乐器轨→素材库。
-
-    衔接「音轨分离 → 音色翻唱」：分离产物按类型分流入库，切到翻唱 Tab 即可选用。
-    """
-    if not stem_path or not Path(stem_path).exists():
-        raise gr.Error(tr(_CUR_LANG, "请先选择源音频"))
-    # 从产物字典反查轨道类型
-    stype = next((k for k, v in (products or {}).items() if v == stem_path), "other")
-    name = (name_input or "").strip() or Path(stem_path).stem
-    if stype == "vocals":
-        voice_handlers.save_ref(stem_path, name)
-        return tr(_CUR_LANG, "已保存到音色库")
-    voice_handlers.save_stem(stem_path, name, stype)
-    return tr(_CUR_LANG, "已保存到素材库")
-
-
-def on_voice_cover(source_history, source_upload, ref_library, ref_dry, ref_upload,
+def on_voice_cover(source_history, source_upload, ref_library, ref_dry_upload,
+                   ref_dry_sep, ref_upload,
                    semi_tone=0, steps=30, gain_db=0.0, custom_acc="",
-                   progress=gr.Progress(track_tqdm=False)):
-    """参考音色翻唱：入队 分离+换嗓+混音 全流程，返回成品/中间产物。
+                   denoise=False):
+    """参考音色翻唱（生成器回调）：入队 分离+换嗓+混音 全流程，实时显示进度。
 
+    提交即禁用按钮并清空播放器组；完成恢复按钮、填充成品/中间产物播放器组。
     custom_acc=自定义伴奏路径（素材库），留空则用源曲分离出的原伴奏。
+    denoise=True 时对换嗓后的人声降噪。
     """
     source = _resolve_voice_source(source_history, source_upload)
-    # 参考音色解析优先级：上传 → 干声历史 → 音色库
+    # 参考音色解析优先级：上传 → 上传干声 → 分离人声 → 音色库
     ref = None
-    for cand in (ref_upload, ref_dry, ref_library):
+    for cand in (ref_upload, ref_dry_upload, ref_dry_sep, ref_library):
         if cand and Path(cand).exists():
             ref = cand
             break
@@ -992,24 +1090,35 @@ def on_voice_cover(source_history, source_upload, ref_library, ref_dry, ref_uplo
     # 自定义伴奏校验（选了但文件缺失则忽略，回退原伴奏）
     acc = custom_acc if custom_acc and Path(custom_acc).exists() else ""
     lang = _CUR_LANG
-    result = voice_handlers.run_in_queue(
+    # 提交前先反馈：清空播放器组 + 禁用按钮
+    yield (*_fill_voice_players([]), tr(lang, "排队中..."),
+           gr.update(interactive=False))
+    gen = voice_handlers.run_in_queue_stream(
         TaskType.COVER, voice_handlers.cover_worker,
         lang, tr, "参考音色翻唱",
-        lambda v, d: progress(v, desc=d),
         source=source, ref=str(ref),
         accompaniment=acc, semi_tone=int(semi_tone or 0),
         diffusion_steps=int(steps or 30), gain_db=float(gain_db or 0.0),
-        root_task_id="",
+        root_task_id="", denoise=bool(denoise),
     )
-    products = result.get("products", {})
-    final_path = products.get("cover", "")
-    conv_path = products.get("converted_vocals", "")
-    acc_path = products.get("accompaniment", "")
-    all_files = [final_path] + [p for p in (conv_path, acc_path) if p]
-    # 过滤已存在者，避免组件报错
-    all_files = [p for p in all_files if isinstance(p, str) and Path(p).exists()]
+    try:
+        result = None
+        while True:  # 消费状态流：每条文案 → 播放器保持 + 进度文案 + 按钮保持禁用
+            try:
+                text = next(gen)
+            except StopIteration as stop:
+                result = stop.value
+                break
+            yield _voice_running_outputs(text)
+    except Exception:
+        # 失败/取消也必须恢复按钮；info 区给出失败提示后向上抛（Gradio 弹错误）
+        yield (*[gr.update()] * VOICE_PLAYER_COUNT, tr(lang, "任务失败"),
+               gr.update(interactive=True))
+        raise
+    # 按产物数量填充播放器组（翻唱成品/换嗓干声/伴奏/分离人声，每轨一个播放器）
+    items = _voice_stem_items(result.get("stems"))
     note = tr(lang, "翻唱完成") + " · " + tr(lang, "写入历史")
-    return all_files, note
+    yield (*_fill_voice_players(items), note, gr.update(interactive=True))
 
 
 def on_random_seed():
@@ -1436,8 +1545,10 @@ _TITLE_ROW_CSS = """
 # 轮询等待信号组件渲染 -> 调用 Gradio 前端内部 changeLocale 切换其内置文案语言。
 # core-*.js 文件名带构建 hash，运行时从 <script> 标签或 performance 资源记录动态
 # 获取（Gradio 模块多为动态 import，不一定存在于 script 标签），避免硬编码。
+# 注意：Gradio 5.x 的 Blocks 级 js= 会被包装为 await (js)(); 要求「函数表达式」，
+# 禁止写成 IIFE (function(){...})(); ——尾部分号会导致前端 SyntaxError 并中断组件挂载。
 _LOCALE_SYNC_JS = """
-(function () {
+() => {
     var GRADIO_LOCALE = { zh: "zh-CN", en: "en" };
     function findCoreModuleUrl() {
         var s = document.querySelector('script[src*="/core-"]');
@@ -1472,13 +1583,14 @@ _LOCALE_SYNC_JS = """
             clearInterval(timer);
         }
     }, 200);
-})();
+}
 """
 
 
 def build_ui():
     """Build the Gradio UI."""
-    with gr.Blocks(title="YuE2 Music Studio") as demo:
+    with gr.Blocks(title="YuE2 Music Studio",
+                    css=_TITLE_ROW_CSS, js=_LOCALE_SYNC_JS) as demo:
 
         def _t(s: str) -> str:
             """按当前界面语言翻译单条文案（zh 直接返回原文）。"""
@@ -1531,8 +1643,8 @@ def build_ui():
         _reg(lang_signal, lambda lang: gr.update(value=lang))
 
         with gr.Tabs():
-            tab_create = gr.Tab(_t("创作"))
-            _reg(tab_create, lambda lang: gr.update(label=tr(lang, "创作")))
+            tab_create = gr.Tab(_t("歌曲创作"))
+            _reg(tab_create, lambda lang: gr.update(label=tr(lang, "歌曲创作")))
             with tab_create:
                 with gr.Row():
                     with gr.Column(scale=1):
@@ -1897,48 +2009,8 @@ def build_ui():
                             resynthesize_btn = gr.Button(_t("重新合成"), variant="secondary")
                             _reg(resynthesize_btn, lambda lang: gr.update(value=tr(lang, "重新合成")))
 
-            with gr.Tab(_t("音频转谱")) as tab_transcribe:
-                _reg(tab_transcribe, lambda lang: gr.update(label=tr(lang, "音频转谱")))
-                transcribe_md = gr.Markdown(_t("### 音频转乐谱"))
-                _reg(transcribe_md, lambda lang: gr.update(value=tr(lang, "### 音频转乐谱")))
-                transcribe_intro_md = gr.Markdown(_t("上传音频文件，使用 SheetSage2 模型自动转写为 ABC 乐谱"))
-                _reg(transcribe_intro_md, lambda lang: gr.update(value=tr(lang, "上传音频文件，使用 SheetSage2 模型自动转写为 ABC 乐谱")))
-                
-                with gr.Row():
-                    with gr.Column():
-                        transcribe_audio_input = gr.Audio(label=_t("上传音频 (支持 WAV/MP3/FLAC/OGG/M4A 等)"), type="filepath", elem_id="transcribe-audio-input")
-                        _reg(transcribe_audio_input, lambda lang: gr.update(label=tr(lang, "上传音频 (支持 WAV/MP3/FLAC/OGG/M4A 等)")))
-                        with gr.Row():
-                            transcribe_btn = gr.Button(_t("开始转谱"), variant="primary")
-                            _reg(transcribe_btn, lambda lang: gr.update(value=tr(lang, "开始转谱")))
-                            transcribe_send_btn = gr.Button(_t("→ 发送到生成页"), variant="secondary")
-                            _reg(transcribe_send_btn, lambda lang: gr.update(value=tr(lang, "→ 发送到生成页")))
-                        transcribe_info = gr.Markdown()
-                    
-                    with gr.Column():
-                        transcribe_abc_output = gr.Textbox(
-                            label=_t("ABC 乐谱 (可编辑)"),
-                            placeholder=_t("转谱完成后乐谱将显示在这里..."),
-                            lines=10,
-                        )
-                        _reg(transcribe_abc_output, lambda lang: gr.update(label=tr(lang, "ABC 乐谱 (可编辑)"), placeholder=tr(lang, "转谱完成后乐谱将显示在这里...")))
-                        transcribe_abc_preview = gr.HTML(
-                            label=_t("乐谱预览"),
-                            value=f'<div id="transcribe-abc-preview-container" style="padding: 20px; border-radius: 8px; min-height: 200px; border: 1px dashed rgba(255,255,255,0.15);"><div style="text-align:center;color:#666;">{_t("转谱后乐谱预览将在此处显示")}</div><div id="transcribe-abc-paper"></div><div id="transcribe-abc-audio"></div></div>',
-                        )
-                        _reg(transcribe_abc_preview, lambda lang: gr.update(label=tr(lang, "乐谱预览"), value=f'<div id="transcribe-abc-preview-container" style="padding: 20px; border-radius: 8px; min-height: 200px; border: 1px dashed rgba(255,255,255,0.15);"><div style="text-align:center;color:#666;">{tr(lang, "转谱后乐谱预览将在此处显示")}</div><div id="transcribe-abc-paper"></div><div id="transcribe-abc-audio"></div></div>'))
-                        
-                        with gr.Row():
-                            transcribe_abc_download = gr.File(label=_t("下载 ABC"))
-                            _reg(transcribe_abc_download, lambda lang: gr.update(label=tr(lang, "下载 ABC")))
-                            transcribe_midi_download = gr.File(label=_t("下载 MIDI"))
-                            _reg(transcribe_midi_download, lambda lang: gr.update(label=tr(lang, "下载 MIDI")))
-
-                transcribe_task_id = gr.State(value="")
-                transcribe_abc_bridge = gr.Textbox(elem_id="abc-bridge", label="")
-
-            with gr.Tab(_t("历史")) as tab_history:
-                _reg(tab_history, lambda lang: gr.update(label=tr(lang, "历史")))
+            with gr.Tab(_t("歌曲历史")) as tab_history:
+                _reg(tab_history, lambda lang: gr.update(label=tr(lang, "歌曲历史")))
                 history_md = gr.Markdown(_t("### 生成历史"))
                 _reg(history_md, lambda lang: gr.update(value=tr(lang, "### 生成历史")))
                 history_state = gr.State(value=[])
@@ -2007,6 +2079,46 @@ def build_ui():
                 history_next_btn.click(fn=on_history_next_page, inputs=history_page, outputs=[history_df, history_page_info, history_page])
                 demo.load(fn=refresh_history_full, outputs=[history_df, history_page_info, history_page])
 
+            with gr.Tab(_t("音频转谱")) as tab_transcribe:
+                _reg(tab_transcribe, lambda lang: gr.update(label=tr(lang, "音频转谱")))
+                transcribe_md = gr.Markdown(_t("### 音频转乐谱"))
+                _reg(transcribe_md, lambda lang: gr.update(value=tr(lang, "### 音频转乐谱")))
+                transcribe_intro_md = gr.Markdown(_t("上传音频文件，使用 SheetSage2 模型自动转写为 ABC 乐谱"))
+                _reg(transcribe_intro_md, lambda lang: gr.update(value=tr(lang, "上传音频文件，使用 SheetSage2 模型自动转写为 ABC 乐谱")))
+
+                with gr.Row():
+                    with gr.Column():
+                        transcribe_audio_input = gr.Audio(label=_t("上传音频 (支持 WAV/MP3/FLAC/OGG/M4A 等)"), type="filepath", elem_id="transcribe-audio-input")
+                        _reg(transcribe_audio_input, lambda lang: gr.update(label=tr(lang, "上传音频 (支持 WAV/MP3/FLAC/OGG/M4A 等)")))
+                        with gr.Row():
+                            transcribe_btn = gr.Button(_t("开始转谱"), variant="primary")
+                            _reg(transcribe_btn, lambda lang: gr.update(value=tr(lang, "开始转谱")))
+                            transcribe_send_btn = gr.Button(_t("→ 发送到生成页"), variant="secondary")
+                            _reg(transcribe_send_btn, lambda lang: gr.update(value=tr(lang, "→ 发送到生成页")))
+                        transcribe_info = gr.Markdown()
+
+                    with gr.Column():
+                        transcribe_abc_output = gr.Textbox(
+                            label=_t("ABC 乐谱 (可编辑)"),
+                            placeholder=_t("转谱完成后乐谱将显示在这里..."),
+                            lines=10,
+                        )
+                        _reg(transcribe_abc_output, lambda lang: gr.update(label=tr(lang, "ABC 乐谱 (可编辑)"), placeholder=tr(lang, "转谱完成后乐谱将显示在这里...")))
+                        transcribe_abc_preview = gr.HTML(
+                            label=_t("乐谱预览"),
+                            value=f'<div id="transcribe-abc-preview-container" style="padding: 20px; border-radius: 8px; min-height: 200px; border: 1px dashed rgba(255,255,255,0.15);"><div style="text-align:center;color:#666;">{_t("转谱后乐谱预览将在此处显示")}</div><div id="transcribe-abc-paper"></div><div id="transcribe-abc-audio"></div></div>',
+                        )
+                        _reg(transcribe_abc_preview, lambda lang: gr.update(label=tr(lang, "乐谱预览"), value=f'<div id="transcribe-abc-preview-container" style="padding: 20px; border-radius: 8px; min-height: 200px; border: 1px dashed rgba(255,255,255,0.15);"><div style="text-align:center;color:#666;">{tr(lang, "转谱后乐谱预览将在此处显示")}</div><div id="transcribe-abc-paper"></div><div id="transcribe-abc-audio"></div></div>'))
+
+                        with gr.Row():
+                            transcribe_abc_download = gr.File(label=_t("下载 ABC"))
+                            _reg(transcribe_abc_download, lambda lang: gr.update(label=tr(lang, "下载 ABC")))
+                            transcribe_midi_download = gr.File(label=_t("下载 MIDI"))
+                            _reg(transcribe_midi_download, lambda lang: gr.update(label=tr(lang, "下载 MIDI")))
+
+                transcribe_task_id = gr.State(value="")
+                transcribe_abc_bridge = gr.Textbox(elem_id="abc-bridge", label="")
+
             with gr.Tab(_t("音轨分离")) as tab_sep:
                 _reg(tab_sep, lambda lang: gr.update(label=tr(lang, "音轨分离")))
                 # —— 左右分栏：左=源音频+分离参数，右=执行与输出 ——
@@ -2043,34 +2155,46 @@ def build_ui():
                             choices=[(tr(lang, "人声/伴奏"), "vocals"), (tr(lang, "人声/鼓/贝斯/其他"), "full")],
                             label=tr(lang, "分离模式")))
 
-                    # —— 右栏：执行与输出 ——
-                    with gr.Column(scale=4):
+                        # —— 执行与输出：降噪、开始分离、结果（移到左列，紧跟参数） ——
+                        sep_denoise = gr.Checkbox(label=_t("降噪"), value=False,
+                                                  info=_t("开启后对输出人声降噪"))
+                        _reg(sep_denoise, lambda lang: gr.update(
+                            label=tr(lang, "降噪"), info=tr(lang, "开启后对输出人声降噪")))
                         sep_btn = gr.Button(_t("开始分离"), variant="primary")
                         _reg(sep_btn, lambda lang: gr.update(value=tr(lang, "开始分离")))
                         sep_info = gr.Markdown()
-                        sep_files = gr.Files(label=_t("输出产物"), elem_id="sep-files", interactive=False)
-                        _reg(sep_files, lambda lang: gr.update(label=tr(lang, "输出产物")))
-                        # —— 衔接「分离 → 翻唱」：分离轨道入库（人声→音色库，乐器轨→素材库） ——
-                        sep_products_state = gr.State(value={})
-                        sep_ref_md = gr.Markdown(_t("### 保存分离轨到库"))
-                        _reg(sep_ref_md, lambda lang: gr.update(value=tr(lang, "### 保存分离轨到库")))
-                        sep_stem_dd = gr.Dropdown(label=_t("选择轨道"), interactive=True)
-                        _reg(sep_stem_dd, lambda lang: gr.update(label=tr(lang, "选择轨道")))
-                        sep_ref_name = gr.Textbox(label=_t("命名"), elem_id="sep-ref-name")
-                        _reg(sep_ref_name, lambda lang: gr.update(label=tr(lang, "命名")))
-                        sep_save_btn = gr.Button(_t("保存到库"), size="sm")
-                        _reg(sep_save_btn, lambda lang: gr.update(value=tr(lang, "保存到库")))
-                        sep_save_info = gr.Markdown()
+                        # 输出产物播放器组：按产物数量逐个显示（与其他 Tab 播放器同组件，
+                        # PlayerZoom 个性化定制按 elem_id 前缀 sep-audio- 统一接管）；label 动态为轨道名
+                        sep_audios = [
+                            gr.Audio(type="filepath", label="", elem_id=f"sep-audio-{i}",
+                                     visible=False, show_download_button=True)
+                            for i in range(VOICE_PLAYER_COUNT)
+                        ]
+
+                    # —— 右栏：分离任务历史（按文件夹选择，整组播放器回放全部轨道） ——
+                    with gr.Column(scale=4):
+                        # —— 分离任务历史：选择历次分离任务并回放结果 ——
+                        sep_hist_md = gr.Markdown(_t("### 分离任务历史"))
+                        _reg(sep_hist_md, lambda lang: gr.update(value=tr(lang, "### 分离任务历史")))
+                        sep_history_dd = gr.Dropdown(
+                            choices=_voice_task_history_choices("separation"),
+                            label=_t("选择分离任务"), interactive=True)
+                        _reg(sep_history_dd, lambda lang: gr.update(
+                            choices=_voice_task_history_choices("separation", lang),
+                            label=tr(lang, "选择分离任务")))
+                        # 历史回放播放器组：选中任务后按文件夹填充全部轨道（每轨可下载）
+                        sep_hist_audios = [
+                            gr.Audio(type="filepath", label="", elem_id=f"sep-history-audio-{i}",
+                                     visible=False, show_download_button=True)
+                            for i in range(VOICE_PLAYER_COUNT)
+                        ]
 
                 # 事件绑定
                 sep_src_mode.change(fn=on_voice_src_mode, inputs=sep_src_mode,
                                     outputs=[sep_src_history, sep_src_upload])
                 sep_btn.click(fn=on_voice_separate,
-                              inputs=[sep_src_history, sep_src_upload, sep_stem_mode],
-                              outputs=[sep_files, sep_info, sep_stem_dd, sep_products_state])
-                sep_save_btn.click(fn=on_voice_sep_save_ref,
-                                   inputs=[sep_stem_dd, sep_ref_name, sep_products_state],
-                                   outputs=[sep_save_info])
+                              inputs=[sep_src_history, sep_src_upload, sep_stem_mode, sep_denoise],
+                              outputs=[*sep_audios, sep_info, sep_btn])
 
             with gr.Tab(_t("音色翻唱")) as tab_cover:
                 _reg(tab_cover, lambda lang: gr.update(label=tr(lang, "音色翻唱")))
@@ -2120,19 +2244,35 @@ def build_ui():
                         _reg(cover_ref_dropdown, lambda lang: gr.update(
                             choices=_voice_ref_choices(lang), label=tr(lang, "音色库选择")))
 
-                        # 干声历史入口：仅列人声分离产出的人声干声（默认隐藏）
-                        cover_ref_dry = gr.Dropdown(
-                            choices=_voice_dry_history_choices(_CUR_LANG),
-                            label=_t("干声历史选择"), interactive=True, visible=False)
-                        _reg(cover_ref_dry, lambda lang: gr.update(
-                            choices=_voice_dry_history_choices(lang),
-                            label=tr(lang, "干声历史选择")))
+                        # 干声历史入口：radio 选来源（分离人声/上传干声），再在下拉选文件（默认隐藏）
+                        with gr.Column(visible=False) as cover_ref_dry_panel:
+                            cover_ref_dry_src = gr.Radio(
+                                choices=[(_t("从分离人声选择"), "sep"), (_t("从上传干声选择"), "upload")],
+                                value="sep", label=_t("干声来源"))
+                            _reg(cover_ref_dry_src, lambda lang: gr.update(
+                                choices=[(tr(lang, "从分离人声选择"), "sep"),
+                                         (tr(lang, "从上传干声选择"), "upload")],
+                                label=tr(lang, "干声来源")))
+                            cover_ref_dry_sep = gr.Dropdown(
+                                choices=_voice_dry_sep_choices(_CUR_LANG),
+                                label=_t("分离人声"), interactive=True)
+                            _reg(cover_ref_dry_sep, lambda lang: gr.update(
+                                choices=_voice_dry_sep_choices(lang),
+                                label=tr(lang, "分离人声")))
+                            cover_ref_dry_upload = gr.Dropdown(
+                                choices=_voice_dry_upload_choices(_CUR_LANG),
+                                label=_t("上传干声"), interactive=True, visible=False)
+                            _reg(cover_ref_dry_upload, lambda lang: gr.update(
+                                choices=_voice_dry_upload_choices(lang),
+                                label=tr(lang, "上传干声")))
 
                         # 上传入口（含命名保存，仅 upload 模式可见）
                         with gr.Column(visible=False) as cover_ref_upload_panel:
                             cover_ref_upload = gr.Audio(label=_t("上传参考干声(1-30秒)"), type="filepath",
                                                         elem_id="cover-ref-upload")
                             _reg(cover_ref_upload, lambda lang: gr.update(label=tr(lang, "上传参考干声(1-30秒)")))
+                            # 轻量人声检测结果提示（上传后自动判定，仅提示不拦截）
+                            cover_ref_check_md = gr.Markdown()
                             with gr.Row():
                                 cover_ref_name = gr.Textbox(label=_t("输入音色库名称"), elem_id="cover-ref-name")
                                 _reg(cover_ref_name, lambda lang: gr.update(label=tr(lang, "输入音色库名称")))
@@ -2166,36 +2306,85 @@ def build_ui():
 
                     # —— 右栏：执行与输出 ——
                     with gr.Column(scale=4):
+                        cover_denoise = gr.Checkbox(label=_t("降噪"), value=False,
+                                                    info=_t("开启后对输出人声降噪"))
+                        _reg(cover_denoise, lambda lang: gr.update(
+                            label=tr(lang, "降噪"), info=tr(lang, "开启后对输出人声降噪")))
                         cover_btn = gr.Button(_t("开始翻唱"), variant="primary")
                         _reg(cover_btn, lambda lang: gr.update(value=tr(lang, "开始翻唱")))
                         cover_info = gr.Markdown()
-                        cover_files = gr.Files(label=_t("输出产物"), elem_id="cover-files", interactive=False)
-                        _reg(cover_files, lambda lang: gr.update(label=tr(lang, "输出产物")))
+                        # 输出产物播放器组：按产物数量逐个显示（与其他 Tab 播放器同组件，
+                        # PlayerZoom 按 elem_id 前缀 cover-audio- 接管）；label 动态为轨道名
+                        cover_audios = [
+                            gr.Audio(type="filepath", label="", elem_id=f"cover-audio-{i}",
+                                     visible=False, show_download_button=True)
+                            for i in range(VOICE_PLAYER_COUNT)
+                        ]
+                        # —— 翻唱任务历史：按文件夹选择，整组播放器回放全部轨道 ——
+                        cover_hist_md = gr.Markdown(_t("### 翻唱任务历史"))
+                        _reg(cover_hist_md, lambda lang: gr.update(value=tr(lang, "### 翻唱任务历史")))
+                        cover_history_dd = gr.Dropdown(
+                            choices=_voice_task_history_choices("cover"),
+                            label=_t("选择翻唱任务"), interactive=True)
+                        _reg(cover_history_dd, lambda lang: gr.update(
+                            choices=_voice_task_history_choices("cover", lang),
+                            label=tr(lang, "选择翻唱任务")))
+                        # 历史回放播放器组：选中任务后按文件夹填充全部轨道（每轨可下载）
+                        cover_hist_audios = [
+                            gr.Audio(type="filepath", label="", elem_id=f"cover-history-audio-{i}",
+                                     visible=False, show_download_button=True)
+                            for i in range(VOICE_PLAYER_COUNT)
+                        ]
 
                 # 事件绑定
                 cover_src_mode.change(fn=on_voice_src_mode, inputs=cover_src_mode,
                                       outputs=[cover_src_history, cover_src_upload])
                 cover_ref_mode.change(fn=on_voice_ref_mode, inputs=cover_ref_mode,
-                                      outputs=[cover_ref_dropdown, cover_ref_dry,
-                                               cover_ref_upload_panel])
+                                    outputs=[cover_ref_dropdown, cover_ref_dry_panel,
+                                             cover_ref_upload_panel])
+                cover_ref_dry_src.change(fn=on_voice_dry_src_mode, inputs=cover_ref_dry_src,
+                                       outputs=[cover_ref_dry_upload, cover_ref_dry_sep])
                 cover_ref_save_btn.click(fn=on_voice_save_ref, inputs=[cover_ref_upload, cover_ref_name],
                                          outputs=[cover_ref_info, cover_ref_dropdown])
+                # 上传参考干声后自动轻量人声检测（方案B，仅提示）+ 通过者留存并入干声历史
+                cover_ref_upload.change(fn=on_voice_ref_upload_check,
+                                        inputs=cover_ref_upload,
+                                        outputs=[cover_ref_check_md, cover_ref_dry_upload])
                 cover_semi_orig.click(fn=lambda: 0, outputs=cover_semi)
                 cover_semi_m12.click(fn=lambda: -12, outputs=cover_semi)
                 cover_semi_p12.click(fn=lambda: 12, outputs=cover_semi)
                 cover_btn.click(fn=on_voice_cover,
                                 inputs=[cover_src_history, cover_src_upload,
-                                        cover_ref_dropdown, cover_ref_dry, cover_ref_upload,
-                                        cover_semi, cover_steps, cover_gain, cover_acc_dd],
-                                outputs=[cover_files, cover_info])
+                                        cover_ref_dropdown, cover_ref_dry_upload,
+                                        cover_ref_dry_sep,
+                                        cover_ref_upload,
+                                        cover_semi, cover_steps, cover_gain, cover_acc_dd,
+                                        cover_denoise],
+                                outputs=[*cover_audios, cover_info, cover_btn])
 
-                # 每次切到翻唱 Tab 时刷新音色库/伴奏下拉（衔接「分离入库 → 翻唱选用」）
-                tab_cover.select(fn=lambda: (_voice_ref_choices(_CUR_LANG),
-                                             _voice_stem_choices(_CUR_LANG)),
-                                 outputs=[cover_ref_dropdown, cover_acc_dd])
+                # 任务历史回放（按文件夹）：选任务 → 整组播放器填充全部轨道
+                sep_history_dd.change(fn=on_voice_task_history_pick, inputs=sep_history_dd,
+                                      outputs=[*sep_hist_audios])
+                cover_history_dd.change(fn=on_voice_task_history_pick, inputs=cover_history_dd,
+                                        outputs=[*cover_hist_audios])
 
-            with gr.Tab(_t("设置")) as tab_settings:
-                _reg(tab_settings, lambda lang: gr.update(label=tr(lang, "设置")))
+                # 每次切到分离 Tab 时刷新分离任务历史下拉
+                tab_sep.select(fn=lambda: gr.update(
+                    choices=_voice_task_history_choices("separation")),
+                    outputs=[sep_history_dd])
+                # 每次切到翻唱 Tab 时刷新音色库/伴奏/干声两来源/翻唱历史下拉（衔接「分离入库 → 翻唱选用」）
+                # 注意：必须用 gr.update 包裹 choices，裸列表会被 Gradio 5 当作 value 赋值导致 not in choices 报错
+                tab_cover.select(fn=lambda: (gr.update(choices=_voice_ref_choices(_CUR_LANG)),
+                                             gr.update(choices=_voice_stem_choices(_CUR_LANG)),
+                                             gr.update(choices=_voice_dry_sep_choices(_CUR_LANG)),
+                                             gr.update(choices=_voice_dry_upload_choices(_CUR_LANG)),
+                                             gr.update(choices=_voice_task_history_choices("cover"))),
+                                 outputs=[cover_ref_dropdown, cover_acc_dd,
+                                          cover_ref_dry_sep, cover_ref_dry_upload,
+                                          cover_history_dd])
+
+            with gr.Tab(_t("系统设置")) as tab_settings:
+                _reg(tab_settings, lambda lang: gr.update(label=tr(lang, "系统设置")))
                 sysstatus_md = gr.Markdown(_t("### 系统状态"))
                 _reg(sysstatus_md, lambda lang: gr.update(value=tr(lang, "### 系统状态")))
                 model_status = gr.Markdown(value=on_check_models())
@@ -2373,7 +2562,7 @@ if __name__ == "__main__":
 <script src="https://cdnjs.cloudflare.com/ajax/libs/abcjs/6.3.0/abcjs-basic-min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.0/Sortable.min.js"></script>
 <script src="/static/js/vendor/wavesurfer.min.js?v=1"></script>
-<script src="/static/js/app.js?v=10"></script>
+<script src="/static/js/app.js?v=11"></script>
 """
                     html = html.replace("</head>", scripts + "</head>")
                     return HTMLResponse(content=html, status_code=response.status_code)
@@ -2399,7 +2588,4 @@ if __name__ == "__main__":
         server_port=9898,
         share=False,
         show_error=True,
-        # Gradio 6.0 起 css/js 从 Blocks 构造器移至 launch()（5.x 两者兼容，按新规范统一放此处）
-        css=_TITLE_ROW_CSS,
-        js=_LOCALE_SYNC_JS,
     )

@@ -237,7 +237,14 @@ class QueueManager:
         return self.cancel_task_by_id(task.task_id)
 
     def cancel_task_by_id(self, task_id: str) -> bool:
-        """Cancel a task by ID. Works for both queued and running tasks."""
+        """Cancel a task by ID. Works for both queued and running tasks.
+
+        限制说明：取消运行中任务时仅下发 cancel_event（协作式取消）。
+        因 worker 函数在此层不直接持有 subprocess.Popen 句柄——音色/生成等重任务经
+        VoiceClient 以 HTTP 调独立 worker 进程（其进程句柄不归 Task 所有），故无法在此
+        安全地终止远端子进程；强行 kill 会误伤共享 worker。若要硬终止需在 worker 侧支持
+        取消，此处保守保持现状，避免改动结构引发显存/进程风险。
+        """
         with self._lock:
             for t in self._queue:
                 if t.task_id == task_id:
