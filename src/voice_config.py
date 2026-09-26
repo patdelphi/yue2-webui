@@ -92,6 +92,17 @@ def _normalize_values(values: dict, project_root: Path) -> dict:
         # 目录不存在 / 非目录时置 None，交由 UI 做安装指引判断
         if p.is_dir():
             seedvc_dir = p
+    else:
+        # 留空时自动探测：优先 ${系统根}/seed-vc，回退 ${系统根}/yue2-webui/voice-tools/seed-vc
+        auto_candidates = [
+            Path(project_root) / "seed-vc",
+            Path(project_root) / "yue2-webui" / "voice-tools" / "seed-vc",
+        ]
+        for p in auto_candidates:
+            if p.is_dir():
+                seedvc_dir = p
+                logger.info(f"seedvc_dir 自动探测到: {p}")
+                break
 
     # 降噪强度：空串（默认）表示为 None，由 worker 使用 ffmpeg anlmdn 默认值
     dn = str(values["denoise_strength"] or "").strip() or ""

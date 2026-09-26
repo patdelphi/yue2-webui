@@ -6,7 +6,10 @@
 - stems（多轨产物 list[dict]）以 JSON 文本列存储，读写时自动序列化/反序列化。
 - 所有写操作在 RLock + `with conn` 事务中执行（异常自动回滚），线程安全。
 - PRAGMA journal_mode=WAL + synchronous=NORMAL（WAL 替代回滚日志，减少 IO 开销）。
+- source_md5：源音频文件前 1MB 的 MD5，用于查重避免重复 Demucs 分离
+  （翻唱时若源音频已存在 separation 记录，直接复用跳过分离）。
 """
+import hashlib
 import json
 import logging
 import os
@@ -134,6 +137,7 @@ class HistoryRecord:
     root_task_id: str = ""            # 顶层源任务 id（链式翻唱定位聚合目录）
     stems: list = field(default_factory=list)  # 多轨产物：[{label, type, path}, ...]，供历史查看/回放
     project: str = ""                 # 项目名（文件名前缀；空 = 无项目名，文件以时间戳开头）
+    source_md5: str = ""              # 源音频前 1MB MD5（分离/翻唱记录写，查重复用）
 
 
 class HistoryManager:
@@ -149,7 +153,7 @@ class HistoryManager:
              "audio_duration_seconds", "generation_time_seconds",
              "audio_path", "output_dir", "backend", "status", "abc_path",
              "out_format", "record_type", "derived_from", "root_task_id",
-             "stems", "project")
+             "stems", "project", "source_md5")
 
     def __init__(self, db_file: Path, outputs_root: Path):
         self.db_file = Path(db_file)
@@ -191,9 +195,16 @@ class HistoryManager:
                         derived_from TEXT DEFAULT '',
                         root_task_id TEXT DEFAULT '',
                         stems TEXT DEFAULT '[]',
-                        project TEXT DEFAULT ''
+                        project TEXT DEFAULT '',
+                        source_md5 TEXT DEFAULT ''
                     )
                 """)
+                # 旧库迁移：自动追加缺失列（IF NOT EXISTS 避免新库出错）
+                try:
+                    self._conn.execute("ALTER TABLE history ADD COLUMN source_md5 TEXT DEFAULT ''")
+                    logger.info("已添加 source_md5 列（旧库迁移）")
+                except sqlite3.OperationalError:
+                    pass  # 列已存在
                 self._conn.commit()
         except sqlite3.Error:
             logger.exception("历史数据库初始化失败: %s", self.db_file)
@@ -561,6 +572,45 @@ class HistoryManager:
                 self._rmdir_if_empty(entry)
 
             self._delete_ids([rid for rid, _ in to_remove])
+
+    # ---------------------------------------------------------------- 查重工具
+    @staticmethod
+    def compute_source_md5(path: Path) -> str:
+        """计算源音频文件前 1MB 的 MD5，快速区分不同音频。
+
+        只读开头 1MB 足够识别绝大多数不同音频（哪怕同文件换了编码，头信息也会不同），
+        比全文件 hash 快得多（长音频可能几十 MB）。文件不存在返回空串。
+        """
+        try:
+            with open(path, "rb") as f:
+                head = f.read(1024 * 1024)
+            return hashlib.md5(head).hexdigest()
+        except (OSError, IOError):
+            return ""
+
+    def find_separation_by_source(self, md5: str) -> Optional[HistoryRecord]:
+        """查有没有现成的 separation 记录（人声+伴奏双轨齐全）可复用。
+
+        只匹配 status=completed 且 vocals/accompaniment 文件都在磁盘的记录，
+        避免返回无效分离。返回最新一条（id 最大）。
+        """
+        if not md5:
+            return None
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM history WHERE record_type = 'separation' "
+                "AND source_md5 = ? AND status = 'completed' "
+                "ORDER BY id DESC", (md5,)).fetchall()
+            for row in rows:
+                rec = self._row_to_record(row)
+                # 双轨都必须在磁盘
+                stems = {s.get("type"): s.get("path", "")
+                         for s in (rec.stems or []) if isinstance(s, dict)}
+                if stems.get("vocals") and Path(stems["vocals"]).exists() \
+                        and stems.get("accompaniment") \
+                        and Path(stems["accompaniment"]).exists():
+                    return rec
+            return None
 
     def to_dataframe_rows(self, record_types=None) -> list[list]:
         """Convert entries to rows for Gradio Dataframe.

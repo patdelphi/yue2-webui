@@ -906,28 +906,13 @@ def _voice_source_history_choices(lang="zh", limit=50):
 
 
 def _voice_cover_source_choices(lang="zh", limit=50):
-    """翻唱源下拉：generation/cover 记录 + 可复用的分离记录（需同时有人声+伴奏轨）。
-
-    分离记录 value 用 sep_task:<task_id> 前缀区分，供 on_voice_cover 解析后
-    传 source_vocals/source_acc 复用分离结果（worker 跳过重复 Demucs 分离）。
-    """
+    """翻唱源下拉：仅 generation/cover 原唱历史记录（排除 separation 分离任务）。"""
     choices = []
     for rec in history_mgr.list_all():
         if rec.record_type in ("generation", "cover") and rec.audio_path \
                 and Path(rec.audio_path).exists():
             type_label = tr(lang, _QUEUE_TYPE_LABELS.get(rec.record_type, rec.record_type))
             choices.append((f"{type_label} · {Path(rec.audio_path).name}", rec.audio_path))
-        elif rec.record_type == "separation":
-            # 换嗓需人声轨、混音需伴奏轨，两者齐备才可复用
-            stems = {s.get("type"): s.get("path", "") for s in (rec.stems or [])
-                     if isinstance(s, dict)}
-            v, a = stems.get("vocals", ""), stems.get("accompaniment", "")
-            if v and a and Path(v).exists() and Path(a).exists():
-                folder = Path(rec.output_dir).name if rec.output_dir else Path(v).stem
-                # 有项目名时前缀显示，避免多条分离记录仅时间戳可辨
-                proj = getattr(rec, "project", "")
-                label = f"[{tr(lang, '分离')}] {proj} · {folder}" if proj else f"[{tr(lang, '分离')}] {folder}"
-                choices.append((label, f"sep_task:{rec.task_id}"))
         if len(choices) >= limit:
             break
     return choices
@@ -1230,19 +1215,31 @@ def on_voice_cover(source_history, source_upload, ref_library, ref_dry_upload,
                    ref_dry_sep, ref_upload,
                    semi_tone=0, steps=30, gain_db=0.0, custom_acc="",
                    denoise=False):
-    """参考音色翻唱（生成器回调）：入队 分离+换嗓+混音 全流程，实时显示进度。
+    """参考音色翻唱（生成器回调）：确保分离 → 换嗓 → 混音 全流程，实时显示进度。
 
-    提交即禁用按钮并清空播放器组；完成恢复按钮、填充成品/中间产物播放器组
-    并刷新历史下拉。源选分离记录（sep_task: 前缀）时复用其人声/伴奏轨，
-    worker 跳过重复 Demucs 分离。custom_acc=自定义伴奏路径（素材库），
-    留空则用源曲分离出的原伴奏。denoise=True 时对换嗓后的人声降噪。
+    与「音轨分离」Tab 统一：
+    1. 用户选原唱（generation/cover/上传） → 先 ensure_separation：
+       - history 里已有同 source_md5 的 separation → 直接复用（跳过 Demucs）
+       - 没有 → 同步独立 Demucs 分离 + 持久化为 separation 记录
+    2. 然后用 sep_task:<task_id> 模式调 cover_worker（跳过 worker 内部分离）
+    3. 后续同曲翻唱自动命中第 1 步的查重，GPU 秒级启动
+
+    用户直接选分离记录（sep_task 前缀）时：跳过 ensure_separation，直接复用。
     """
-    # 源解析：上传优先；历史值带 sep_task: 前缀 → 复用分离结果（跳过重复分离）
+    lang = _CUR_LANG
+    # 提交前先反馈：清空播放器组 + 禁用按钮
+    yield (*_fill_voice_players([]), tr(lang, "排队中..."),
+           gr.update(interactive=False), gr.update())
+
+    # ====== 源解析 ======
     src_val = source_upload if source_upload and Path(source_upload).exists() \
         else source_history
     source_vocals = source_acc = ""
     root_task_id = ""
+    project = ""
+
     if isinstance(src_val, str) and src_val.startswith("sep_task:"):
+        # 用户直接选了分离记录 → 跳过 ensure_separation
         entry = history_mgr.get(src_val.split(":", 1)[1])
         stems = {s.get("type"): s.get("path", "") for s in (getattr(entry, "stems", None) or [])
                  if isinstance(s, dict)}
@@ -1251,10 +1248,29 @@ def on_voice_cover(source_history, source_upload, ref_library, ref_dry_upload,
         if not (source_vocals and Path(source_vocals).exists()
                 and source_acc and Path(source_acc).exists()):
             raise gr.Error(tr(_CUR_LANG, "该分离记录缺少人声/伴奏轨，无法复用"))
-        source, from_upload = source_vocals, False  # 源即已分离人声轨
-        root_task_id = entry.task_id  # 追溯到分离任务
+        source, from_upload = source_vocals, False
+        root_task_id = entry.task_id
+        project = getattr(entry, "project", "") or ""
     else:
-        source, from_upload = _resolve_voice_source(source_history, source_upload)
+        # 原唱路径 → 先 ensure_separation（查重 / 同步分离 + 持久化）
+        source_orig, from_upload = _resolve_voice_source(source_history, source_upload)
+        project = _project_from_source(source_orig)
+        try:
+            sep_task_id = voice_handlers.ensure_separation(source_orig, project)
+        except Exception as e:
+            yield (*[gr.update()] * VOICE_PLAYER_COUNT,
+                   tr(_CUR_LANG, "源音频分离失败") + f": {e}",
+                   gr.update(interactive=True), gr.update())
+            raise gr.Error(str(e))
+        # sep_task_id = "sep_task:<task_id>" → 走复用分支解析
+        entry = history_mgr.get(sep_task_id.split(":", 1)[1])
+        stems = {s.get("type"): s.get("path", "") for s in (getattr(entry, "stems", None) or [])
+                 if isinstance(s, dict)}
+        source_vocals = stems.get("vocals", "")
+        source_acc = stems.get("accompaniment", "")
+        source, from_upload = source_vocals, False
+        root_task_id = entry.task_id
+
     # 参考音色解析优先级：上传 → 上传干声 → 分离人声 → 音色库
     ref = None
     for cand in (ref_upload, ref_dry_upload, ref_dry_sep, ref_library):
@@ -1266,12 +1282,8 @@ def on_voice_cover(source_history, source_upload, ref_library, ref_dry_upload,
     # 自定义伴奏校验（选了但文件缺失则忽略，回退原伴奏）
     acc = custom_acc if custom_acc and Path(custom_acc).exists() else ""
     # 翻唱项目名（文件管理重构）：源项目名_音色名（源无项目名则仅音色名）
-    cover_project = "_".join(x for x in (_project_from_source(source),
-                                         _voice_ref_name(str(ref))) if x)
-    lang = _CUR_LANG
-    # 提交前先反馈：清空播放器组 + 禁用按钮
-    yield (*_fill_voice_players([]), tr(lang, "排队中..."),
-           gr.update(interactive=False), gr.update())
+    cover_project = "_".join(x for x in (project, _voice_ref_name(str(ref))) if x)
+    # ====== 提交 cover worker 队列 ======
     gen = voice_handlers.run_in_queue_stream(
         TaskType.COVER, voice_handlers.cover_worker,
         lang, tr, "参考音色翻唱",
@@ -1282,7 +1294,7 @@ def on_voice_cover(source_history, source_upload, ref_library, ref_dry_upload,
         diffusion_steps=int(steps or 30), gain_db=float(gain_db or 0.0),
         root_task_id=root_task_id, denoise=bool(denoise),
         source_vocals=source_vocals, source_acc=source_acc,
-        from_upload=from_upload, project=cover_project,
+        from_upload=False, project=cover_project,
     )
     try:
         result = None
@@ -1908,6 +1920,52 @@ _TITLE_ROW_CSS = """
 #lang-dd .icon-wrap { padding: 0 4px; }
 #lang-dd .icon-wrap svg { width: 12px; height: 12px; }
 #lang-signal { display: none; }
+    /* —— 改名/库管理行：统一结构 label | 输入框 | 主动作按钮 | 删除按钮 ——
+       做法：把 Gradio Textbox 的原生 <label> 由纵向改为横向 flex，
+       label 文字固定宽度，从而各行输入框/按钮起点完全对齐。 */
+    #sep-rename-row, #cover-rename-row, #hist-rename-row,
+    #lib-stem-row, #lib-ref-row {
+        flex-wrap: nowrap !important; gap: 10px !important; align-items: center !important;
+    }
+    /* Textbox 外层 block 去内边距，高度贴合输入框，便于与按钮垂直居中 */
+    #sep-rename-row .block, #cover-rename-row .block, #hist-rename-row .block,
+    #lib-stem-row .block, #lib-ref-row .block { padding: 0 !important; }
+    /* 原生 label 改为横向 flex：文字在左，输入框在右，同一行垂直居中 */
+    #sep-rename-row label.container, #cover-rename-row label.container,
+    #hist-rename-row label.container, #lib-stem-row label.container,
+    #lib-ref-row label.container {
+        display: flex !important; flex-direction: row !important;
+        align-items: center !important; gap: 10px !important;
+        border: none !important; padding: 0 0 0 12px !important;
+    }
+    /* label 文字：固定宽度，保证多行左对齐一致 */
+    #sep-rename-row label.container > span[data-testid="block-info"],
+    #cover-rename-row label.container > span[data-testid="block-info"],
+    #hist-rename-row label.container > span[data-testid="block-info"],
+    #lib-stem-row label.container > span[data-testid="block-info"],
+    #lib-ref-row label.container > span[data-testid="block-info"] {
+        flex: 0 0 76px !important; margin: 0 !important;
+        white-space: nowrap !important; font-size: 14px !important;
+    }
+    /* 输入框容器占满剩余宽度，边框移到这里 */
+    #sep-rename-row .input-container, #cover-rename-row .input-container,
+    #hist-rename-row .input-container, #lib-stem-row .input-container,
+    #lib-ref-row .input-container {
+        flex: 1 1 auto !important;
+        border: 1px solid var(--border-color-primary) !important;
+        border-radius: 6px !important;
+        background: var(--background-fill-primary) !important;
+    }
+    /* Textarea 单行高度 */
+    #sep-rename-row textarea, #cover-rename-row textarea, #hist-rename-row textarea,
+    #lib-stem-row textarea, #lib-ref-row textarea {
+        min-height: 38px !important; height: 38px !important;
+    }
+    /* 按钮缩小 */
+    #sep-rename-row button, #cover-rename-row button, #hist-rename-row button,
+    #lib-stem-row button, #lib-ref-row button {
+        flex: 0 0 auto !important; min-width: auto !important; padding: 4px 14px !important;
+    }
 """
 
 # Gradio 内置文案（上传组件"将音频拖放到此处/点击上传"、页脚等）跟随浏览器 locale，
@@ -2452,14 +2510,14 @@ def build_ui():
                     _reg(history_clear_btn, lambda lang: gr.update(value=tr(lang, "清空历史")))
                 # 项目管理（文件管理重构）：改项目名只改文件名段（保留时间戳）；
                 # 删除项目 = 整个产物目录移入回收站 + 移除该目录全部记录
-                with gr.Row():
+                with gr.Row(elem_id="hist-rename-row"):
                     history_project_input = gr.Textbox(
-                        label=_t("新项目名"), placeholder=_t("留空则清除项目名"), scale=3)
+                        label=_t("新项目名"), placeholder=_t("留空则清除项目名"), scale=3, lines=1)
                     _reg(history_project_input, lambda lang: gr.update(
                         label=tr(lang, "新项目名"), placeholder=tr(lang, "留空则清除项目名")))
-                    history_rename_btn = gr.Button(_t("改项目名"), size="sm")
+                    history_rename_btn = gr.Button(_t("改项目名"), size="sm", scale=1)
                     _reg(history_rename_btn, lambda lang: gr.update(value=tr(lang, "改项目名")))
-                    history_del_project_btn = gr.Button(_t("删除项目"), variant="stop", size="sm")
+                    history_del_project_btn = gr.Button(_t("删除项目"), variant="stop", size="sm", scale=1)
                     _reg(history_del_project_btn, lambda lang: gr.update(value=tr(lang, "删除项目")))
 
                 history_df.select(fn=on_history_select, inputs=[history_state, history_page], outputs=[history_state, history_audio, history_info, history_style, history_lyrics, history_abc, history_abc_preview, history_lyrics_data, history_duration_data, history_stem_dd, history_stem_audio])
@@ -2607,14 +2665,16 @@ def build_ui():
                             for i in range(VOICE_PLAYER_COUNT)
                         ]
                         # 项目管理（文件管理重构）：改项目名（保留时间戳）/ 删除项目（整目录入回收站）
-                        with gr.Row():
+                        # 统一结构：label | 输入框 | 主动作按钮 | 删除按钮（label 由 CSS 压在输入框同一行）
+                        with gr.Row(elem_id="sep-rename-row"):
                             sep_rename_input = gr.Textbox(
-                                label=_t("新项目名"), placeholder=_t("留空则清除项目名"), scale=3)
+                                label=_t("新项目名"), placeholder=_t("留空则清除项目名"),
+                                scale=3, lines=1)
                             _reg(sep_rename_input, lambda lang: gr.update(
                                 label=tr(lang, "新项目名"), placeholder=tr(lang, "留空则清除项目名")))
-                            sep_rename_btn = gr.Button(_t("改项目名"), size="sm")
+                            sep_rename_btn = gr.Button(_t("改项目名"), size="sm", scale=1)
                             _reg(sep_rename_btn, lambda lang: gr.update(value=tr(lang, "改项目名")))
-                            sep_del_btn = gr.Button(_t("删除项目"), variant="stop", size="sm")
+                            sep_del_btn = gr.Button(_t("删除项目"), variant="stop", size="sm", scale=1)
                             _reg(sep_del_btn, lambda lang: gr.update(value=tr(lang, "删除项目")))
 
                         # —— 库管理区：素材库（乐器轨）与音色库（参考干声）统一在此管理 ——
@@ -2632,14 +2692,16 @@ def build_ui():
                             elem_id="lib-stem-preview", visible=False,
                            )
                         _reg(lib_stem_preview, lambda lang: gr.update(label=tr(lang, "试听")))
-                        with gr.Row():
-                            lib_stem_del_btn = gr.Button(_t("删除选中"), size="sm", variant="stop")
-                            _reg(lib_stem_del_btn, lambda lang: gr.update(value=tr(lang, "删除选中")))
+                        with gr.Row(elem_id="lib-stem-row"):
                             lib_stem_rename_input = gr.Textbox(
-                                label=_t("重命名为"), elem_id="lib-stem-rename")
-                            _reg(lib_stem_rename_input, lambda lang: gr.update(label=tr(lang, "重命名为")))
-                            lib_stem_rename_btn = gr.Button(_t("重命名"), size="sm")
+                                label=_t("重命名为"), placeholder=_t("新名字"), elem_id="lib-stem-rename",
+                                scale=3, lines=1)
+                            _reg(lib_stem_rename_input, lambda lang: gr.update(
+                                label=tr(lang, "重命名为"), placeholder=tr(lang, "新名字")))
+                            lib_stem_rename_btn = gr.Button(_t("重命名"), size="sm", scale=1)
                             _reg(lib_stem_rename_btn, lambda lang: gr.update(value=tr(lang, "重命名")))
+                            lib_stem_del_btn = gr.Button(_t("删除选中"), size="sm", variant="stop", scale=1)
+                            _reg(lib_stem_del_btn, lambda lang: gr.update(value=tr(lang, "删除选中")))
 
                         lib_ref_dd = gr.Dropdown(
                             choices=_voice_ref_choices(_CUR_LANG),
@@ -2651,14 +2713,16 @@ def build_ui():
                             elem_id="lib-ref-preview", visible=False,
                            )
                         _reg(lib_ref_preview, lambda lang: gr.update(label=tr(lang, "试听")))
-                        with gr.Row():
-                            lib_ref_del_btn = gr.Button(_t("删除选中"), size="sm", variant="stop")
-                            _reg(lib_ref_del_btn, lambda lang: gr.update(value=tr(lang, "删除选中")))
+                        with gr.Row(elem_id="lib-ref-row"):
                             lib_ref_rename_input = gr.Textbox(
-                                label=_t("重命名为"), elem_id="lib-ref-rename")
-                            _reg(lib_ref_rename_input, lambda lang: gr.update(label=tr(lang, "重命名为")))
-                            lib_ref_rename_btn = gr.Button(_t("重命名"), size="sm")
+                                label=_t("重命名为"), placeholder=_t("新名字"), elem_id="lib-ref-rename",
+                                scale=3, lines=1)
+                            _reg(lib_ref_rename_input, lambda lang: gr.update(
+                                label=tr(lang, "重命名为"), placeholder=tr(lang, "新名字")))
+                            lib_ref_rename_btn = gr.Button(_t("重命名"), size="sm", scale=1)
                             _reg(lib_ref_rename_btn, lambda lang: gr.update(value=tr(lang, "重命名")))
+                            lib_ref_del_btn = gr.Button(_t("删除选中"), size="sm", variant="stop", scale=1)
+                            _reg(lib_ref_del_btn, lambda lang: gr.update(value=tr(lang, "删除选中")))
 
                 # 事件绑定
                 sep_src_mode.change(fn=on_voice_src_mode, inputs=sep_src_mode,
@@ -2826,14 +2890,15 @@ def build_ui():
                             for i in range(VOICE_PLAYER_COUNT)
                         ]
                         # 项目管理（文件管理重构）：改项目名（保留时间戳）/ 删除项目（整目录入回收站）
-                        with gr.Row():
+                        with gr.Row(elem_id="cover-rename-row"):
                             cover_rename_input = gr.Textbox(
-                                label=_t("新项目名"), placeholder=_t("留空则清除项目名"), scale=3)
+                                label=_t("新项目名"), placeholder=_t("留空则清除项目名"),
+                                scale=3, lines=1)
                             _reg(cover_rename_input, lambda lang: gr.update(
                                 label=tr(lang, "新项目名"), placeholder=tr(lang, "留空则清除项目名")))
-                            cover_rename_btn = gr.Button(_t("改项目名"), size="sm")
+                            cover_rename_btn = gr.Button(_t("改项目名"), size="sm", scale=1)
                             _reg(cover_rename_btn, lambda lang: gr.update(value=tr(lang, "改项目名")))
-                            cover_del_btn = gr.Button(_t("删除项目"), variant="stop", size="sm")
+                            cover_del_btn = gr.Button(_t("删除项目"), variant="stop", size="sm", scale=1)
                             _reg(cover_del_btn, lambda lang: gr.update(value=tr(lang, "删除项目")))
 
                 # 事件绑定

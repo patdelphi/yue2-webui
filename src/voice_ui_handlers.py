@@ -201,8 +201,12 @@ class VoiceHandlers:
                 root_task_id: str, audio_path: str, output_dir: Path,
                 duration: float = 0.0, elapsed: float = 0.0,
                 style: str = "", status: str = "completed",
-                stems: Optional[list] = None, project: str = "") -> None:
-        """追加一条音色工坊历史记录（不覆盖现有生成/转谱记录）。"""
+                stems: Optional[list] = None, project: str = "",
+                source_md5: str = "") -> None:
+        """追加一条音色工坊历史记录（不覆盖现有生成/转谱记录）。
+
+        source_md5：源音频前 1MB MD5（separation/cover 记录写，用于查重跳过重复 Demucs）。
+        """
         record = HistoryRecord(
             task_id=task_id,
             created_at=datetime.now().isoformat(timespec="seconds"),
@@ -219,6 +223,7 @@ class VoiceHandlers:
             root_task_id=root_task_id,
             stems=list(stems or []),
             project=project,
+            source_md5=source_md5,
         )
         self.history_mgr.append(record)
         self.history_mgr.auto_prune()
@@ -349,10 +354,12 @@ class VoiceHandlers:
         products = result.products or {}
         duration = _probe_duration(products.get("vocals", ""))
         stems = _build_stems(products)
+        # 计算源音频 MD5（分离记录留痕，查重跳过后续翻唱的 Demucs）
+        src_md5 = HistoryManager.compute_source_md5(Path(source))
         self._record(_task.task_id, "separation", derived_from, root,
                      products.get("vocals", ""), out_dir,
                      duration=duration, style=_source_label(source), stems=stems,
-                     project=project)
+                     project=project, source_md5=src_md5)
         return {"products": products, "stems": stems,
                 "output_dir": str(out_dir), "root_task_id": root}
 
@@ -422,6 +429,53 @@ class VoiceHandlers:
                      project=project)
         return {"products": result.products, "stems": stems,
                 "output_dir": str(out_dir), "root_task_id": root}
+
+    def ensure_separation(self, source: str, project: str = "") -> str:
+        """确保源音频有持久化的 separation 记录，返回 sep_task:<task_id>。
+
+        先查 history（source_md5 前 1MB），有现成且双轨齐全就直接复用；
+        没有就同步调 worker separate + 手动写 history 记录。
+        供翻唱 Tab 调用 —— 让 Demucs 分离流程与「音轨分离」Tab 完全一致
+        （同样的目录结构、同样的 HistoryRecord 字段），后续同曲翻唱自动跳过分离。
+        """
+        from history import HistoryManager as _HM  # 避免模块初始化循环
+
+        src_path = Path(source)
+        if not src_path.exists():
+            raise RuntimeError(f"源音频不存在: {source}")
+
+        # 1. 查重：算 md5 + 查 history
+        md5 = _HM.compute_source_md5(src_path)
+        existing = self.history_mgr.find_separation_by_source(md5)
+        if existing:
+            return f"sep_task:{existing.task_id}"
+
+        # 2. 没有 → 同步分离 + 写 history（与 separate_worker 流程一致）
+        task_id = f"separation_{new_short_id(10)}"
+        out_dir, ts = self._derived_dir("sep")
+        project = sanitize_project(project or "")
+        prefix = f"{project}_{ts}" if project else ts  # 产物文件名主干
+
+        try:
+            result = self.voice_client.separate(
+                source, mode="2", output_dir=str(out_dir), prefix=prefix)
+        except Exception:
+            # worker 抛异常：回收本次已建但未入历史的衍生目录
+            self._recycle_created_derived(out_dir)
+            raise
+
+        if not result.ok:
+            self._recycle_created_derived(out_dir)
+            raise RuntimeError(result.error or "同步分离失败")
+
+        products = result.products or {}
+        stems = _build_stems(products)
+        duration = _probe_duration(products.get("vocals", ""))
+        self._record(task_id, "separation", "", "",
+                     products.get("vocals", ""), out_dir,
+                     duration=duration, style=_source_label(source), stems=stems,
+                     project=project, source_md5=md5)
+        return f"sep_task:{task_id}"
 
     # ---------------------------------------------------------------- 音色库
     def refs_dir(self) -> Path:
