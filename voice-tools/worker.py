@@ -31,9 +31,12 @@ SEEDVC_DIR = os.environ.get("SEEDVC_DIR", "").strip()
 if SEEDVC_DIR:
     sys.path.insert(0, SEEDVC_DIR)
 
+# 分离模型：htdemucs_ft 是官方微调版（4 模型 bag 集成），人声/伴奏分离更干净、
+# 串音残留更少——分离结果直接作为换嗓输入，干净度直接决定翻唱成品音质。
+# 代价：耗时约为 htdemucs 的 4 倍（4 个模型依次推理），首次运行需下载模型权重
 FALLBACK_MODELS = {
-    "2": "htdemucs",
-    "4": "htdemucs",
+    "2": "htdemucs_ft",
+    "4": "htdemucs_ft",
 }
 # 分离输出子目录（由命令决定，此处统一扫描名）
 SEP_STEM_2 = ("vocals", "no_vocals")
@@ -55,6 +58,21 @@ _cancel_flag = threading.Event()
 
 def _log(msg: str) -> None:
     print(f"[worker] {msg}", flush=True)
+
+
+def _safe_float(v, default: float, lo: float, hi: float) -> float:
+    """把请求里的数值参数安全转 float 并钳制到 [lo, hi]。
+
+    请求来自外部 HTTP（可能缺字段/传字符串/传越界值），非法一律回退默认值，
+    越界钳制到边界，避免把负步数、超长参考等异常参数直接喂给模型。
+    """
+    try:
+        f = float(str(v).strip())
+    except (TypeError, ValueError):
+        return default
+    if f != f:  # NaN
+        return default
+    return max(lo, min(hi, f))
 
 
 def _write_progress(progress_file: str, stage: str) -> None:
@@ -215,6 +233,171 @@ def denoise_audio(src: str, dst: str, strength=None) -> str:
         return src
 
 
+def _duration(path: str):
+    """用 ffprobe 读音频总时长（秒）。失败返回 None。"""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+    try:
+        proc = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True,
+        )
+        return float(proc.stdout.strip())
+    except Exception:
+        return None
+
+
+def _block_rms(path: str, total: float):
+    """用 ffmpeg astats+ametadata 逐块测 RMS（dB），返回（逐块序列, 每块秒数）。
+
+    astats 的 reset 参数是"帧数"而非秒数，实测 44.1kHz 下每次输出的粒度约 0.093s
+    （与 reset 取值无关），故每块秒数必须由"实测点数 : 总时长"反推，不能写死秒数。
+    静音块 astats 输出 -inf，按 -120dB（近似数字静音）参与比较。
+    无 ffmpeg / 时长未知 / 解析不出至少 2 个点 → 返回 (None, 0.0)，由调用方回退。
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg or not total:
+        return None, 0.0
+    proc = subprocess.run(
+        [ffmpeg, "-i", path,
+         "-af", "astats=metadata=1:reset=2,"
+                "ametadata=mode=print:key=lavfi.astats.Overall.RMS_level:file=-",
+         "-f", "null", "-"],
+        capture_output=True, text=True, errors="replace",
+    )
+    vals = [
+        -120.0 if v == "-inf" else float(v)
+        for v in re.findall(r"Overall\.RMS_level=(-inf|-?\d+(?:\.\d+)?)", proc.stdout)
+    ]
+    if len(vals) < 2:
+        return None, 0.0
+    return vals, total / len(vals)
+
+
+def _max_window(series, win: int):
+    """在逐块数值序列上滑 win 块窗口，返回（均值最大的起点下标, 该窗口均值）。
+
+    调用方需保证 len(series) >= win；序列过短时返回 (0, -inf)。
+    """
+    if len(series) < win:
+        return 0, float("-inf")
+    best_i, best_v = 0, float("-inf")
+    for i in range(len(series) - win + 1):
+        v = sum(series[i:i + win]) / win
+        if v > best_v:
+            best_v, best_i = v, i
+    return best_i, best_v
+
+
+def _trim_ref(ref: str, dst: str, start: float, total: float, target_sec: float) -> str:
+    """按 start 秒裁剪 target_sec 秒写出 dst；成功返回 dst，失败记日志并返回原 ref。"""
+    start = max(0.0, min(start, total - target_sec))  # 起点贴尾时回退，保证段完整落在音频内
+    ffmpeg = shutil.which("ffmpeg")
+    proc = subprocess.run(
+        [ffmpeg, "-y", "-ss", f"{start:.2f}", "-t", f"{target_sec:.2f}",
+         "-i", ref, "-c:a", "pcm_s24le", dst],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0 or not Path(dst).exists():
+        _log(f"参考干声裁剪失败，改用原参考: {proc.stderr[-300:]}")
+        return ref
+    return dst
+
+
+def _smart_dominance_win(vals, win: int, ref_acc: str):
+    """智能挑段：按"人声主导度"（人声 RMS − 伴奏 RMS）选窗口，返回（起点下标, 主导度）。
+
+    需要与参考同源同时长的配对伴奏轨（分离记录自带 vocal+伴奏 两轨）。人声主导度最高
+    的段落即伴奏串音最少、最干净的人声段，作音色参考效果最好（P5C 盲听验证的结论）。
+    伴奏缺失、不可测或长度与参考明显不匹配（非同一次分离）时返回 None，由调用方回退
+    能量最高段（旧行为）。
+    """
+    if not ref_acc or not Path(ref_acc).exists():
+        _log("参考干声智能挑段：无配对伴奏，回退能量最高段")
+        return None
+    acc_vals, _ = _block_rms(ref_acc, _duration(ref_acc))
+    if not acc_vals:
+        _log("参考干声智能挑段：配对伴奏不可测，回退能量最高段")
+        return None
+    if abs(len(acc_vals) - len(vals)) > 2:
+        _log(f"参考干声智能挑段：配对伴奏时长不匹配（{len(acc_vals)} vs {len(vals)} 块），"
+             f"回退能量最高段")
+        return None
+    n = min(len(vals), len(acc_vals))
+    if n < win:
+        return None
+    # 逐块主导度：静音块两侧同为 -120dB，差值为 0，不会误胜出真实人声段
+    dom = [vals[i] - acc_vals[i] for i in range(n)]
+    return _max_window(dom, win)
+
+
+def _pick_active_ref_segment(ref: str, dst: str, target_sec: float = 10.0,
+                             ref_acc: str = "", mode: str = "smart") -> str:
+    """按 mode 从参考干声中截取 target_sec 秒写出 dst，返回可用参考路径。
+
+    mode：smart=智能（默认）/ energy=能量最高段 / full=整曲不裁剪。
+
+    动机（直接影响翻唱音质，两重收益）：
+    1) Seed-VC V1 的处理窗口写死为 30 秒对应帧数，参考音频的 mel 会占用该窗口
+       （max_source_window = max_context_window - 参考 mel 帧数）。参考越长，单块
+       能处理的源音频越短：25 秒参考时每块仅约 5 秒，整首歌被切成几十块独立扩散
+       推理后交叉淡化拼接，造成音色漂移与拼接毛刺；裁到 10 秒可把单块提升到约
+       20 秒，分块数减少约 4 倍。
+    2) 参考若取整曲人声，开头常是前奏/弱声段；且段落里伴奏串音越多，"音色参考"越脏。
+       实测（P5C 盲听）取"人声主导度最高段"作参考，换嗓产物谱质心偏差从 +1425Hz 降到
+       +509Hz、换嗓人声 LRA 6.8→9.5LU、成品真峰值 +1.40→+0.13dBTP，是唯一同时改善
+       动态与频谱过冲的方案。
+
+    smart 只在拿得到配对伴奏时用主导度口径；上传干声/音色库无配对轨，回退 energy
+    （旧行为）。曾尝试的自包含特征（谱平坦度/谐噪比/>8k 占比）实测无法可靠定位该段，
+    故不做猜测，避免"看起来智能但选错段"。
+    音频原本不长、ffprobe/ffmpeg 缺失、测量或裁剪失败时一律返回原 ref，不阻断翻唱流程。
+    """
+    if mode == "full":
+        return ref  # 整曲不裁剪（用户显式关闭裁剪优化）
+    try:
+        total = _duration(ref)
+        if not total or total <= target_sec + 1.0:
+            return ref
+        vals, sec_per_sample = _block_rms(ref, total)
+        if not vals:
+            return ref
+        win = max(1, int(round(target_sec / sec_per_sample)))
+        if len(vals) < win:
+            return ref
+
+        # 智能：优先按人声主导度挑段（需配对伴奏），拿不到则落到下方能量最高段
+        if mode == "smart":
+            pick = _smart_dominance_win(vals, win, ref_acc)
+            if pick is not None:
+                best_i, best_d = pick
+                start = best_i * sec_per_sample
+                out = _trim_ref(ref, dst, start, total, target_sec)
+                if out != ref:
+                    _log(f"参考干声智能取人声主导度最高 {target_sec:.0f}s"
+                         f"（起点 {start:.1f}s / 全长 {total:.1f}s / 主导度 {best_d:+.1f}dB）")
+                    return out
+                return ref
+
+        # 能量最高段（旧行为）
+        best_i, best_e = _max_window(vals, win)
+        # 全曲都近乎静音（无人声）：裁剪无意义，直接用原参考，避免把静音段喂给模型
+        if best_e <= -60.0:
+            _log(f"参考干声未找到有效人声段（最高 {best_e:.1f}dB），改用原参考")
+            return ref
+        start = best_i * sec_per_sample
+        out = _trim_ref(ref, dst, start, total, target_sec)
+        if out != ref:
+            _log(f"参考干声取能量最高 {target_sec:.0f}s（起点 {start:.1f}s / 全长 {total:.1f}s"
+                 f" / 段能量 {best_e:.1f}dB）")
+        return out
+    except Exception as e:
+        _log(f"参考干声裁剪异常，改用原参考: {e}")
+        return ref
+
+
 # ---------------------------------------------------------------- 换嗓
 def _rms_db(path: str):
     """用 ffmpeg astats 测整段 RMS 电平（dB）。失败/静音(-inf)/无法解析时返回 None。"""
@@ -281,10 +464,22 @@ def _convert(seed_dir: str, source: str, ref: str, semi_tone: int,
              gain_db: float = 0.0, denoise: bool = False,
              denoise_strength=None, prefix: str = "",
              source_vocals_path: str = "", source_acc_path: str = "",
-             progress_file: str = "") -> dict:
+             progress_file: str = "",
+             cfg_rate: float = 0.9, ref_sec: float = 10.0,
+             hf_enhance: float = 0.0, ref_acc: str = "",
+             ref_mode: str = "smart") -> dict:
     """执行翻唱：分离 + Seed-VC 换嗓 + ffmpeg 混音。
 
     source=被翻唱整曲；ref=参考干声；accompaniment=自定义伴奏（空则用分离出的伴奏）。
+    cfg_rate=Seed-VC 推理 CFG 引导强度（默认 0.9：P1 扫描实测最优——谱质心 3802Hz
+    最贴源人声，高于 0.5/0.7；数值越大越贴参考音色）。
+    ref_sec=参考干声裁剪长度秒（默认 10：P1 实测参考越短输出真峰值削波越重，
+    6s 达 +0.79dBTP，10s 最稳且频谱最贴源）。
+    ref_mode=参考段策略（smart=智能/默认、energy=能量最高段、full=整曲不裁剪）；
+    ref_acc=参考干声的配对伴奏轨（仅"分离人声"来源有，供 smart 算人声主导度挑段）。
+    hf_enhance=换嗓人声高频细节补偿强度（0=关闭，默认保持原行为）。P1 实测换嗓存在
+    over-smoothing（谱滚降 6800~7900Hz vs 源 8950，谱平坦度近乎减半）导致"发干/电"，
+    此参数用 ffmpeg aexciter 做谐波激励反向补偿，仅作用于人声轨、不新增 UI。
     denoise=True 时对换嗓后的人声降噪，并用降噪后人声参与混音。
     prefix（时间戳前缀）非空时全部产物平铺在 output_dir 下，统一命名
     <prefix>_<类别>（如 20260924_201805_cover.flac），便于按文件夹整组回放/下载。
@@ -293,6 +488,10 @@ def _convert(seed_dir: str, source: str, ref: str, semi_tone: int,
     progress_file 非空时在换嗓/降噪/混音阶段边界写入阶段进度，供 UI 轮询展示。
     """
     _load_seedvc(seed_dir)
+    # 参考段策略白名单：非法值回退 smart（默认最优），避免外部乱值导致无策略可用
+    if ref_mode not in ("smart", "energy", "full"):
+        _log(f"参考段策略 '{ref_mode}' 非法，回退 smart")
+        ref_mode = "smart"
 
     out_root = Path(output_dir)
     out_root.mkdir(parents=True, exist_ok=True)
@@ -301,14 +500,16 @@ def _convert(seed_dir: str, source: str, ref: str, semi_tone: int,
     _check_cancelled()
     # 0) 获取源人声/伴奏：优先复用已有分离结果（跳过 Demucs），否则现场分离整曲
     #    （Seed-VC 需要干净人声，不能用整曲）
-    ref_acc = ""  # 源曲伴奏参照（供自定义伴奏响度对齐）
+    # 变量名勿用 ref_acc：该名字是入参（参考干声的配对伴奏），此处指"源曲伴奏"，
+    # 早期实现同名覆盖会让 smart 挑段拿到错误的伴奏（源曲），导致挑段失效/选错。
+    src_acc = ""  # 源曲伴奏参照（供自定义伴奏响度对齐）
     if source_vocals_path and Path(source_vocals_path).exists():
         source_vocals = source_vocals_path
-        ref_acc = source_acc_path if source_acc_path and Path(source_acc_path).exists() else ""
+        src_acc = source_acc_path if source_acc_path and Path(source_acc_path).exists() else ""
         if not accompaniment:
-            if not ref_acc:
+            if not src_acc:
                 raise RuntimeError("复用分离结果作翻唱源时必须提供源伴奏轨")
-            accompaniment = ref_acc
+            accompaniment = src_acc
         _log(f"复用已有分离结果（跳过 Demucs）: 人声={Path(source_vocals).name} "
              f"伴奏={Path(accompaniment).name}")
     else:
@@ -316,7 +517,7 @@ def _convert(seed_dir: str, source: str, ref: str, semi_tone: int,
                                  denoise_strength=denoise_strength, prefix=prefix,
                                  progress_file=progress_file)
         source_vocals = sep_products["vocals"]
-        ref_acc = sep_products["accompaniment"]
+        src_acc = sep_products["accompaniment"]
         if not accompaniment:
             # 未提供自定义伴奏：混音用分离出的原曲伴奏
             accompaniment = sep_products["accompaniment"]
@@ -326,15 +527,26 @@ def _convert(seed_dir: str, source: str, ref: str, semi_tone: int,
     inference_py = Path(seed_dir) / "inference.py"
     conv_tmp = out_root / "_seedvc_tmp"
     conv_tmp.mkdir(parents=True, exist_ok=True)
+    # 参考干声按 ref_mode 挑段（smart 需配对伴奏 ref_acc，拿不到则回退能量最高段）：
+    # 参考越短，Seed-VC 单块能处理的源音频越长、整曲分块拼接越少，音色更稳。
+    # 裁剪副本写入 conv_tmp 下的子目录：避免被后续"取最新 wav"的换嗓输出定位逻辑误选，
+    # 随换嗓结束一并清理，不进产物列表
+    ref_seg_dir = conv_tmp / "ref_seg"
+    ref_seg_dir.mkdir(parents=True, exist_ok=True)
+    ref = _pick_active_ref_segment(ref, str(ref_seg_dir / "segment.wav"),
+                                   target_sec=ref_sec, ref_acc=ref_acc, mode=ref_mode)
     cmd = [
         venv_python, str(inference_py),
         "--source", source_vocals,
         "--target", ref,
         "--output", str(conv_tmp),
         "--diffusion-steps", str(diffusion_steps),
+        "--inference-cfg-rate", str(cfg_rate),
         "--f0-condition", "True",
         "--semi-tone-shift", str(semi_tone),
-        "--fp16", "True",
+        # fp16 关闭：半精度扩散会累积误差、声码器 BigVGAN 对输入精度敏感，
+        # 半精度易产生高频毛刺与不稳；关闭后耗时/显存上升，属质量优先取舍
+        "--fp16", "False",
     ]
     _log("运行 Seed-VC 换嗓: " + " ".join(cmd))
     # cwd=seed_dir：inference.py 依赖相对 cwd 定位检查点目录，用子进程级 cwd 替代进程级 chdir
@@ -389,7 +601,7 @@ def _convert(seed_dir: str, source: str, ref: str, semi_tone: int,
                                          str(out_root / f"{pfx}converted_vocals_denoised.wav"),
                                          strength=denoise_strength)
 
-    # 2) 用伴奏混音 -> 48kHz 立体声 FLAC（+ 可选伴奏增益），平铺为 <pfx>cover.flac
+    # 2) 用伴奏混音 -> 48kHz 立体声 24-bit FLAC（+ 可选伴奏增益），平铺为 <pfx>cover.flac
     #    换嗓人声先做响度匹配：Seed-VC 换嗓输出电平常显著低于原声干声（实测可差 14dB+），
     #    不匹配会被伴奏完全盖住。优先 loudnorm 响度归一（LUFS 对齐原声干声 + 真峰值 TP 防削波）：
     #    静态增益受峰值余量限制拉不满平均电平（换嗓人声峰值高、平均低，实测收窄后人声偏弱），
@@ -400,20 +612,28 @@ def _convert(seed_dir: str, source: str, ref: str, semi_tone: int,
     # 自定义伴奏响度对齐：素材库伴奏电平未知，与源曲伴奏差可超 10dB（换伴奏翻唱失衡）。
     # 把自定义伴奏 LUFS 静态增益对齐到源伴奏 LUFS（限 ±18dB）；测量失败回退 0dB 不处理
     acc_gain_db = 0.0
-    if accompaniment and ref_acc and \
-            Path(accompaniment).resolve() != Path(ref_acc).resolve():
+    if accompaniment and src_acc and \
+            Path(accompaniment).resolve() != Path(src_acc).resolve():
         acc_lufs = _lufs(accompaniment)
-        ref_lufs = _lufs(ref_acc)
+        ref_lufs = _lufs(src_acc)
         if acc_lufs is not None and ref_lufs is not None:
             acc_gain_db = max(-18.0, min(18.0, ref_lufs - acc_lufs))
             _log(f"自定义伴奏响度对齐: {acc_gain_db:+.1f}dB"
                  f"（素材 {acc_lufs:.1f} -> 源 {ref_lufs:.1f} LUFS）")
     src_lufs = _lufs(source_vocals)
+    # P2 高频细节补偿（hf_enhance>0 时启用，默认 0 完全保持原链路行为）：
+    # P1 实测换嗓 over-smoothing —— 谱滚降 6800~7900Hz（源 8950）、谱平坦度 0.10（源 0.197），
+    # 高频非谐波细节被抹平，听感"发干/电"。用 ffmpeg aexciter 做谐波激励反向补偿。
+    # 位置放在 loudnorm 之前：激励抬高峰值后由 loudnorm 重新测量并归一到达标的 LUFS/TP，
+    # 无需额外限幅器（挂在 loudnorm 后会让其 TP=-1.5dB 承诺失效，可能引入新削波）。
+    # freq=7500 起激励（覆盖歌声齿音/气息能量集中区），drive/blend 用 aexciter 默认（8.5/0）。
+    exciter = f",aexciter=amount={hf_enhance:.2f}:freq=7500" if hf_enhance > 0 else ""
     if src_lufs is not None:
-        _log(f"人声响度匹配: loudnorm 归一到 {src_lufs:.1f} LUFS（原声干声，TP=-1.5dB）")
+        _log(f"人声响度匹配: loudnorm 归一到 {src_lufs:.1f} LUFS（原声干声，TP=-1.5dB）"
+             + (f"；高频补偿 aexciter amount={hf_enhance:.2f}" if exciter else ""))
         # 注意 pan 在 loudnorm 之前：换嗓输出为单声道，先复制成立体声再归一，
         # 与原声干声（立体声）的 LUFS 声道求和口径一致；loudnorm 内部升 192k，需 aresample 回 48k
-        a0_chain = (f"[0:a]aresample=48000,pan=stereo|c0=c0|c1=c1,"
+        a0_chain = (f"[0:a]aresample=48000,pan=stereo|c0=c0|c1=c1{exciter},"
                     f"loudnorm=I={src_lufs:.2f}:TP=-1.5:LRA=11,aresample=48000[a0]")
     else:
         match_db = 0.0
@@ -435,20 +655,25 @@ def _convert(seed_dir: str, source: str, ref: str, semi_tone: int,
                  f" -> 增益 {match_db:+.1f}dB")
         else:
             _log("人声响度匹配: RMS 测量不可用，跳过（增益 0dB）")
-        a0_chain = (f"[0:a]aresample=48000,pan=stereo|c0=c0|c1=c1,"
+        a0_chain = (f"[0:a]aresample=48000,pan=stereo|c0=c0|c1=c1{exciter},"
                     f"volume={match_db:+.1f}dB,alimiter=limit=0.98:level=false[a0]")
+    # amix 关闭默认归一（normalize=0）：默认 normalize=1 会把两路各衰减 -6dB，
+    # 实测翻唱成品仅 -20.1 LUFS，比源曲（-14.0 LUFS）低 6.1 LU（听感明显发虚单薄）。
+    # 关闭后为直接求和：换嗓人声已中标到原声干声 LUFS、伴奏即源曲伴奏，
+    # 求和电平自然回到源曲量级；末尾 alimiter 仅作兜底，防止瞬时越界削波
     amix_filter = (
         f"[1:a]aresample=48000,pan=stereo|c0=c0|c1=c1,"
         f"volume={gain_db + acc_gain_db:+.1f}dB[a1];"
         f"{a0_chain};"
-        "[a0][a1]amix=inputs=2:duration=longest:dropout_transition=0.05"
+        "[a0][a1]amix=inputs=2:duration=longest:dropout_transition=0.05:normalize=0,"
+        "alimiter=limit=0.944:level=false"
     )
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise RuntimeError("未找到 ffmpeg，请将其加入系统 PATH")
     proc2 = subprocess.run(
         [ffmpeg, "-y", "-i", converted_vocals, "-i", accompaniment,
-         "-filter_complex", amix_filter, "-c:a", "flac", "-sample_fmt", "s16",
+         "-filter_complex", amix_filter, "-c:a", "flac", "-sample_fmt", "s32",
          str(cover_flac)],
         capture_output=True, text=True,
     )
@@ -527,6 +752,11 @@ class Handler(BaseHTTPRequestHandler):
                         str(body.get("source_vocals", "")),
                         str(body.get("source_acc", "")),
                         str(body.get("progress_file", "")),
+                        _safe_float(body.get("cfg_rate"), 0.9, lo=0.0, hi=1.0),
+                        _safe_float(body.get("ref_sec"), 10.0, lo=2.0, hi=30.0),
+                        _safe_float(body.get("hf_enhance"), 0.0, lo=0.0, hi=4.0),
+                        str(body.get("ref_acc", "")),
+                        str(body.get("ref_mode", "smart")),
                     )
                     self._send(200, {"ok": True, "products": result})
                 else:

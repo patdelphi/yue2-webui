@@ -115,6 +115,71 @@ def test_success_path(monkeypatch):
     assert all(k in res2.products for k in ("cover", "converted_vocals", "accompaniment"))
 
 
+def test_convert_passes_quality_params(monkeypatch):
+    """convert 应把 cfg_rate/ref_sec/hf_enhance 透传给 worker，并对越界/非法值做钳制与回退。"""
+    tmp, webui = _make_roots()
+    (tmp / "seed-vc").mkdir()
+    (webui / "config.cfg").write_text("\n[voice]\nseedvc_dir = seed-vc\n", encoding="utf-8")
+    client = _make_client(tmp)
+    monkeypatch.setattr(client, "ensure_running", lambda: None)
+    monkeypatch.setattr(client, "port", 8190)
+    captured = {}
+
+    def _fake_request(method, url, payload, timeout=300):
+        captured.clear()
+        captured.update(payload)
+        return {"ok": True, "products": {}}
+
+    monkeypatch.setattr(client, "_request", _fake_request)
+    client.convert("s.wav", "ref.wav", output_dir=str(tmp / "c1"),
+                   cfg_rate=0.9, ref_sec=6.0, hf_enhance=1.5)
+    assert captured["cfg_rate"] == 0.9
+    assert captured["ref_sec"] == 6.0
+    assert captured["hf_enhance"] == 1.5
+    # 越界钳制 + 非法回退默认
+    client.convert("s.wav", "ref.wav", output_dir=str(tmp / "c2"),
+                   cfg_rate=3.0, ref_sec="bad", hf_enhance=9.0)
+    assert captured["cfg_rate"] == 1.0
+    assert captured["ref_sec"] == 10.0
+    assert captured["hf_enhance"] == 4.0
+    # 不传时的默认值：cfg 0.9（P1 实测最优）、hf_enhance 0（保持原链路行为）
+    client.convert("s.wav", "ref.wav", output_dir=str(tmp / "c3"))
+    assert captured["cfg_rate"] == 0.9
+    assert captured["hf_enhance"] == 0.0
+
+
+def test_convert_passes_ref_mode(monkeypatch):
+    """convert 应透传 ref_mode/ref_acc，非法 ref_mode 回退默认 smart（P5C 参考段策略）。"""
+    tmp, webui = _make_roots()
+    (tmp / "seed-vc").mkdir()
+    (webui / "config.cfg").write_text("\n[voice]\nseedvc_dir = seed-vc\n", encoding="utf-8")
+    client = _make_client(tmp)
+    monkeypatch.setattr(client, "ensure_running", lambda: None)
+    monkeypatch.setattr(client, "port", 8190)
+    captured = {}
+
+    def _fake_request(method, url, payload, timeout=300):
+        captured.clear()
+        captured.update(payload)
+        return {"ok": True, "products": {}}
+
+    monkeypatch.setattr(client, "_request", _fake_request)
+    # 不传：默认 smart（P5C 盲听验证的最优参考段策略）
+    client.convert("s.wav", "ref.wav", output_dir=str(tmp / "r1"))
+    assert captured["ref_mode"] == "smart"
+    assert captured["ref_acc"] == ""
+    # 显式透传三态与配对伴奏
+    client.convert("s.wav", "ref.wav", output_dir=str(tmp / "r2"),
+                   ref_mode="full", ref_acc="acc.wav")
+    assert captured["ref_mode"] == "full"
+    assert captured["ref_acc"] == "acc.wav"
+    client.convert("s.wav", "ref.wav", output_dir=str(tmp / "r3"), ref_mode="energy")
+    assert captured["ref_mode"] == "energy"
+    # 非法值（含大小写/空白）回退 smart
+    client.convert("s.wav", "ref.wav", output_dir=str(tmp / "r4"), ref_mode="  bogus ")
+    assert captured["ref_mode"] == "smart"
+
+
 def test_cancelled_flag_parsed(monkeypatch):
     """worker 响应含 cancelled=True（协作取消）时，VoiceResult 应携带该标志，
     供上层把这类失败映射为"已取消"而非"任务失败"。"""
@@ -156,6 +221,15 @@ def _make_seedvc_fake(svc: Path):
     (camp_snap / "campplus_cn_common.bin").write_bytes(b"x")
 
 
+def _make_demucs_ft_fake(hub: Path):
+    """在假 HF hub 目录中构造 htdemucs_ft 缓存（4 个权重齐备）。"""
+    snap = hub / "models--adefossez--HTDemucs-ft" / "snapshots" / "rev1"
+    snap.mkdir(parents=True)
+    for f in ("f7e0c4bc.safetensors", "d12395a8.safetensors",
+              "92cfc3b6.safetensors", "04573f0d.safetensors"):
+        (snap / f).write_bytes(b"x")
+
+
 def test_check_voice_models_disabled(tmp_path):
     """enabled=false 时三项 exists 均为 None（不检查），UI 显示「未启用」。"""
     webui = tmp_path / "yue2-webui"
@@ -172,7 +246,7 @@ def test_check_voice_models_no_seedvc_dir(tmp_path, monkeypatch):
     webui = tmp_path / "yue2-webui"
     webui.mkdir()
     (webui / "config.cfg").write_text("\n[voice]\nenabled = true\n", encoding="utf-8")
-    monkeypatch.setenv("TORCH_HOME", str(tmp_path / "torchhome"))  # demucs 缓存指向空目录
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(tmp_path / "hfhub"))  # demucs 缓存指向空目录
     res = check_voice_models(tmp_path)
     assert res["enabled"] is True
     assert res["demucs"]["exists"] is False
@@ -181,21 +255,34 @@ def test_check_voice_models_no_seedvc_dir(tmp_path, monkeypatch):
 
 
 def test_check_voice_models_all_ready(tmp_path, monkeypatch):
-    """三模型齐备：demucs 缓存文件 + Seed-VC snapshots .pth + campplus .bin。"""
+    """三模型齐备：demucs_ft 4 权重 + Seed-VC snapshots .pth + campplus .bin。"""
     webui = tmp_path / "yue2-webui"
     webui.mkdir()
     _make_seedvc_fake(tmp_path / "seed-vc")  # 未配 seedvc_dir 时自动探测 project_root/seed-vc
     (webui / "config.cfg").write_text("\n[voice]\nenabled = true\n", encoding="utf-8")
-    th = tmp_path / "torchhome"
-    (th / "hub" / "checkpoints").mkdir(parents=True)
-    (th / "hub" / "checkpoints" / "955717e8-8726e21a.th").write_bytes(b"x")
-    monkeypatch.setenv("TORCH_HOME", str(th))
+    hub = tmp_path / "hfhub"
+    _make_demucs_ft_fake(hub)
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
     res = check_voice_models(tmp_path)
     assert res["enabled"] is True
     assert res["demucs"]["exists"] is True
     assert res["seedvc"]["exists"] is True
     assert res["campplus"]["exists"] is True
     assert "models--Plachta--Seed-VC" in res["seedvc"]["path"]
+
+
+def test_check_voice_models_demucs_partial(tmp_path, monkeypatch):
+    """demucs_ft 权重不全（4 取 3）：exists=False，不能误判为就绪。"""
+    webui = tmp_path / "yue2-webui"
+    webui.mkdir()
+    (webui / "config.cfg").write_text("\n[voice]\nenabled = true\n", encoding="utf-8")
+    hub = tmp_path / "hfhub"
+    _make_demucs_ft_fake(hub)
+    snap = next((hub / "models--adefossez--HTDemucs-ft" / "snapshots").iterdir())
+    (snap / "04573f0d.safetensors").unlink()  # 删掉一个权重
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    res = check_voice_models(tmp_path)
+    assert res["demucs"]["exists"] is False
 
 
 def test_check_voice_models_missing(tmp_path, monkeypatch):
@@ -205,7 +292,7 @@ def test_check_voice_models_missing(tmp_path, monkeypatch):
     (tmp_path / "seed-vc" / "checkpoints").mkdir(parents=True)  # 空的 checkpoints 目录
     (webui / "config.cfg").write_text(
         "\n[voice]\nenabled = true\nseedvc_dir = seed-vc\n", encoding="utf-8")
-    monkeypatch.setenv("TORCH_HOME", str(tmp_path / "torchhome"))
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(tmp_path / "hfhub"))
     res = check_voice_models(tmp_path)
     assert res["demucs"]["exists"] is False
     assert res["seedvc"]["exists"] is False

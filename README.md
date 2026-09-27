@@ -25,7 +25,8 @@
 - 🎚️ **完整采样参数控制**：ABC 阶段（Stage 1）与语义 Token 阶段（Stage 2）独立温度 / Top-P / Top-K / 重复惩罚等
 - 📜 **生成历史管理**：分页浏览、试听、歌词同步、乐谱预览，自动清理缺失文件记录，可删除/清空
 - 🎚️ **预设系统**：5 套内置参数预设，支持自定义预设的保存与加载
-- 🎛️ **音色工坊**：音轨分离（Demucs）拆分任意音频为人声/伴奏，参考音色翻唱（Demucs + Seed-VC）将歌曲换嗓后与伴奏混音；翻唱可复用分离结果跳过重复分离，任务支持阶段进度显示与运行中取消（可选功能，独立安装）
+- 📈 **波形缩放与时间码**：所有音频播放器支持波形缩放（适应宽度 / 按 px/s 逐级放大，带横向滚动）与高对比度时间码显示
+- 🎛️ **音色工坊**：音轨分离（Demucs）拆分任意音频为人声/伴奏，参考音色翻唱（Demucs + Seed-VC）将歌曲换嗓后与伴奏混音；翻唱按源音频内容自动查重，命中已有分离即直接复用、跳过重复分离，任务支持阶段进度显示与运行中取消（可选功能，独立安装）
 - 🌐 **中英双语界面**：右上角即时切换，含 Gradio 内置文案（上传提示/页脚）同步切换；模型路径外置 `config.cfg` 配置
 
 ---
@@ -52,8 +53,9 @@
 
 ### 🎛️ 音色工坊（可选）
 - **音轨分离**：把任意音频拆为人声/伴奏（2 轨）或鼓/贝斯/其他（4 轨），使用 Demucs，可选人声降噪。
-- **参考音色翻唱**：完整歌曲 → 分离人声 → 换成参考音色（Seed-VC）→ 与伴奏混音，支持半音移调 / 扩散步数 / 伴奏增益；翻唱源可直接选历史分离记录（复用人声/伴奏，跳过重复分离），自定义伴奏自动对齐源伴奏响度。
-- **源与参考**：可从生成历史选择源音频或直接上传（上传源自动留存副本）；参考干声支持上传 / 分离人声 / 音色库三来源，音色库与素材库支持试听 / 删除 / 重命名管理。
+- **参考音色翻唱**：完整歌曲 → 分离人声 → 换成参考音色（Seed-VC）→ 与伴奏混音，支持半音移调 / 扩散步数（默认 40） / 伴奏增益；翻唱源可手动选历史分离记录，也会按源音频内容自动查重（取音频前 1MB 计算 MD5），命中已有分离即直接复用、跳过 Demucs；自定义伴奏自动对齐源伴奏响度。**参考段**可选「智能 (推荐) / 能量最高段 / 整曲不裁剪」：默认「智能」取「人声主导度最高」（人声与同一次分离的配对伴奏 RMS 差最大，即串音最少）的 10 秒作音色参考，拿不到配对伴奏（上传干声 / 音色库）时自动回退「能量最高段」；「整曲不裁剪」等价关闭该优化。
+- **源与参考**：可从生成历史选择源音频或直接上传（上传源自动留存副本）；参考干声支持上传 / 分离人声 / 音色库三来源。
+- **音色库**：目录 `voice-tools/refs/`，存放 1–30 秒参考干声，命名规范 `名称_4位短id.wav`。入库为手动操作——在翻唱页「上传参考干声」上传后填写名称并点「保存到音色库」（名称留空则取原文件名）；分离人声与上传干声历史**不会**自动进音色库。翻唱时参考音色解析优先级：上传 → 上传干声 → 分离人声 → 音色库。音色库与素材库均支持试听 / 删除（进系统回收站）/ 重命名（保留短 id）。
 - **任务管理**：阶段进度实时显示（分离中 / 换嗓中 / 降噪中 / 混音中），运行中可取消（换嗓阶段即时中断），长曲超时按源时长自适应。
 - 产物独立目录存放（`outputs/separations|covers/<时间戳>_<短id>/`）并写入历史，历史按文件夹整组回放、逐轨试听与下载；需独立安装（见 setup.md 第 6 节）。
 
@@ -137,7 +139,7 @@ yue2-webui/
 ├── voice-tools/          # 音色工坊独立环境 & 参考音色库（可选）
 │   ├── worker.py         # 独立 venv HTTP worker（Demucs / Seed-VC）
 │   ├── venv/             # 独立 Python 3.11 虚拟环境
-│   └── refs/             # 参考音色库
+│   └── refs/             # 参考音色库（1-30 秒参考干声，命名 名称_4位短id.wav）
 ├── presets/              # 自定义参数预设存储
 ├── outputs/              # 生成结果（按任务定时戳分目录）
 ├── logs/                 # 运行日志
@@ -201,7 +203,8 @@ This is the **YuE2 music generation WebUI** project. Built on the YuE2 model joi
 - 🎚️ **Full sampling control**: independent temperature / Top-P / Top-K / repetition penalty for the ABC stage (Stage 1) and semantic-token stage (Stage 2)
 - 📜 **Generation history**: paginated browsing, playback, lyric sync, score preview; auto-cleans records with missing files; delete/clear supported
 - 🎚️ **Preset system**: 5 built-in parameter presets plus save/load of custom presets
-- 🎛️ **Voice Studio**: stem separation (Demucs) splits any audio into vocals/accompaniment, and reference-timbre covers (Demucs + Seed-VC) re-voice a song and mix it with the accompaniment; covers can reuse past separation results to skip re-separating, with live stage progress and in-run cancellation (optional feature, installed separately)
+- 📈 **Waveform zoom & timecode**: every audio player supports waveform zoom (fit-to-width / step-by-step px/s zoom with horizontal scrolling) and a high-contrast timecode display
+- 🎛️ **Voice Studio**: stem separation (Demucs) splits any audio into vocals/accompaniment, and reference-timbre covers (Demucs + Seed-VC) re-voice a song and mix it with the accompaniment; covers auto-detect the source by content hash and reuse an existing separation to skip Demucs, with live stage progress and in-run cancellation (optional feature, installed separately)
 - 🌐 **Bilingual UI (Chinese/English)**: instant switch at the top right, including Gradio built-in texts (upload hints / footer); model paths configured via external `config.cfg`
 
 ---
@@ -228,8 +231,9 @@ This is the **YuE2 music generation WebUI** project. Built on the YuE2 model joi
 
 ### 🎛️ Voice Studio (optional)
 - **Stem separation**: split any audio into vocals/accompaniment (2 stems) or drums/bass/other (4 stems) with Demucs, with optional vocal denoising.
-- **Reference-timbre cover**: full song → separate vocals → re-voice with a reference timbre (Seed-VC) → mix with the accompaniment; supports semitone shift / diffusion steps / accompaniment gain; the source can be a past separation record (reusing vocals + accompaniment to skip re-separation), and custom accompaniments are loudness-matched to the source.
-- **Sources & references**: pick the source from generation history or upload directly (uploaded sources keep a copy); reference dry vocals come from upload / separated vocals / timbre library, and both libraries support preview / delete / rename.
+- **Reference-timbre cover**: full song → separate vocals → re-voice with a reference timbre (Seed-VC) → mix with the accompaniment; supports semitone shift / diffusion steps (default 40) / accompaniment gain; the source can be a past separation record, and separations are also auto-detected by content hash (MD5 over the first 1MB of the audio) so a repeated source reuses its existing separation and skips Demucs; custom accompaniments are loudness-matched to the source. The **reference segment** offers "Smart (recommended) / Loudest section / Full track (no trim)": Smart (default) uses the 10s with the highest vocal dominance (largest RMS gap between the vocals and the paired accompaniment from the same separation, i.e. least bleed) as the timbre reference, and falls back to the loudest section when no paired accompaniment is available (uploaded dry vocals / timbre library); "Full track (no trim)" effectively disables this optimization.
+- **Sources & references**: pick the source from generation history or upload directly (uploaded sources keep a copy); reference dry vocals come from upload / separated vocals / timbre library.
+- **Timbre library**: stored in `voice-tools/refs/` as 1–30s reference dry vocals named `name_<4-char-id>.wav`. Entries are added manually — upload a reference on the Cover page, enter a name and click "Save to library" (an empty name falls back to the original file name). Separated vocals and uploaded dry-vocal history are **not** added automatically. Reference priority at cover time: upload → uploaded dry vocal → separated vocals → timbre library. Both libraries support preview / delete (to the OS recycle bin) / rename (preserving the short id).
 - **Task management**: live stage progress (separating / converting / denoising / mixing), in-run cancellation (instant interrupt during conversion), and duration-adaptive timeouts for long tracks.
 - Outputs live in dedicated folders (`outputs/separations|covers/<timestamp>_<short-id>/`) and are written to history for folder-grouped playback, per-stem preview and download; requires a separate install (see setup.md §6).
 
@@ -314,7 +318,7 @@ yue2-webui/
 ├── voice-tools/          # voice-studio isolated env & reference-timbre library (optional)
 │   ├── worker.py         # standalone venv HTTP worker (Demucs / Seed-VC)
 │   ├── venv/             # isolated Python 3.11 virtual env
-│   └── refs/             # reference-timbre library
+│   └── refs/             # reference-timbre library (1-30s dry vocals, named name_<4-char-id>.wav)
 ├── presets/              # custom parameter presets
 ├── outputs/              # generation results (one folder per task timestamp)
 ├── logs/                 # runtime logs

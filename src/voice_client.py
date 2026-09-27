@@ -311,13 +311,23 @@ class VoiceClient:
                 denoise: bool = False, prefix: str = "",
                 source_vocals: str = "", source_acc: str = "",
                 progress_file: str = "",
-                cancel_event: Optional[threading.Event] = None) -> VoiceResult:
+                cancel_event: Optional[threading.Event] = None,
+                cfg_rate: float = 0.9, ref_sec: float = 10.0,
+                hf_enhance: float = 0.0,
+                ref_mode: str = "smart", ref_acc: str = "") -> VoiceResult:
         """参考音色翻唱。source=换嗓人声来源, ref=参考干声, accompaniment=伴奏。denoise=True 时对换嗓人声降噪。
 
         prefix（时间戳前缀）传给 worker，全部产物平铺 output_dir 并命名 <prefix>_<类别>（可空回退短名）。
         source_vocals/source_acc 非空时复用已有分离结果（跳过 Demucs 重复分离）：
         source_vocals=源人声干声轨, source_acc=源伴奏轨（未提供自定义伴奏时兼作混音伴奏）。
         progress_file 为阶段进度文件路径；cancel_event 触发时尽力通知 worker 协作中止。
+        cfg_rate=Seed-VC 推理 CFG 强度（0~1，默认 0.9：P1 扫描实测谱质心最贴源的档位）；
+        ref_sec=参考干声裁剪秒数（2~30，默认 10：实测越短输出削波越重）。
+        hf_enhance=换嗓人声高频细节补偿强度（0~4，默认 0=关闭；补偿 over-smoothing 导致的高频细节丢失）。
+        ref_mode=参考段策略（smart=智能/默认｜energy=能量最高段｜full=整曲不裁剪），
+        非法值回退 smart；ref_acc=参考干声的配对伴奏轨（仅"分离人声"来源有，
+        smart 用它算人声主导度挑段；缺失时 worker 侧自动回退能量最高段）。
+        以上均为音质调优参数，越界值在此钳制，避免 worker 端异常。
         """
         # 数值入参强校验：非法（含 None/空串/非数字）回退默认并告警，避免 worker 端崩溃
         def _int_or(v, default):
@@ -338,6 +348,14 @@ class VoiceClient:
             den = bool(denoise) and str(denoise).strip().lower() not in ("", "0", "false", "no", "off")
         except Exception:
             den = False
+        # 参考段策略白名单：非法/空值一律回退默认 smart（P5C 盲听验证的最优策略）
+        try:
+            rm = str(ref_mode or "smart").strip().lower()
+        except Exception:
+            rm = "smart"
+        if rm not in ("smart", "energy", "full"):
+            logger.warning(f"convert: ref_mode='{ref_mode}' 非法，回退为 'smart'")
+            rm = "smart"
         return self._run("/api/convert", {
             "source": str(source), "ref": str(ref),
             "semi_tone": _int_or(semi_tone, 0),
@@ -348,6 +366,12 @@ class VoiceClient:
             "prefix": str(prefix or ""),
             "source_vocals": str(source_vocals or ""), "source_acc": str(source_acc or ""),
             "progress_file": str(progress_file or ""),
+            # 音质调优参数：越界在此钳制，worker 端还会再钳一次（双保险）
+            "cfg_rate": max(0.0, min(1.0, _float_or(cfg_rate, 0.9))),
+            "ref_sec": max(2.0, min(30.0, _float_or(ref_sec, 10.0))),
+            "hf_enhance": max(0.0, min(4.0, _float_or(hf_enhance, 0.0))),
+            # 参考段策略 + 配对伴奏（智能挑段用；无配对轨时 worker 侧回退能量最高段）
+            "ref_mode": rm, "ref_acc": str(ref_acc or ""),
         }, timeout=self._timeout_for(source, source_vocals or source, ref),
            cancel_event=cancel_event)
 
@@ -359,23 +383,37 @@ def heal_ffmpeg_check() -> str:
 
 
 # ---------------------------------------------------------------- 模型状态检查
-# Demucs htdemucs 在 torch hub 的缓存文件名（下载 url 的 hash，跨平台一致）；
-# 文件缺失时首次运行分离会自动下载（约 80MB）
-DEMUCS_CACHE_NAME = "955717e8-8726e21a.th"
+# 分离模型 htdemucs_ft 经 HuggingFace hub 加载（demucs 优先走 HF），权重落 HF 缓存
+# 仓库 models--adefossez--HTDemucs-ft/snapshots/<revision>/ 下的 4 个 safetensors
+# （4 模型 bag 集成，合计约 320MB）；缺失时首次分离自动下载
+DEMUCS_FT_REPO = "models--adefossez--HTDemucs-ft"
+DEMUCS_FT_FILES = ("f7e0c4bc.safetensors", "d12395a8.safetensors",
+                   "92cfc3b6.safetensors", "04573f0d.safetensors")
 
 
-def _demucs_cache_file() -> Path:
-    """定位 htdemucs 的 torch hub 缓存文件（TORCH_HOME 优先，默认 ~/.cache/torch）。"""
-    torch_home = os.environ.get("TORCH_HOME")
-    base = Path(torch_home) if torch_home else Path.home() / ".cache" / "torch"
-    return base / "hub" / "checkpoints" / DEMUCS_CACHE_NAME
+def _hf_hub_dir() -> Path:
+    """定位 HuggingFace 本地缓存 hub 目录（HUGGINGFACE_HUB_CACHE 指向 hub 本身，
+    HF_HOME 指向其父目录，均未设置时默认 ~/.cache/huggingface）。"""
+    hub_cache = os.environ.get("HUGGINGFACE_HUB_CACHE")
+    if hub_cache:
+        return Path(hub_cache)
+    hf_home = os.environ.get("HF_HOME")
+    base = Path(hf_home) if hf_home else Path.home() / ".cache" / "huggingface"
+    return base / "hub"
+
+
+def _demucs_snapshot_dir() -> Path:
+    """定位 htdemucs_ft 的 HF 快照目录（内含 4 个权重文件）。"""
+    snap = _hf_hub_dir() / DEMUCS_FT_REPO / "snapshots"
+    subs = [d for d in snap.iterdir() if d.is_dir()] if snap.is_dir() else []
+    return subs[0] if subs else snap
 
 
 def check_voice_models(project_root) -> dict:
     """检查音色工坊三个模型文件的存在状态（仅文件级检查，不加载模型）。
 
     供系统设置页「模型状态」展示：
-    - Demucs (htdemucs)：torch hub 缓存文件
+    - Demucs (htdemucs_ft)：HF 缓存快照下 4 个 safetensors 齐备才算就绪
     - Seed-VC 主模型：seedvc_dir/checkpoints/models--Plachta--Seed-VC/snapshots 下的 .pth
     - campplus 说话人编码器：models--funasr--campplus/snapshots 下的 campplus_cn_common.bin
 
@@ -385,7 +423,7 @@ def check_voice_models(project_root) -> dict:
     # 复用 VoiceClient 的配置读取（含 seedvc_dir 回退探测 project_root/seed-vc）
     cfg = VoiceClient(Path(project_root))._load_cfg()
 
-    demucs_path = _demucs_cache_file()
+    demucs_path = _demucs_snapshot_dir()
     result = {
         "enabled": bool(cfg["enabled"]),
         "demucs": {"exists": None, "path": str(demucs_path)},
@@ -395,7 +433,8 @@ def check_voice_models(project_root) -> dict:
     if not result["enabled"]:
         return result
 
-    result["demucs"]["exists"] = demucs_path.is_file()
+    result["demucs"]["exists"] = demucs_path.is_dir() and all(
+        (demucs_path / f).is_file() for f in DEMUCS_FT_FILES)
 
     seedvc_dir = cfg.get("seedvc_dir")
     if seedvc_dir is None:

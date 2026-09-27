@@ -935,6 +935,29 @@ def _voice_dry_upload_choices(lang="zh", limit=50):
     return [(f"上传 · {Path(p).name}", p) for p in voice_handlers.list_dry_uploads()[:limit]]
 
 
+def _voice_ref_pair_acc(ref_path: str) -> str:
+    """参考干声若来自分离记录，返回同一次分离的伴奏轨路径（供智能挑段算人声主导度）。
+
+    仅「从分离人声选择」这条来源能拿到配对伴奏（分离记录自带 vocals+accompaniment
+    两轨）；上传干声/音色库没有配对轨，返回空串，worker 侧会回退"能量最高段"。
+    查询异常一律返回空串，不阻断翻唱流程。
+    """
+    try:
+        target = Path(ref_path).resolve()
+        for rec in history_mgr.list_all():
+            if rec.record_type != "separation" or not rec.audio_path:
+                continue
+            if Path(rec.audio_path).resolve() != target:
+                continue
+            stems = {s.get("type"): s.get("path", "")
+                     for s in (getattr(rec, "stems", None) or []) if isinstance(s, dict)}
+            acc = stems.get("accompaniment", "")
+            return acc if acc and Path(acc).exists() else ""
+    except Exception:
+        pass
+    return ""
+
+
 def _voice_task_history_choices(record_type, lang="zh", limit=50):
     """按类型列出任务历史（separation/cover），value=task_id，用于 Tab 内选择回放。
 
@@ -1214,7 +1237,7 @@ def on_voice_separate(source_history, source_upload, sep_mode="vocals",
 def on_voice_cover(source_history, source_upload, ref_library, ref_dry_upload,
                    ref_dry_sep, ref_upload,
                    semi_tone=0, steps=30, gain_db=0.0, custom_acc="",
-                   denoise=False):
+                   denoise=False, ref_seg_mode="smart"):
     """参考音色翻唱（生成器回调）：确保分离 → 换嗓 → 混音 全流程，实时显示进度。
 
     与「音轨分离」Tab 统一：
@@ -1225,6 +1248,9 @@ def on_voice_cover(source_history, source_upload, ref_library, ref_dry_upload,
     3. 后续同曲翻唱自动命中第 1 步的查重，GPU 秒级启动
 
     用户直接选分离记录（sep_task 前缀）时：跳过 ensure_separation，直接复用。
+    ref_seg_mode=参考段策略（smart=智能/默认、energy=能量最高段、full=整曲不裁剪）；
+    smart 仅在参考干声来自分离记录时带配对伴奏（算人声主导度挑段），否则 worker 回退
+    能量最高段。
     """
     lang = _CUR_LANG
     # 提交前先反馈：清空播放器组 + 禁用按钮
@@ -1272,10 +1298,15 @@ def on_voice_cover(source_history, source_upload, ref_library, ref_dry_upload,
         root_task_id = entry.task_id
 
     # 参考音色解析优先级：上传 → 上传干声 → 分离人声 → 音色库
+    # ref_acc = 配对伴奏轨：仅「分离人声」来源能拿到，供 worker 智能挑参考段用
     ref = None
-    for cand in (ref_upload, ref_dry_upload, ref_dry_sep, ref_library):
+    ref_acc = ""
+    for src_key, cand in (("upload", ref_upload), ("dry_upload", ref_dry_upload),
+                          ("dry_sep", ref_dry_sep), ("library", ref_library)):
         if cand and Path(cand).exists():
             ref = cand
+            if str(ref_seg_mode) == "smart" and src_key == "dry_sep":
+                ref_acc = _voice_ref_pair_acc(str(ref))
             break
     if not ref:
         raise gr.Error(tr(_CUR_LANG, "请先选择参考音色"))
@@ -1295,6 +1326,7 @@ def on_voice_cover(source_history, source_upload, ref_library, ref_dry_upload,
         root_task_id=root_task_id, denoise=bool(denoise),
         source_vocals=source_vocals, source_acc=source_acc,
         from_upload=False, project=cover_project,
+        ref_mode=str(ref_seg_mode or "smart"), ref_acc=ref_acc,
     )
     try:
         result = None
@@ -2849,10 +2881,28 @@ def build_ui():
                             _reg(cover_semi_orig, lambda lang: gr.update(value=tr(lang, "半音快捷原调")))
                             cover_semi_m12 = gr.Button(_t("−12"), size="sm")
                             cover_semi_p12 = gr.Button(_t("+12"), size="sm")
-                        cover_steps = gr.Slider(10, 50, value=30, step=1, label=_t("扩散步数"))
+                        # 默认 40：Seed-VC 官方称质量最佳区为 30-50（30 是质量区下限），
+                        # 默认取 40 兼顾质量与耗时
+                        cover_steps = gr.Slider(10, 50, value=40, step=1, label=_t("扩散步数"))
                         _reg(cover_steps, lambda lang: gr.update(label=tr(lang, "扩散步数")))
                         cover_gain = gr.Slider(-6, 6, value=0, step=0.5, label=_t("伴奏增益(dB)"))
                         _reg(cover_gain, lambda lang: gr.update(label=tr(lang, "伴奏增益(dB)")))
+                        # 参考段策略（P5C 盲听验证）：默认「智能」——参考干声来自分离记录时
+                        # 用配对伴奏挑"人声主导度最高 10s"（串音最少）作音色参考；拿不到配对
+                        # 伴奏（上传干声/音色库）时自动回退「能量最高段」（旧行为）。
+                        # 「整曲不裁剪」等价关闭该优化。
+                        cover_ref_seg = gr.Dropdown(choices=[
+                            (_t("智能 (推荐)"), "smart"),
+                            (_t("能量最高段"), "energy"),
+                            (_t("整曲不裁剪"), "full"),
+                        ], value="smart", label=_t("参考段"),
+                            info=_t("智能：取人声最干净的 10 秒作参考；整曲不裁剪可能音色漂移"))
+                        _reg(cover_ref_seg, lambda lang: gr.update(
+                            choices=[(tr(lang, "智能 (推荐)"), "smart"),
+                                     (tr(lang, "能量最高段"), "energy"),
+                                     (tr(lang, "整曲不裁剪"), "full")],
+                            label=tr(lang, "参考段"),
+                            info=tr(lang, "智能：取人声最干净的 10 秒作参考；整曲不裁剪可能音色漂移")))
 
                     # —— 右栏：执行与输出 ——
                     with gr.Column(scale=4):
@@ -2924,7 +2974,7 @@ def build_ui():
                                         cover_ref_dry_sep,
                                         cover_ref_upload,
                                         cover_semi, cover_steps, cover_gain, cover_acc_dd,
-                                        cover_denoise],
+                                        cover_denoise, cover_ref_seg],
                                 outputs=[*cover_audios, cover_info, cover_btn, cover_history_dd])
                 # 取消按钮：协作式取消本 Tab 排队中/运行中的任务（info 区反馈结果）
                 cover_cancel_btn.click(fn=lambda: on_voice_cancel("cover"),
@@ -3201,7 +3251,7 @@ if __name__ == "__main__":
 <script src="https://cdnjs.cloudflare.com/ajax/libs/abcjs/6.3.0/abcjs-basic-min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.0/Sortable.min.js"></script>
 <script src="/static/js/vendor/wavesurfer.min.js?v=1"></script>
-<script src="/static/js/app.js?v=11"></script>
+<script src="/static/js/app.js?v=12"></script>
 """
                     html = html.replace("</head>", scripts + "</head>")
                     return HTMLResponse(content=html, status_code=response.status_code)

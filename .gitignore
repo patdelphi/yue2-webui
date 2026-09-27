@@ -64,6 +64,14 @@ test_*.png
 voice-tools/tmp/
 voice-tools/stems/
 voice-tools/refs/
+# 第三方 BWE 增强模型（AP-BWE）：外部 clone + 权重，不进主仓
+voice-tools/third_party/
+# 离线 A/B 专用 venv（audio-separator，与 worker venv 隔离），不进主仓
+voice-tools/venv-as/
+# venv 依赖快照备份（回滚用），不进主仓
+voice-tools/requirements-lock-*.txt
+# few-shot 微调用的切片训练数据（音频二进制），不进主仓
+voice-tools/ft_data/
 .pytest_tmp/
 
 # Misc temporary

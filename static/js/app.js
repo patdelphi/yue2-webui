@@ -750,7 +750,11 @@
 
                 // 主播放器 + 音色工坊播放器组（固定槽位按 elem_id 前缀收集，
                 // 组件初始隐藏/按需显隐，由 watchPlayer 轮询接管）
-                var PLAYER_IDS = ['gen-audio', 'history-audio'];
+                // 另含不带前缀的散装播放器：歌曲历史「轨道回放(分离/翻唱)」history-stem-audio，
+                // 以及分离/翻唱页各处「试听」播放器（lib-*/cover-*-preview）
+                var PLAYER_IDS = ['gen-audio', 'history-audio', 'history-stem-audio',
+                                  'lib-stem-preview', 'lib-ref-preview',
+                                  'cover-ref-preview', 'cover-acc-preview'];
                 ['sep-audio-', 'cover-audio-', 'sep-history-audio-', 'cover-history-audio-'].forEach(function(prefix) {
                     for (var i = 0; i < 6; i++) PLAYER_IDS.push(prefix + i);
                 });

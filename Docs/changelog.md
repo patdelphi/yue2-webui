@@ -4,6 +4,85 @@
 
 ---
 
+## 2026-09-27 — 播放器缩放补齐（PlayerZoom 遗漏 5 个播放器）
+
+- `static/js/app.js`：`PLAYER_IDS` 补入 `history-stem-audio`（歌曲历史「轨道回放(分离/翻唱)」）、`lib-stem-preview`、`lib-ref-preview`、`cover-ref-preview`、`cover-acc-preview`（分离/翻唱页各处「试听」）。
+  - 此前仅登记 `gen-audio` / `history-audio` / `sep-audio-*` / `cover-audio-*` / `sep-history-audio-*` / `cover-history-audio-*`，上述 5 个一直无缩放条。
+- `app.py`：脚本引用 `app.js?v=11` → `v=12`（避免浏览器命中旧缓存）。
+- 说明：空播放器（未加载音频）不渲染波形容器，本就没有缩放条，属预期行为；「全都没有缩放」的疑因是页面缓存旧 JS，需强刷或重启前端后刷新。
+
+---
+
+## 2026-09-27 — 参考段优化产线化（P5C「智能挑参考段」，默认开启可关）
+
+> 背景与结论见 `Docs/optimization-plan-cover-quality.md` 3.5。P5 方案 A（换分离算法，B2）
+> 判定不接入；P5C（参考段从"能量最高 10s"改为"人声主导度最高 10s"）盲听有效，产线化。
+
+- **翻唱 Tab 新增「参考段」下拉（默认「智能 (推荐)」）**：`smart` 智能挑段 / `energy` 能量最高段（旧行为）/ `full` 整曲不裁剪（等价关闭本优化）。中英文文案齐全，随语言切换刷新。
+- `voice-tools/worker.py`：`_pick_active_ref_segment` 拆出 `_block_rms`/`_max_window`/`_trim_ref`/`_smart_dominance_win` 并新增 `mode` 与 `ref_acc`（配对伴奏）参数；`_convert` 末尾新增 `ref_acc`/`ref_mode`（非法值回退 smart）；`/api/convert` 透传两参。
+  - `smart` 仅在拿得到配对伴奏时按"人声 RMS − 伴奏 RMS"挑段；伴奏缺失 / 不可测 / 块数差 > 2（非同一次分离）时**回退能量最高段**，保证默认不劣化。
+- `src/voice_client.py`：`convert()` 新增 `ref_mode`/`ref_acc` 透传 + 白名单钳制（非法回退 smart）。
+- `src/voice_ui_handlers.py`：`cover_worker` 透传 `ref_mode`/`ref_acc`。
+- `app.py`：新增 `_voice_ref_pair_acc()`（参考干声来自分离记录时回传同一次分离的伴奏轨）；`on_voice_cover` 新增 `ref_seg_mode` 入参，仅「从分离人声选择」来源携带配对伴奏。
+- `src/i18n.py`：新增「参考段 / 智能 (推荐) / 能量最高段 / 整曲不裁剪」及说明文案共 5 条英译。
+- **修复（Bug）**：`_convert` 内"源曲伴奏"局部变量曾复用入参名 `ref_acc` 并覆盖，导致 smart 实际拿到**源曲**伴奏（时长不匹配即静默回退，或偶尔选错段）；改名 `src_acc`，并加源码级回归断言防复发。
+- 测试：`tests/test_voice_ref_segment.py` 新增 smart/energy/full 四态测试与 `_convert` 源码级回归断言（含"入参不得被覆盖"）；`tests/test_voice_client.py` 新增 `ref_mode` 透传/回退测试。断言改用"已知区域手工裁剪基准"比对，不再依赖合成源绝对电平。两文件 28 项全通过。
+
+---
+
+## 2026-09-26 — 翻唱音质 P0~P4（量化脚手架 / 参数扫描 / DSP 修形 / few-shot 微调 / 第三方 BWE，均无产线改动）
+
+> 目标：解决「音色翻唱」听感"电子音/金属感"。方案见 `Docs/optimization-plan-cover-quality.md`。
+> 结论：P0/P1/P2 改动保留，**P3 微调与 P4 AP-BWE 经盲听判定无效**——P3 代码已全部回退，P4 未接入。
+
+**P0 · 量化脚手架（保留）**
+
+- 新增 `tools/audio_ab_report.py`：单文件（stdlib + 系统 ffmpeg），输出积分响度/真峰值/LRA/谱质心/谱滚降/谱平坦度/分带占比/削波代理，CSV 为 UTF-8+BOM；`--ref` 提供轨级对比（换嗓人声 vs 源人声）。
+- 新增单测 `tests/test_audio_ab_report.py`（16 项）。
+- 首轮实测推翻 H1：混音级 >8k/>10k/>12k 分带差仅 +0.2~+0.5 dB（判据 1.5 dB），"高频过度生成"不成立。
+- 新增首要怀疑 H8：轨级 LRA 被压 3.7 LU（源人声 10.1 → 换嗓 6.4）。
+
+**P1 · 参数扫描（保留）**
+
+- 新增 `tools/cover_ab.py`：绕过 UI 直传参数、复用已运行 worker、复用同一次分离，产物落 `outputs/ab_test/<label>/` 并存参数 sidecar。
+- `worker.py` 新增 `cfg_rate` / `ref_sec` 参数并补 `--inference-cfg-rate`；`src/voice_client.py` 透传 + 钳制；补单测。
+- S1/S2/S3 三轮扫描（steps / cfg / ref 长度）**三条原假设全部反向**：加大步数、加大 cfg、缩短参考只会更闷。
+- 最优组合 **steps 40 + cfg 0.9 + ref 10s**；`cfg 0.9` 已采纳为新默认（`worker.py` / `voice_client.py` / `cover_ab.py`）。
+- 真实退化定位为 **over-smoothing**（谱滚降 6800~7900Hz vs 源 8950；谱平坦度 0.10 vs 源 0.197）+ **LRA 压缩** + 输出真峰值越界。
+
+**P2 · 前端 DSP 修形（保留）**
+
+- `worker.py` 混音链新增 `hf_enhance`（0~4，0=关）：ffmpeg `aexciter` 做谐波激励，**挂在 loudnorm 之前**，避免破坏其 TP=-1.5dB 承诺。
+- `voice_client.py` 透传 + 钳制；`cover_ab.py` 新增 `--hf-enhance`；`tests/test_voice_client.py` 补参数透传/钳制/默认值断言。
+- 方向修正：原 D2「高频搁架压制」方向错误（H1 已推翻），改为反向的「高频细节补偿」。
+- 3 档扫描（0.5/1.0/2.0）指标单调有效，但**用户试听后判定"都不行"** → 根因在换嗓模型自身，转入 P3。
+
+**P3 · few-shot 微调（已回退，❌ 判定无效）**
+
+- 新增 `tools/ft_prep_segments.py`（保留）：用 ffmpeg silencedetect 求语音区间补集，把长人声切成 5~12s 短语片段，切点落在静音边界。实测 K歌之王人声 224.3s → 17 段（5.88~12s，合计 183s）。
+- 预取训练缺失权重到 `seed-vc/checkpoints`：`myshell-ai/OpenVoiceV2 → converter/checkpoint.pth`(125MB) + `converter/config.json`、`Plachta/Seed-VC → se_db.pt`(98MB)；训练起点用 `--pretrained-ckpt` 指向本地已有 DiT v2 权重（782MB），省一次下载。
+- 训练：100 步档 82s 完成；50 步档取中间存档；300 步档 **loss 自 120 步起 NaN（发散）**，权重与目录已删除。
+- 训练不稳定根因：`train.py` 内 lr 硬编码 1e-5，对 17 条小数据偏高（100 步档 loss 已从 0.523 单调升到 0.586）。
+- A/B（源曲 漠河小猫 var1、参考 K歌之王人声，仅换权重）：100 步档谱平坦度 0.110→0.157、LRA 6.5→7.2（有改善），但谱质心 3862→4645、谱滚降 7969→9790（超源）+ 削波计数 21→156（变差）；50 步档几乎无改善。
+- **用户盲听判定微调无效** → 回退 `worker.py` / `src/voice_client.py` / `tools/cover_ab.py` / `tests/test_voice_client.py` 中的 `ft_checkpoint` / `ft_config` 透传与绑定；全仓已无 `ft_*` 残留引用。
+
+**P4 · 第三方 BWE（AP-BWE 24kto48k，❌ 判定无效，未接入）**
+
+- 选型：AP-BWE（MIT 代码+权重，24kto48k 权重 119 MB，零新增 Python 依赖，3080 上整首 256s 仅 1.9s）。FlashSR 因许可证缺失（jakeoneijk 版）或 8 kHz 带限过损（onnx tiny 版）不采纳。
+- 落地：`git clone --depth 1` → `voice-tools/third_party/AP-BWE` + HF `rsxdalv/AP-BWE` 的 `config.json`/`g_24kto48k.ckpt` → `checkpoints/24kto48k/`；`.gitignore` 新增 `voice-tools/third_party/`（第三方 clone 与权重不进主仓）。
+- 未改任何业务代码：用仓库自带 `inference/inference_48k.py` 离线对已落盘换嗓输出做 BWE，再用 `worker.py` 同款混音链生成成品做单文件 A/B。
+- 轨级：谱滚降 7969→9653 Hz（回到并超过源 8950）、谱质心 3862→4780 Hz（补高频有效）；但**谱平坦度 0.110→0.305（高于源人声 0.197 达 55%）**，重建的超高频为类噪声/非谐波成分（与训练域 VCTK 英文朗读语音、非歌声一致）；LRA 6.5→6.6 对 H8 零帮助；位深被官方脚本写死 PCM_16。
+- 混音级：谱质心 2681→3019、滚降 5911→6518、谱平坦度 0.096→0.185，**分带占比完全一致**（伴奏主导）。
+- **用户盲听判定"没听出太大区别"** → P4 终止，不接入 `worker.py`；P0~P4 结项。
+
+**验证**
+
+- 每阶段：`py_compile` 编译检查 + 全量 pytest（`--ignore="tests/test_i18n.py"`）。P3 回退后 **107 passed**。
+- 训练/推理均实测跑通（GPU 独占，训练完即释放；worker 重启以加载新代码）。
+- 未执行：`app.py` 音色库绑定（随 P3 取消）、`app.py` 音质档控件（P0~P4 均未达"用户盲听可接受"，不落 UI）、commit / push。
+
+---
+
 ## 2026-09-25 — 一致性优化（历史页行号错位 / 播放器同步 / 类型词中文化 / 删除确认弹窗）
 
 > 整体一致性审查中发现并修复 1 个严重 bug + 3 处不一致。

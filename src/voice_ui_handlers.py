@@ -355,6 +355,7 @@ class VoiceHandlers:
         duration = _probe_duration(products.get("vocals", ""))
         stems = _build_stems(products)
         # 计算源音频 MD5（分离记录留痕，查重跳过后续翻唱的 Demucs）
+        from history import HistoryManager  # 局部导入避免模块初始化循环
         src_md5 = HistoryManager.compute_source_md5(Path(source))
         self._record(_task.task_id, "separation", derived_from, root,
                      products.get("vocals", ""), out_dir,
@@ -369,12 +370,15 @@ class VoiceHandlers:
                      root_task_id: str = "", lang: str = "zh", tr=None,
                      source_vocals: str = "", source_acc: str = "",
                      from_upload: bool = False, project: str = "",
+                     ref_mode: str = "smart", ref_acc: str = "",
                      **kwargs) -> dict:
         """参考音色翻唱 worker：完整管线（换嗓+混音）+ 写历史记录。denoise=True 时对换嗓人声降噪。
 
         产物落 outputs/cover_<时间戳>/，文件名 <项目名>_<时间戳>_<类别>.wav
         （项目名 = 源项目名_音色名，由 app 层拼好传入）。
         source_vocals/source_acc 非空时复用已有分离结果（跳过 Demucs 重复分离）。
+        ref_mode=参考段策略（smart=智能/默认、energy=能量最高段、full=整曲不裁剪）；
+        ref_acc=参考干声的配对伴奏轨（仅"分离人声"来源有，smart 挑段用）。
         from_upload=True 时源文件留存到 uploads/（<源名>_<ts>_cover_src.<ext>）。
         阶段进度经 out_dir/_progress.json 轮询上报（分离中/换嗓中/降噪中/混音中）。
         """
@@ -399,6 +403,7 @@ class VoiceHandlers:
                 denoise=denoise, prefix=prefix,
                 source_vocals=source_vocals, source_acc=source_acc,
                 progress_file=str(progress_file), cancel_event=_task.cancel_event,
+                ref_mode=ref_mode, ref_acc=ref_acc,
             )
         except Exception:
             # worker 抛异常：回收本次已建但未入历史的衍生目录，再向上抛原始错误
