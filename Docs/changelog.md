@@ -4,6 +4,49 @@
 
 ---
 
+## 2026-09-28 — 多轨混音 M2：独立编辑页 + Web 接口（端到端打通）
+
+> 方案与任务拆分见 `Docs/multitrack-editor-plan.md`（第 6 节 M2）。承接 M1 的后端渲染接口，补齐编辑与产物闭环。
+> 编辑粒度按确认结果实现：**轨间平衡（增益/静音/独奏）+ 全局选区裁切 + 每轨淡入淡出**（不做多切片自由摆放）。
+
+- 新增 `src/mix_web.py`：与 Web 框架解耦的纯函数层（由 app.py 注册为路由，可独立单测）。
+  - `resolve_audio(webui_root, rel, must_exist)`：素材/产物路径白名单——必须解析到 `<webui_root>/outputs` 之下且扩展名在音频白名单内，越界/非法一律返回 `None`（防止任意路径被读取或下发）。
+  - `compute_peaks(path, buckets)`：波形峰值——用 ffmpeg 解码为 8kHz 单声道 s16le 后分桶求 min/max（与源格式无关，wav/flac 均可），桶数钳制在 `[200, 4000]`，结果按 `(路径, mtime, 桶数)` LRU 缓存（上限 16）避免重复解码。
+  - `list_sources(history_mgr, webui_root)`：编辑页素材清单——分离记录 → `sources`（含全部有效轨道），混音记录 → `mixes`；失效文件自动跳过。
+  - `page_texts(lang)`：编辑页全部文案经 `i18n.tr` 下发（前端不硬编码界面文案）。
+  - `submit_render / task_status / cancel_render`：提交前先做工程校验（非法工程不占用队列）；因 `queue_manager` 只支持按 Task 对象查询，本模块维护 `task_id → Task` 的 FIFO 注册表（上限 20）；worker 内部业务失败（队列仍为 completed）对前端统一呈现为 `failed + error`。
+- 新增 `static/multitrack/index.html`：单文件自包含（CSS/JS 内联）多轨编辑页。
+  - 每轨独立 canvas 波形（包络 + 裁剪区压暗 + 全局选区高亮）、增益推子（-30~12 dB）、静音/独奏、淡入/淡出秒数、「裁为选区 / 恢复整轨」。
+  - 选区可在任意轨波形上拖拽（所有轨共用同一时间轴），也支持手填起止秒；「应用选区到全部轨 / 恢复全部整轨」批量操作。
+  - 独奏在前端折算为 `mute`（有独奏轨时其余轨置静音），后端契约保持不变；无切片但设了淡变时自动物化为整轨切片，让淡变对整轨同样生效。
+  - 渲染完成后内嵌播放器试听 + 下载；下方「混音记录」列表可回放/下载历次成品；渲染支持取消；波形逐轨串行解码，避免并发拉起多个 ffmpeg 争抢磁盘。
+- `app.py`：
+  - `_register_custom_routes` 内新增静态页路由 `/static/multitrack/`（含无尾斜杠，`Cache-Control: no-store`）与 6 个 JSON 接口：`GET /api/mix/sources|peaks|audio|status`、`POST /api/mix/render|cancel`；全部 `insert(0, ...)` 抢在 Gradio 路由之前。
+  - 分离页新增「多轨编辑」入口按钮（纯前端事件 `js=window.open(...)`，不做后端往返），中英文案随语言切换。
+  - 脚本版本号不变（未改 `app.js`，编辑页为独立静态页，无需处理 `?v=N`）。
+- `src/history.py`：`_PROJECT_DIR_PREFIXES` 新增 `mix_`；新增 `_DERIVED_DIR_PREFIXES`（记录类型 → 产物目录前缀），`_derived_dir_for` 改为查表，使混音记录删除时其 `mix_<ts>/` 目录可整目录回收。
+- `src/i18n.py`：补充「多轨编辑」及编辑页 39 条中英词条。
+- 新增 `tests/test_mix_web.py`：22 项测试（路径白名单/MIME/峰值分桶与缓存/素材清单过滤/提交与状态各分支/注册表淘汰/文案完整性/app.py 路由与入口源码断言/编辑页接口引用/**真实端到端**：提交→队列渲染→产物落盘→写 mix 历史→目录可整目录回收）。
+- 验证：`py_compile` 通过；`pytest tests/test_mix_web.py tests/test_mix_render.py` 41 项通过；全量 `pytest tests`（排除脚本式 `tests/test_i18n.py`）155 项通过；服务重启后对 6 个接口做真实 HTTP 冒烟：静态页 200 `text/html` + `no-store`、`sources` 列出 4 组分离素材、`peaks` 400 桶/时长 171.6s、`audio` 200 `audio/wav`、越界路径 404、非法工程/未知任务/未知取消均返回 `ok=false` + 中文错误。
+- 未完项（M3）：Tab 内嵌（C3）、编辑工程持久化为可再次打开的项目、历史页表格展示 mix 记录（当前混音成品的回放/下载在编辑页内完成）。
+
+---
+
+## 2026-09-28 — 多轨混音 M1：后端渲染接口（工程 JSON 契约 + ffmpeg filtergraph）
+
+> 方案与任务拆分见 `Docs/multitrack-editor-plan.md`（第 6 节 M1）。本轮仅做纯后端能力，不碰前端。
+
+- 新增 `src/mix_render.py`：多轨混音渲染模块（与 Gradio 解耦，可独立单测）。
+  - `parse_mix_project(payload, webui_root)`：工程 JSON 校验与归一化——版本号必须为 1；轨数 1~8；素材路径必须解析到 `outputs/` 之下且文件存在（防任意路径喂给 ffmpeg）；增益钳制 `[-30, 12] dB`；母带响度目标钳制 `[-30, -5] LUFS`、真峰值 `[-6, -0.1] dBTP`；非法类型回退默认值；非法切片（`out <= in`）丢弃、`start < 0` 回退 0、淡变超过切片时长时整体回退 0；全部静音时报错。
+  - `build_ffmpeg_cmd(project, out_path)`：**纯函数**（不做任何 IO）。每轨链 `atrim → asetpts=N/SR/TB → afade → volume → adelay(all=1)`；空 `clips` = 整轨；同一素材多切片自动 `asplit` 展开（一个输入 pad 只能被消费一次）；多段落 `amix=inputs=N:normalize=0:dropout_transition=0`；末尾 `loudnorm=I=..:TP=..:LRA=11.0`；输出按扩展名选无损编码（`.flac`→flac、`.wav`→pcm_s24le）。
+  - `render_mix(project, out_path, cancel_event, progress_cb)`：ffmpeg stderr 重定向到临时文件（避免长音频写满管道死锁），轮询期间按 `cancel_event` 协作取消（杀子进程并抛 `TaskCancelledError`）；失败统一抛 `MixProjectError`（含 stderr 末 5 行）。
+  - `mix_worker(_task, payload_json, webui_root, out_dir, project, history_mgr)`：队列 worker，产物 `<项目名>_<时间戳>_mix.flac`，写 `record_type="mix"` 历史记录（`stems` 仅一条「混音成品」，供历史页回放/下载）；业务失败返回 `{"ok": False, "error": ...}`，取消则抛出交由队列标记 CANCELLED。
+- `src/queue_manager.py`：`TaskType` 新增 `MIX = "mix"`。
+- 新增 `tests/test_mix_render.py`：20 项测试（解析校验/路径白名单/钳制回退/filtergraph 各分支/端到端真实渲染 + `volumedetect` 复核 `max_volume ≤ -1.2 dB`/worker 写历史/坏 JSON 返回业务错误），全部通过；渲染产物经 `loudnorm` 归一后真峰值达标（无削波）。
+- 未完项（M2）：前端预载分轨与工程保存、`mix_` 产物目录的改名/删除/整目录回收支持（`history._PROJECT_DIR_PREFIXES`）、历史页展示 mix 记录。
+
+---
+
 ## 2026-09-27 — 播放器缩放补齐（PlayerZoom 遗漏 5 个播放器）
 
 - `static/js/app.js`：`PLAYER_IDS` 补入 `history-stem-audio`（歌曲历史「轨道回放(分离/翻唱)」）、`lib-stem-preview`、`lib-ref-preview`、`cover-ref-preview`、`cover-acc-preview`（分离/翻唱页各处「试听」）。

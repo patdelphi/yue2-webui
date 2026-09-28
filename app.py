@@ -2667,6 +2667,9 @@ def build_ui():
                             sep_cancel_btn = gr.Button(_t("取消任务"), variant="stop", scale=2)
                             _reg(sep_cancel_btn, lambda lang: gr.update(value=tr(lang, "取消任务")))
                         sep_info = gr.Markdown()
+                        # 多轨编辑入口：新窗口打开独立编辑页（前端只做交互，成品由后端 ffmpeg 渲染）
+                        sep_mix_btn = gr.Button(_t("多轨编辑"), size="sm")
+                        _reg(sep_mix_btn, lambda lang: gr.update(value=tr(lang, "多轨编辑")))
                         # 输出产物播放器组：按产物数量逐个显示（与其他 Tab 播放器同组件，
                         # PlayerZoom 个性化定制按 elem_id 前缀 sep-audio- 统一接管）；label 动态为轨道名
                         sep_audios = [
@@ -2765,6 +2768,8 @@ def build_ui():
                 # 取消按钮：协作式取消本 Tab 排队中/运行中的任务（info 区反馈结果）
                 sep_cancel_btn.click(fn=lambda: on_voice_cancel("separation"),
                                      outputs=[sep_info])
+                # 多轨编辑入口：纯前端事件（fn=None），新窗口打开独立编辑页（不做后端往返）
+                sep_mix_btn.click(fn=None, js="() => window.open('/static/multitrack/', '_blank')")
 
             with gr.Tab(_t("音色翻唱")) as tab_cover:
                 _reg(tab_cover, lambda lang: gr.update(label=tr(lang, "音色翻唱")))
@@ -3270,6 +3275,94 @@ if __name__ == "__main__":
             lambda request: FileResponse(WEBUI_ROOT / "static" / "js" / "vendor" / "wavesurfer.min.js", media_type="application/javascript"),
             methods=["GET"],
         ))
+
+        # —— 多轨混音（M2）：静态编辑页 + JSON 接口 ——
+        # 编辑页为单文件自包含（CSS/JS 内联），no-store 避免改版后命中旧缓存
+        from starlette.responses import JSONResponse
+        import mix_web
+
+        def _mix_page(request):
+            return FileResponse(
+                WEBUI_ROOT / "static" / "multitrack" / "index.html",
+                media_type="text/html",
+                headers={"Cache-Control": "no-store"},
+            )
+
+        demo.app.routes.insert(0, Route("/static/multitrack/", _mix_page, methods=["GET"]))
+        demo.app.routes.insert(0, Route("/static/multitrack", _mix_page, methods=["GET"]))
+
+        async def _mix_sources(request):
+            """素材清单 + 已有混音记录 + 编辑页文案（文案统一由后端 i18n 下发）。"""
+            try:
+                data = mix_web.list_sources(history_mgr, WEBUI_ROOT)
+            except Exception as e:
+                logger.exception("混音素材清单读取失败")
+                data = {"ok": False, "error": f"素材清单读取失败: {e}", "sources": [], "mixes": []}
+            data["lang"] = _CUR_LANG
+            data["strings"] = mix_web.page_texts(_CUR_LANG)
+            return JSONResponse(data)
+
+        async def _mix_peaks(request):
+            """按 outputs/ 白名单解析素材并返回波形峰值（ffmpeg 解码分桶）。"""
+            path = mix_web.resolve_audio(WEBUI_ROOT, request.query_params.get("path", ""))
+            if path is None:
+                return JSONResponse({"ok": False, "error": "音频不存在或路径越界"})
+            try:
+                buckets = int(request.query_params.get("buckets", "0") or 0)
+            except ValueError:
+                buckets = 0
+            try:
+                info = mix_web.compute_peaks(path, buckets or mix_web.PEAK_BUCKETS_DEFAULT)
+            except Exception as e:
+                logger.exception("波形峰值计算失败")
+                return JSONResponse({"ok": False, "error": f"波形读取失败: {e}"})
+            return JSONResponse({"ok": True, **info})
+
+        async def _mix_audio(request):
+            """下发 outputs/ 下的音频（供波形页试听与下载）。"""
+            path = mix_web.resolve_audio(WEBUI_ROOT, request.query_params.get("path", ""))
+            if path is None:
+                return JSONResponse({"ok": False, "error": "音频不存在或路径越界"}, status_code=404)
+            download = request.query_params.get("download") == "1"
+            return FileResponse(
+                path,
+                media_type=mix_web.audio_mime(path),
+                filename=path.name if download else None,
+            )
+
+        async def _mix_render(request):
+            """提交多轨混音渲染任务（工程 JSON 走请求体，项目名走 query）。"""
+            try:
+                payload = await request.json()
+            except Exception:
+                return JSONResponse({"ok": False, "error": "请求体不是合法 JSON"})
+            if not isinstance(payload, dict):
+                return JSONResponse({"ok": False, "error": "混音工程必须是 JSON 对象"})
+            return JSONResponse(mix_web.submit_render(
+                payload, WEBUI_ROOT, history_mgr,
+                request.query_params.get("project", "")))
+
+        async def _mix_status(request):
+            return JSONResponse(mix_web.task_status(
+                request.query_params.get("task_id", ""), WEBUI_ROOT))
+
+        async def _mix_cancel(request):
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+            task_id = (body or {}).get("task_id", "") if isinstance(body, dict) else ""
+            return JSONResponse(mix_web.cancel_render(task_id))
+
+        for _path, _ep, _methods in (
+            ("/api/mix/sources", _mix_sources, ["GET"]),
+            ("/api/mix/peaks", _mix_peaks, ["GET"]),
+            ("/api/mix/audio", _mix_audio, ["GET"]),
+            ("/api/mix/render", _mix_render, ["POST"]),
+            ("/api/mix/status", _mix_status, ["GET"]),
+            ("/api/mix/cancel", _mix_cancel, ["POST"]),
+        ):
+            demo.app.routes.insert(0, Route(_path, _ep, methods=_methods))
     threading.Thread(target=_register_custom_routes, daemon=True).start()
 
     demo.launch(

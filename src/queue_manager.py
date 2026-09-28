@@ -26,6 +26,7 @@ class TaskType(Enum):
     TRANSCRIPTION = "transcription"
     SEPARATION = "separation"   # 音轨分离（独立功能，Demucs）
     COVER = "cover"             # 参考音色翻唱（分离 + Seed-VC 换嗓 + 混音）
+    MIX = "mix"                 # 多轨混音渲染（ffmpeg filtergraph 合成成品）
 
 
 class TaskStatus(Enum):

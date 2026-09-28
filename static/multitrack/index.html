@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Multitrack Editor</title>
+<!--
+  多轨编辑器（M2 独立编辑页）
+
+  设计说明：
+  - 单文件自包含（CSS/JS 内联），由 app.py 以 /static/multitrack/ 路由下发，
+    并带 Cache-Control: no-store，改版后无需处理子资源版本号。
+  - 编辑粒度：轨间平衡（增益/静音/独奏）+ 全局选区裁切（每轨可"裁为选区/恢复整轨"）
+    + 每轨淡入淡出；所有文案来自 /api/mix/sources 的 strings 字段（后端 i18n），
+    本页不硬编码任何界面文案。
+  - 本页只负责交互与波形显示，成品由后端 ffmpeg 按工程 JSON 离线渲染（mix_render）。
+-->
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1f2328; --muted: #6b7280; --line: #d8dee4;
+    --card: #f7f8fa; --accent: #3b82f6; --accent-fg: #ffffff; --wave: #3b82f6;
+    --sel: rgba(59,130,246,.18); --sec: #eef2f7; --danger: #ef4444; --ok: #16a34a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16181d; --fg: #e6e8eb; --muted: #9aa4b2; --line: #2c3038;
+      --card: #1d2026; --accent: #3b82f6; --accent-fg: #ffffff; --wave: #60a5fa;
+      --sel: rgba(96,165,250,.22); --sec: #262a32;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 14px 16px 40px; background: var(--bg); color: var(--fg);
+    font: 13px/1.5 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  .hint { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+  .card {
+    border: 1px solid var(--line); border-radius: 10px; background: var(--card);
+    padding: 10px 12px; margin-bottom: 10px;
+  }
+  .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .row + .row { margin-top: 8px; }
+  label.lb { color: var(--muted); font-size: 12px; min-width: 76px; }
+  select, input[type=text], input[type=number] {
+    background: var(--bg); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 4px 6px; font-size: 12px; min-width: 0;
+  }
+  select { max-width: 420px; }
+  input[type=number] { width: 88px; }
+  button {
+    background: var(--bg); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  .msg { font-size: 12px; color: var(--muted); }
+  .msg.err { color: var(--danger); }
+  .msg.ok { color: var(--ok); }
+  .track { border: 1px solid var(--line); border-radius: 8px; padding: 8px; margin-bottom: 8px; background: var(--bg); }
+  .thead { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+  .tname { font-size: 12px; min-width: 64px; }
+  .tstate { font-size: 12px; color: var(--muted); }
+  .wave { display: block; width: 100%; height: 76px; cursor: crosshair; touch-action: none; }
+  .gain { width: 130px; }
+  .gain-val { font-size: 12px; color: var(--muted); width: 58px; display: inline-block; }
+  .chk { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 3px; }
+  .fades input { width: 66px; }
+  audio { height: 30px; vertical-align: middle; }
+  .mixitem { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 6px 0; border-top: 1px solid var(--line); }
+  .mixitem:first-child { border-top: none; }
+  .mixname { min-width: 200px; font-size: 12px; }
+  a.dl { font-size: 12px; color: var(--accent); }
+</style>
+</head>
+<body>
+  <h1 id="t-title"></h1>
+  <div class="hint" id="t-hint"></div>
+
+  <section class="card">
+    <div class="row">
+      <label class="lb" id="t-src"></label>
+      <select id="source"></select>
+      <button id="load"></button>
+      <button id="refresh"></button>
+      <span id="msg" class="msg"></span>
+    </div>
+  </section>
+
+  <section class="card" id="editor" hidden>
+    <div class="row">
+      <label class="lb" id="t-sel"></label>
+      <input id="sel-start" type="number" step="0.01" min="0" value="0">
+      <span class="msg">–</span>
+      <input id="sel-end" type="number" step="0.01" min="0" value="0">
+      <button id="apply-all"></button>
+      <button id="reset-all"></button>
+    </div>
+    <div id="tracks"></div>
+    <div class="row">
+      <label class="lb" id="t-master"></label>
+      <label class="msg" id="t-loud"></label><input id="loud" type="number" step="0.5" min="-30" max="-5" value="-14">
+      <label class="msg" id="t-tp"></label><input id="tp" type="number" step="0.1" min="-6" max="-0.1" value="-1.5">
+      <label class="msg" id="t-proj"></label><input id="proj" type="text">
+      <button id="render" class="primary"></button>
+      <button id="cancel" hidden></button>
+      <span id="status" class="msg"></span>
+    </div>
+    <div class="row" id="result" hidden>
+      <label class="lb" id="t-preview"></label>
+      <audio id="result-audio" controls></audio>
+      <a id="result-dl" class="dl" href="#" download></a>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="row">
+      <label class="lb" id="t-mixes"></label>
+      <button id="refresh-mixes"></button>
+    </div>
+    <div id="mix-list"></div>
+  </section>
+
+<script>
+"use strict";
+/* ==================================================================== 状态 */
+const S = {
+  T: {},            // 后端下发的文案表
+  sources: [],      // 可分轨素材（分离记录）
+  tracks: [],       // 当前载入的轨道
+  dur: 0,           // 全局时长（秒）
+  rootTaskId: "",   // 素材所属分离任务 id（写入工程 derived_from）
+  sel: [0, 0],      // 全局选区 [起, 止]
+  taskId: null,     // 当前渲染任务 id
+  timer: null,      // 轮询定时器
+};
+const $ = (id) => document.getElementById(id);
+const T = (key) => (S.T && S.T[key]) || key;
+const enc = encodeURIComponent;
+const r3 = (v) => Math.round(v * 1000) / 1000;
+
+/* ==================================================================== 工具 */
+function setMsg(text, cls) {
+  const el = $("msg");
+  el.textContent = text || "";
+  el.className = "msg" + (cls ? " " + cls : "");
+}
+function setStatus(text, cls) {
+  const el = $("status");
+  el.textContent = text || "";
+  el.className = "msg" + (cls ? " " + cls : "");
+}
+async function getJSON(url) {
+  const resp = await fetch(url);
+  const data = await resp.json().catch(() => ({ ok: false, error: "invalid json" }));
+  if (!data || data.ok === undefined) return { ok: false, error: "invalid response" };
+  return data;
+}
+
+/* ==================================================================== 文案 */
+function applyTexts() {
+  document.title = T("多轨编辑器");
+  $("t-title").textContent = T("多轨编辑器");
+  $("t-hint").textContent = T("在波形上拖拽选择区间");
+  $("t-src").textContent = T("选择分离素材");
+  $("load").textContent = T("载入");
+  $("refresh").textContent = T("刷新");
+  $("t-sel").textContent = T("全局选区");
+  $("apply-all").textContent = T("应用选区到全部轨");
+  $("reset-all").textContent = T("恢复全部整轨");
+  $("t-master").textContent = T("母带");
+  $("t-loud").textContent = T("响度目标(LUFS)");
+  $("t-tp").textContent = T("真峰值(dBTP)");
+  $("t-proj").textContent = T("项目名(可选)");
+  $("render").textContent = T("渲染成品");
+  $("cancel").textContent = T("取消渲染");
+  $("t-preview").textContent = T("试听");
+  $("t-mixes").textContent = T("混音记录");
+  $("refresh-mixes").textContent = T("刷新");
+}
+
+/* ==================================================================== 素材清单 */
+async function loadSources(keepSelection) {
+  const data = await getJSON("/api/mix/sources");
+  if (!data.ok) { setMsg(data.error || "load failed", "err"); return; }
+  S.T = data.strings || {};
+  S.sources = data.sources || [];
+  applyTexts();
+
+  const sel = $("source");
+  const prev = keepSelection ? sel.value : "";
+  sel.textContent = "";
+  if (!S.sources.length) {
+    setMsg(T("无可用素材，请先执行一次音轨分离"), "err");
+  } else {
+    S.sources.forEach((src, i) => {
+      const opt = document.createElement("option");
+      opt.value = String(i);
+      opt.textContent = src.name;
+      sel.appendChild(opt);
+    });
+    setMsg("");
+  }
+  if (prev && S.sources[prev]) sel.value = prev;
+  renderMixList(data.mixes || []);
+}
+
+/* ==================================================================== 波形绘制 */
+function drawTrack(t) {
+  const cv = t.canvas;
+  if (!cv) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(120, cv.clientWidth || 600);
+  const h = 76;
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
+    cv.width = Math.round(w * dpr);
+    cv.height = Math.round(h * dpr);
+  }
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = getComputedStyle(document.body).getPropertyValue("--sec");
+  ctx.fillRect(0, 0, w, h);
+  ctx.strokeStyle = getComputedStyle(document.body).getPropertyValue("--line");
+  ctx.beginPath(); ctx.moveTo(0, h / 2); ctx.lineTo(w, h / 2); ctx.stroke();
+
+  // 包络：peaks[i] = [min,max]（-1..1）
+  const mid = h / 2, amp = (h - 10) / 2;
+  ctx.strokeStyle = getComputedStyle(document.body).getPropertyValue("--wave");
+  ctx.beginPath();
+  const n = t.peaks.length;
+  for (let i = 0; i < n; i++) {
+    const x = n > 1 ? (i / (n - 1)) * w : 0;
+    const mn = t.peaks[i][0], mx = t.peaks[i][1];
+    ctx.moveTo(x, mid - mx * amp);
+    ctx.lineTo(x, mid - mn * amp);
+  }
+  ctx.stroke();
+
+  if (S.dur <= 0) return;
+  // 裁剪后区间外压暗，直观反映该轨实际参与渲染的部分
+  if (t.clips.length) {
+    const c = t.clips[0];
+    const xs = (c.in / S.dur) * w, xe = (c.out / S.dur) * w;
+    ctx.fillStyle = "rgba(0,0,0,.35)";
+    ctx.fillRect(0, 0, Math.max(0, xs), h);
+    ctx.fillRect(Math.min(w, xe), 0, Math.max(0, w - xe), h);
+  }
+  // 全局选区
+  if (S.sel[1] > S.sel[0]) {
+    const xs = (S.sel[0] / S.dur) * w, xe = (S.sel[1] / S.dur) * w;
+    ctx.fillStyle = getComputedStyle(document.body).getPropertyValue("--sel");
+    ctx.fillRect(xs, 0, Math.max(1, xe - xs), h);
+    ctx.strokeStyle = getComputedStyle(document.body).getPropertyValue("--wave");
+    ctx.beginPath(); ctx.moveTo(xs, 0); ctx.lineTo(xs, h);
+    ctx.moveTo(xe, 0); ctx.lineTo(xe, h); ctx.stroke();
+  }
+}
+function redrawAll() { S.tracks.forEach(drawTrack); }
+
+function updateTrackState(t) {
+  if (!t.stateEl) return;
+  if (t.clips.length) {
+    const c = t.clips[0];
+    t.stateEl.textContent = `[${r3(c.in)}s ~ ${r3(c.out)}s]`;
+  } else {
+    t.stateEl.textContent = "";
+  }
+}
+
+/* ==================================================================== 轨道区 */
+function buildTracks(src) {
+  const box = $("tracks");
+  box.textContent = "";
+  S.tracks = [];
+  S.sel = [0, 0];
+  $("sel-start").value = "0";
+  $("sel-end").value = "0";
+
+  src.tracks.forEach((item, i) => {
+    const wrap = document.createElement("div");
+    wrap.className = "track";
+
+    const head = document.createElement("div");
+    head.className = "thead";
+    const name = document.createElement("span");
+    name.className = "tname";
+    name.textContent = item.label || item.name;
+    head.appendChild(name);
+
+    const gain = document.createElement("input");
+    gain.type = "range"; gain.min = "-30"; gain.max = "12"; gain.step = "0.5"; gain.value = "0";
+    gain.className = "gain";
+    head.appendChild(gain);
+    const gainVal = document.createElement("span");
+    gainVal.className = "gain-val"; gainVal.textContent = "0.0 dB";
+    head.appendChild(gainVal);
+
+    const muteLab = document.createElement("label"); muteLab.className = "chk";
+    const mute = document.createElement("input"); mute.type = "checkbox";
+    muteLab.appendChild(mute); muteLab.appendChild(document.createTextNode(T("静音")));
+    head.appendChild(muteLab);
+
+    const soloLab = document.createElement("label"); soloLab.className = "chk";
+    const solo = document.createElement("input"); solo.type = "checkbox";
+    soloLab.appendChild(solo); soloLab.appendChild(document.createTextNode(T("独奏")));
+    head.appendChild(soloLab);
+
+    const fades = document.createElement("span");
+    fades.className = "chk fades";
+    const fin = document.createElement("input"); fin.type = "number"; fin.min = "0"; fin.step = "0.1"; fin.value = "0";
+    const fout = document.createElement("input"); fout.type = "number"; fout.min = "0"; fout.step = "0.1"; fout.value = "0";
+    fades.appendChild(document.createTextNode(T("淡入(秒)"))); fades.appendChild(fin);
+    fades.appendChild(document.createTextNode(T("淡出(秒)"))); fades.appendChild(fout);
+    head.appendChild(fades);
+
+    const trimBtn = document.createElement("button");
+    trimBtn.textContent = T("裁为选区");
+    head.appendChild(trimBtn);
+    const resetBtn = document.createElement("button");
+    resetBtn.textContent = T("恢复整轨");
+    head.appendChild(resetBtn);
+
+    const stateEl = document.createElement("span");
+    stateEl.className = "tstate";
+    head.appendChild(stateEl);
+
+    const cv = document.createElement("canvas");
+    cv.className = "wave";
+    wrap.appendChild(head);
+    wrap.appendChild(cv);
+    box.appendChild(wrap);
+
+    const track = {
+      key: item.type || ("track" + (i + 1)), label: item.label || item.name,
+      path: item.path, name: item.name, gain: 0, mute: false, solo: false,
+      fadeIn: 0, fadeOut: 0, clips: [], peaks: [], canvas: cv, stateEl: stateEl,
+    };
+    S.tracks.push(track);
+
+    gain.addEventListener("input", () => {
+      track.gain = parseFloat(gain.value) || 0;
+      gainVal.textContent = track.gain.toFixed(1) + " dB";
+    });
+    mute.addEventListener("change", () => { track.mute = mute.checked; });
+    solo.addEventListener("change", () => { track.solo = solo.checked; });
+    fin.addEventListener("change", () => { track.fadeIn = Math.max(0, parseFloat(fin.value) || 0); });
+    fout.addEventListener("change", () => { track.fadeOut = Math.max(0, parseFloat(fout.value) || 0); });
+    trimBtn.addEventListener("click", () => {
+      const a = S.sel[0], b = S.sel[1];
+      if (!(b > a)) { setMsg(T("区间无效"), "err"); return; }
+      track.clips = [{ start: a, in: a, out: b, fade_in: track.fadeIn, fade_out: track.fadeOut }];
+      updateTrackState(track); drawTrack(track);
+    });
+    resetBtn.addEventListener("click", () => {
+      track.clips = []; updateTrackState(track); drawTrack(track);
+    });
+    attachSelection(cv);
+  });
+}
+
+/* 在波形上拖拽选择全局区间（所有轨共用同一时间轴） */
+function attachSelection(cv) {
+  let dragging = false, anchor = 0;
+  const timeAt = (ev) => {
+    const rect = cv.getBoundingClientRect();
+    const x = Math.max(0, Math.min(rect.width, ev.clientX - rect.left));
+    return rect.width > 0 ? (x / rect.width) * S.dur : 0;
+  };
+  cv.addEventListener("pointerdown", (ev) => {
+    if (S.dur <= 0) return;
+    dragging = true; anchor = timeAt(ev);
+    S.sel = [anchor, anchor];
+    syncSelInputs(); redrawAll();
+    try { cv.setPointerCapture(ev.pointerId); } catch (e) { /* 忽略：部分浏览器不支持 */ }
+  });
+  cv.addEventListener("pointermove", (ev) => {
+    if (!dragging) return;
+    const p = timeAt(ev);
+    S.sel = [Math.min(anchor, p), Math.max(anchor, p)];
+    syncSelInputs(); redrawAll();
+  });
+  const stop = (ev) => {
+    if (!dragging) return;
+    dragging = false;
+    try { cv.releasePointerCapture(ev.pointerId); } catch (e) { /* 忽略 */ }
+  };
+  cv.addEventListener("pointerup", stop);
+  cv.addEventListener("pointercancel", () => { dragging = false; });
+}
+function syncSelInputs() {
+  $("sel-start").value = r3(S.sel[0]);
+  $("sel-end").value = r3(S.sel[1]);
+}
+
+/* ==================================================================== 载入素材 */
+async function loadTracks() {
+  const idx = $("source").value;
+  const src = S.sources[parseInt(idx, 10)];
+  if (!src) { setMsg(T("请先选择素材"), "err"); return; }
+  setMsg(T("正在载入波形") + "...");
+  $("load").disabled = true;
+  try {
+    S.rootTaskId = src.task_id || "";
+    buildTracks(src);
+    $("editor").hidden = false;
+    // 逐轨串行解码，避免并发拉起多个 ffmpeg 争抢磁盘
+    for (const t of S.tracks) {
+      const data = await getJSON(`/api/mix/peaks?path=${enc(t.path)}`);
+      t.peaks = data.ok ? (data.peaks || []) : [];
+      if (data.ok && data.duration > 0) S.dur = Math.max(S.dur, data.duration);
+      drawTrack(t);
+    }
+    $("sel-end").value = r3(S.dur);
+    S.sel = [0, 0];
+    redrawAll();
+    setMsg("");
+  } catch (e) {
+    setMsg(String(e), "err");
+  } finally {
+    $("load").disabled = false;
+  }
+}
+
+/* ==================================================================== 渲染 */
+function buildPayload() {
+  const anySolo = S.tracks.some((t) => t.solo);
+  const tracks = S.tracks.map((t) => {
+    let clips = t.clips.map((c) => ({
+      start: r3(c.start), in: r3(c.in), out: r3(c.out),
+      fade_in: r3(c.fade_in), fade_out: r3(c.fade_out),
+    }));
+    // 无切片但设了淡变：物化为整轨切片，让淡入淡出对整轨同样生效
+    if (!clips.length && (t.fadeIn > 0 || t.fadeOut > 0) && S.dur > 0) {
+      clips = [{ start: 0, in: 0, out: r3(S.dur), fade_in: r3(t.fadeIn), fade_out: r3(t.fadeOut) }];
+    }
+    return {
+      id: t.key, name: t.label, src: t.path, gain_db: t.gain,
+      mute: !!t.mute || (anySolo && !t.solo), clips: clips,
+    };
+  });
+  return {
+    version: 1, sample_rate: 48000, duration: r3(S.dur),
+    source_root_task_id: S.rootTaskId, tracks: tracks,
+    master: {
+      loudness_target: parseFloat($("loud").value) || -14,
+      true_peak: parseFloat($("tp").value) || -1.5,
+    },
+  };
+}
+
+async function startRender() {
+  if (S.taskId) return;
+  if (!S.tracks.length) { setStatus(T("请先选择素材"), "err"); return; }
+  setStatus(T("排队中") + "...");
+  $("render").disabled = true;
+  try {
+    const resp = await fetch("/api/mix/render?project=" + enc($("proj").value.trim()), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(buildPayload()),
+    });
+    const data = await resp.json().catch(() => ({ ok: false, error: "invalid json" }));
+    if (!data.ok) { setStatus(T("渲染失败") + ": " + (data.error || ""), "err"); return; }
+    S.taskId = data.task_id;
+    $("cancel").hidden = false;
+    $("result").hidden = true;
+    poll();
+  } catch (e) {
+    setStatus(String(e), "err");
+  } finally {
+    $("render").disabled = false;
+  }
+}
+
+async function poll() {
+  if (!S.taskId) return;
+  try {
+    const d = await getJSON("/api/mix/status?task_id=" + enc(S.taskId));
+    if (!d.ok) { setStatus(T("渲染失败") + ": " + (d.error || ""), "err"); finishRender(); return; }
+    if (d.status === "queued") {
+      setStatus(T("排队中") + " #" + d.position);
+    } else if (d.status === "running") {
+      const pct = d.progress ? Math.round(d.progress.value * 100) : 0;
+      setStatus(T("渲染中") + " " + pct + "%" + (d.progress && d.progress.desc ? " · " + d.progress.desc : ""));
+    } else if (d.status === "completed" && d.output) {
+      setStatus(T("渲染完成"), "ok");
+      showResult(d.output);
+      finishRender();
+      loadSources(true);
+      return;
+    } else if (d.status === "cancelled") {
+      setStatus(T("已取消"));
+      finishRender();
+      return;
+    } else {
+      setStatus(T("渲染失败") + ": " + (d.error || ""), "err");
+      finishRender();
+      return;
+    }
+  } catch (e) {
+    setStatus(String(e), "err");
+  }
+  S.timer = setTimeout(poll, 1000);
+}
+function finishRender() {
+  if (S.timer) { clearTimeout(S.timer); S.timer = null; }
+  S.taskId = null;
+  $("cancel").hidden = true;
+}
+function showResult(relPath) {
+  $("result").hidden = false;
+  $("result-audio").src = "/api/mix/audio?path=" + enc(relPath);
+  const a = $("result-dl");
+  a.href = "/api/mix/audio?path=" + enc(relPath) + "&download=1";
+  a.textContent = T("下载");
+}
+
+async function cancelRender() {
+  if (!S.taskId) return;
+  const d = await getJSON("/api/mix/status?task_id=" + enc(S.taskId));
+  if (!d.ok) return;
+  try {
+    await fetch("/api/mix/cancel", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task_id: S.taskId }),
+    });
+  } catch (e) { /* 忽略：下一轮轮询会给出最终状态 */ }
+}
+
+/* ==================================================================== 混音记录 */
+function renderMixList(mixes) {
+  const box = $("mix-list");
+  box.textContent = "";
+  mixes.forEach((m) => {
+    const row = document.createElement("div");
+    row.className = "mixitem";
+    const name = document.createElement("span");
+    name.className = "mixname";
+    name.textContent = m.name || m.task_id;
+    row.appendChild(name);
+    const au = document.createElement("audio");
+    au.controls = true;
+    au.src = "/api/mix/audio?path=" + enc(m.path);
+    row.appendChild(au);
+    const dl = document.createElement("a");
+    dl.className = "dl";
+    dl.href = "/api/mix/audio?path=" + enc(m.path) + "&download=1";
+    dl.textContent = T("下载");
+    row.appendChild(dl);
+    box.appendChild(row);
+  });
+}
+
+/* ==================================================================== 事件绑定 */
+$("load").addEventListener("click", loadTracks);
+$("refresh").addEventListener("click", () => loadSources(true));
+$("refresh-mixes").addEventListener("click", () => loadSources(true));
+$("apply-all").addEventListener("click", () => {
+  const a = S.sel[0], b = S.sel[1];
+  if (!(b > a)) { setMsg(T("区间无效"), "err"); return; }
+  S.tracks.forEach((t) => {
+    t.clips = [{ start: a, in: a, out: b, fade_in: t.fadeIn, fade_out: t.fadeOut }];
+    updateTrackState(t); drawTrack(t);
+  });
+});
+$("reset-all").addEventListener("click", () => {
+  S.tracks.forEach((t) => { t.clips = []; updateTrackState(t); drawTrack(t); });
+});
+$("sel-start").addEventListener("change", () => {
+  S.sel[0] = Math.max(0, parseFloat($("sel-start").value) || 0);
+  S.sel[1] = Math.max(S.sel[0], S.sel[1]); redrawAll();
+});
+$("sel-end").addEventListener("change", () => {
+  S.sel[1] = Math.max(0, parseFloat($("sel-end").value) || 0);
+  S.sel[0] = Math.min(S.sel[0], S.sel[1]); redrawAll();
+});
+$("render").addEventListener("click", startRender);
+$("cancel").addEventListener("click", cancelRender);
+window.addEventListener("resize", redrawAll);
+
+loadSources(false);
+</script>
+</body>
+</html>

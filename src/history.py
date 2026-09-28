@@ -100,7 +100,10 @@ def delete_files_to_recycle(files: list) -> int:
 _FILENAME_TS_RE = re.compile(r"^(?:(?P<proj>.+)_)?(?P<ts>\d{8}_\d{6})(?P<rest>.*)$")
 
 # 项目目录安全前缀（outputs 下单层目录），delete_project 仅回收带这些前缀的目录
-_PROJECT_DIR_PREFIXES = ("song_", "separations_", "cover_")
+_PROJECT_DIR_PREFIXES = ("song_", "separations_", "cover_", "mix_")
+
+# 记录类型 → 专属产物目录前缀（目录整属于该条记录，可整目录回收）
+_DERIVED_DIR_PREFIXES = {"separation": "separations_", "cover": "cover_", "mix": "mix_"}
 
 
 def sanitize_project(name: str) -> str:
@@ -352,12 +355,13 @@ class HistoryManager:
             return False
 
     def _derived_dir_for(self, entry) -> Optional[Path]:
-        """返回分离/翻唱记录专属的产物目录绝对路径，非专属（不可安全回收）时返回 None。
+        """返回分离/翻唱/混音记录专属的产物目录绝对路径，非专属（不可安全回收）时返回 None。
 
-        新结构：output_dir 指向 outputs/<separations_<ts>|cover_<ts>>（outputs 下
+        新结构：output_dir 指向 outputs/<separations_<ts>|cover_<ts>|mix_<ts>>（outputs 下
         单层目录，整目录属于该任务）；目录必须位于本 outputs_root 之下才可整目录回收。
         """
-        if getattr(entry, "record_type", "") not in ("separation", "cover"):
+        prefix = _DERIVED_DIR_PREFIXES.get(getattr(entry, "record_type", ""))
+        if prefix is None:
             return None
         if not getattr(entry, "output_dir", ""):
             return None
@@ -368,8 +372,7 @@ class HistoryManager:
             rel = out_abs.relative_to(self.outputs_root)
         except ValueError:
             return None
-        # 新结构：outputs/<separations_<ts>|cover_<ts>>（单层，独立产物文件夹）
-        prefix = "separations_" if entry.record_type == "separation" else "cover_"
+        # 新结构：outputs/<单层目录>（独立产物文件夹，目录名以记录类型前缀开头）
         if len(rel.parts) == 1 and rel.parts[0].startswith(prefix):
             if out_abs.is_dir():
                 return out_abs
