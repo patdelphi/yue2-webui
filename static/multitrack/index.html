@@ -105,6 +105,8 @@
   /* 统一播放行：所有轨共用一套 transport（播放/暂停、停止、循环、时间码） */
   .transport { border-top: 1px solid var(--line); padding-top: 8px; gap: 10px; }
   .transport .tstate { font-variant-numeric: tabular-nums; min-width: 104px; }
+  /* 选区读数：起始时间码 + 选区时长（等宽数字，避免数值变化时抖动） */
+  .selinfo { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
@@ -140,10 +142,13 @@
       <input id="sel-end" type="number" step="0.01" min="0" value="0">
       <button id="apply-all"></button>
       <button id="reset-all"></button>
+      <button id="sel-clear"></button>
+      <span id="sel-info" class="selinfo"></span>
     </div>
     <div id="tracks"></div>
     <!-- 统一 transport：一个播放/暂停、一个停止，所有轨同一时钟同步（标准 DAW 逻辑） -->
     <div class="row transport">
+      <label class="lb" id="t-transport"></label>
       <button id="tp-play" class="pl"></button>
       <button id="tp-stop" class="pl"></button>
       <label class="chk"><input id="tp-loop" type="checkbox"><span id="t-loop"></span></label>
@@ -253,6 +258,8 @@ function applyTexts() {
   $("t-sel").textContent = T("全局选区");
   $("apply-all").textContent = T("应用选区到全部轨");
   $("reset-all").textContent = T("恢复全部整轨");
+  $("sel-clear").textContent = T("取消选择区");
+  $("t-transport").textContent = T("播放控制");
   $("t-master").textContent = T("母带");
   $("t-loud").textContent = T("响度目标(LUFS)");
   $("t-tp").textContent = T("真峰值(dBTP)");
@@ -346,7 +353,15 @@ function drawTrack(t) {
     ctx.moveTo(xe, 0); ctx.lineTo(xe, h); ctx.stroke();
   }
 }
-function redrawAll() { S.tracks.forEach(drawTrack); }
+function redrawAll() { S.tracks.forEach(drawTrack); updateSelInfo(); }
+
+/* 选区读数：起始时间码 + 选区总时长；无有效选区时显示整曲范围（与播放区间一致） */
+function updateSelInfo() {
+  const el = $("sel-info");
+  if (!el) return;
+  const [a, b] = playRange();
+  el.textContent = T("起始") + " " + fmtTime(a) + "  " + T("时长") + " " + fmtTime(Math.max(0, b - a));
+}
 
 function updateTrackState(t) {
   if (!t.stateEl) return;
@@ -1097,6 +1112,14 @@ $("apply-all").addEventListener("click", () => {
 });
 $("reset-all").addEventListener("click", () => {
   S.tracks.forEach((t) => { t.clips = []; updateTrackState(t); drawTrack(t); });
+});
+/* 取消选择区：清空选区 → 播放范围恢复整曲（输入框回到 0 ~ 时长，播放中则从起点重播） */
+$("sel-clear").addEventListener("click", () => {
+  S.sel = [0, 0];
+  $("sel-start").value = r3(0);
+  $("sel-end").value = r3(S.dur);
+  redrawAll();
+  if (S.playing) playFrom(playRange()[0]);
 });
 $("sel-start").addEventListener("change", () => {
   S.sel[0] = Math.max(0, parseFloat($("sel-start").value) || 0);

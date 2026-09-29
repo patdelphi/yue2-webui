@@ -459,6 +459,10 @@ EN_TABLE: Dict[str, str] = {
     "正在解码音频": "Decoding audio",
     "解码失败": "Decode failed",
     "播放失败": "Playback failed",
+    "播放控制": "Transport",
+    "取消选择区": "Clear selection",
+    "起始": "Start",
+    "时长": "Duration",
 }
 
 

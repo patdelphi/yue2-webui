@@ -398,7 +398,8 @@ def test_page_texts_complete():
     # 抽查：中文键在英文表里必须给出不同译文（漏译会回退原文而相等）
     for key in ("多轨编辑器", "静音", "下载", "混音记录", "渲染成品",
                 "保存工程", "打开", "改名", "试听本轨",
-                "播放", "暂停", "停止", "循环", "正在解码音频"):
+                "播放", "暂停", "停止", "循环", "正在解码音频",
+                "播放控制", "取消选择区", "起始", "时长"):
         assert en[key] != zh[key], key
 
 
@@ -440,9 +441,15 @@ def test_editor_page_calls_expected_endpoints():
 def test_editor_page_has_transport_playback():
     """统一播放（transport）：单一播放/暂停、同步调度、播放头、空格键与循环。"""
     page = (WEBUI_DIR / "static" / "multitrack" / "index.html").read_text(encoding="utf-8")
-    # UI：只有一套 transport 控件（每轨不再各播各的）
-    for elem in ('id="tp-play"', 'id="tp-stop"', 'id="tp-loop"', 'id="tp-time"'):
+    # UI：只有一套 transport 控件（每轨不再各播各的），播放按钮前有 label 说明
+    for elem in ('id="tp-play"', 'id="tp-stop"', 'id="tp-loop"', 'id="tp-time"',
+                 'id="t-transport"'):
         assert elem in page, elem
+    # 选区：取消选择区按钮 + 起始时间码/总时长读数
+    for elem in ('id="sel-clear"', 'id="sel-info"'):
+        assert elem in page, elem
+    assert '"sel-clear").addEventListener' in page
+    assert "updateSelInfo" in page and "playRange()" in page
     # 引擎：同一 AudioContext + 同一个 start(t0) → 样本级同步；按 path 缓存解码结果
     assert "decodeAudioData" in page          # 首次播放解码并缓存 AudioBuffer
     assert "createBufferSource" in page       # 每轨切片用 AudioBufferSourceNode 调度

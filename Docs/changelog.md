@@ -4,6 +4,18 @@
 
 ---
 
+## 2026-09-29 — 多轨编辑器：主控 transport 加 label + 选区读数与取消选择区
+
+- `static/multitrack/index.html`：
+  - 主控行播放按钮前新增 label「播放控制」（`#t-transport`，`Transport`），与其它行 `label.lb` 样式统一。
+  - 全局选区行新增「取消选择区」按钮（`#sel-clear`）：清空 `S.sel`、输入框回到 `0 ~ 时长`、重绘波形；播放中取消则从整曲起点重播。
+  - 新增选区读数 `#sel-info`（等宽数字）：显示 `起始 <时间码>  时长 <时长>`；无有效选区时显示整曲范围，与 `playRange()` 的播放区间保持一致；由 `redrawAll()` 统一刷新，故拖拽选择、手填起止、载入素材、窗口缩放后都会同步更新。
+- `src/mix_web.py`、`src/i18n.py`：新增文案键「播放控制 / 取消选择区 / 起始 / 时长」（编辑页文案仍全部由后端下发，前端零硬编码）。
+- `tests/test_mix_web.py`：`test_page_texts_complete` 抽查加入 4 个新键；`test_editor_page_has_transport_playback` 增加 `t-transport`/`sel-clear`/`sel-info`/`updateSelInfo` 断言。
+- 验证：`py_compile` 通过；编辑器内联 JS `node --check` 通过；`pytest tests/test_mix_web.py tests/test_mix_render.py` 50 项通过。浏览器实测（真实 171.6s 素材）：label 显示「播放控制」、按钮「取消选择区」；无选区读数「起始 0:00.0  时长 2:51.6」、选区 [5,8] 读数「起始 0:05.0  时长 0:03.0」；点「取消选择区」后 `S.sel=[0,0]`、播放范围回整曲、输入框回到 `0~171.599`、读数复位。
+
+---
+
 ## 2026-09-28 — 多轨编辑器播放重构：统一 transport（标准 DAW 逻辑）
 
 > 背景：此前编辑器没有「统一播放」——每轨只能各自 ▶ 试听，无法整体听混音，也没有播放头。本轮按标准 DAW 逻辑重构播放，方案见 `Docs/multitrack-playback-plan.md`。
