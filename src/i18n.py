@@ -437,6 +437,28 @@ EN_TABLE: Dict[str, str] = {
     "正在载入波形": "Loading waveforms",
     "区间无效": "Invalid range",
     "无可用素材，请先执行一次音轨分离": "No source available. Run a separation first.",
+    # —— 多轨编辑器 M3：工程持久化 + 混音记录管理 ——
+    "工程": "Project",
+    "已保存工程": "Saved projects",
+    "保存工程": "Save project",
+    "打开": "Open",
+    "工程已保存": "Project saved",
+    "工程已载入": "Project loaded",
+    "改名": "Rename",
+    "新名称": "New name",
+    "删除该混音记录？文件将移入回收站。": "Delete this mix record? Files will be moved to the Recycle Bin.",
+    "记录不存在": "Record not found",
+    "删除失败": "Delete failed",
+    # —— 多轨编辑器：单轨试听 ——
+    "试听本轨": "Preview this track",
+    # —— 多轨编辑器：统一播放（DAW transport） ——
+    "播放": "Play",
+    "暂停": "Pause",
+    "停止": "Stop",
+    "循环": "Loop",
+    "正在解码音频": "Decoding audio",
+    "解码失败": "Decode failed",
+    "播放失败": "Playback failed",
 }
 
 

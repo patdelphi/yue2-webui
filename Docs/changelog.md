@@ -4,6 +4,63 @@
 
 ---
 
+## 2026-09-28 — 多轨编辑器播放重构：统一 transport（标准 DAW 逻辑）
+
+> 背景：此前编辑器没有「统一播放」——每轨只能各自 ▶ 试听，无法整体听混音，也没有播放头。本轮按标准 DAW 逻辑重构播放，方案见 `Docs/multitrack-playback-plan.md`。
+> 设计决策：①所有轨共用一个时钟、一起播/停，只保留一套播放/暂停/停止；②发声按 Solo > Mute > 默认发声（与后端渲染的 `mute` 语义一致），默认都不勾 = 全部发声；③播放即复现编辑结果（裁切/淡变/增益/Mute-Solo 实时生效）；④有全局选区只播选区，无选区播整曲；⑤附加：播放头跟随、空格键播放/暂停、单击波形定位、循环播放；每轨 ▶ 单轨试听保留。
+
+- `static/multitrack/index.html`：
+  - UI：母带行上方新增 transport 行——`▶/⏸`（单一播放/暂停）、`■`（停止，回到播放区间起点）、`循环` 开关、时间码 `mm:ss.d / mm:ss.d`；每轨保留 `静音`/`独奏`（默认不勾 = 全部发声）。
+  - 播放引擎（`audioCtx` / `scheduleIteration`）：所有轨共用一个 `AudioContext`，每轨按 `clips` 建 `AudioBufferSourceNode`（`offset=clip.in`、`duration=out-in`），**全部使用同一个 `start(t0)`** → 样本级同步；无裁切的轨按整轨调度。首次播放 `fetch('/api/mix/audio')` → `decodeAudioData` 并按 `path` 缓存，解码期间显示「正在解码音频 x/y」。
+  - 增益链：`片段淡变包络 → 轨 GainNode → masterGain → destination`；淡变按片段边界生成折线（起点已落在淡入区内时从当前值续接）。Mute/Solo/增益用 `setTargetAtTime` 门控，**播放中切换即时生效，无需重启播放**。
+  - 播放头：每轨 canvas 外层包 `wave-wrap`，叠加绝对定位竖线（避免每帧整幅重绘 canvas），由 `requestAnimationFrame` 按音频时钟 `pos = playStart + (ctx.currentTime - t0)` 更新；用「播放代次 `S.gen`」作废旧帧回调，避免重排后出现双 tick 循环（实测推进速率 0.994x）。
+  - 循环：`setInterval` lookahead 在每轮结束前 ~0.5s 预排下一轮（`nextLoopAt`），播放头按 `pos mod span` 取模；同时清理已播完的节点引用，避免长时间循环时数组膨胀。
+  - 交互：波形 `pointerdown → pointerup` 位移 < 4px 视为**单击**（定位播放头，保留原选区），≥ 4px 才生成选区（此前 `pointerdown` 即清空选区）；`Space` 播放/暂停（焦点在 input/select/textarea 时不拦截）；单轨 ▶ 试听与统一播放互斥。
+- `src/mix_web.py`、`src/i18n.py`：新增文案键「播放/暂停/停止/循环/正在解码音频/解码失败/播放失败」（编辑页文案仍全部由后端下发，前端零硬编码）。
+- `tests/test_mix_web.py`：新增 `test_editor_page_has_transport_playback`（transport 控件 + 引擎/播放头/空格键源码断言）；文案抽查加入 5 个新键。
+- 验证：`py_compile` 通过；`pytest tests/test_mix_web.py tests/test_mix_render.py` 50 项、全量（排除脚本式 `tests/test_i18n.py`）164 项通过。浏览器实测（真实 171.6s 双轨素材）：统一播放推进速率 0.994x、两轨播放头位移完全一致、播放中轨增益 -20dB → 0.100、Solo 门控 0/1、Mute 生效；选区 [5,8] 只播该区间并停到 8.0；循环 3.5s 后位置回绕（预排节点 4 个）；停止回起点 0.0；单击波形定位到 42.0s、拖拽生成 [10,40]；空格键播放/暂停且输入框内不触发；未改动的单轨试听仍可用；控制台无报错。
+
+---
+
+## 2026-09-28 — 多轨编辑器：单轨试听（每轨 ▶ 按钮 + 共享播放器）
+
+> 背景：此前编辑器内没有单轨试听，「独奏」只在**渲染时**把其它轨静音（离线），要单独听某一轨只能渲染成品或在分离 Tab 回放。本轮给每轨加 ▶ 按钮，直接试听该轨原始分轨。
+
+- `static/multitrack/index.html`：
+  - 每轨标题行新增 ▶ 按钮（`title` 走 i18n「试听本轨」），并新增隐藏的共享播放器 `#solo-audio`。
+  - `previewTrack(t)`：播放该轨原文件（`/api/mix/audio?path=`），并用 Web Audio `GainNode` 套用该轨增益（dB→线性，支持 +12dB；`audio.volume` 只能衰减故不采用）；`AudioContext` 延迟到首次点击才创建，以满足浏览器「必须用户手势」的限制。再点同一按钮 = 停止。
+  - 按钮符号由播放器 `play/pause/ended` 事件统一刷新（按 `currentSrc` 匹配归属轨）：切换轨道时改 `src` 会**异步**触发 `pause` 事件，若靠手工维护按钮标记会造成多个按钮同时显示 ⏸。重建轨道（载入素材/工程）时自动停止试听。
+- `src/mix_web.py`、`src/i18n.py`：文案键新增「试听本轨」（`Preview this track`）。
+- `tests/test_mix_web.py`：文案抽查加入「试听本轨」；源码接线断言加入 `id="solo-audio"`、`previewTrack`、`createMediaElementSource`。
+- 验证：`py_compile` 通过；混音两文件 49 项、全量（排除脚本式 `tests/test_i18n.py`）163 项通过；浏览器实测——播放推进（`currentTime` 5.8s / 时长 171.6s）、切换轨道仅当前轨显示 ⏸、再点停止、重建轨道自动停、增益换算 +6dB → 1.995（与 10^(6/20) 一致）、控制台无报错。
+
+---
+
+## 2026-09-28 — 多轨混音 M3：工程持久化 + 记录管理 + 分离页内嵌
+
+> 方案与任务拆分见 `Docs/multitrack-editor-plan.md`（第 6 节 M3）。M3 的进度/取消、i18n、changelog 已随 M2 落地，本轮补齐剩余三项：工程持久化、混音记录改名/删除、（C3）分离页内嵌编辑页。
+> 关于「历史页表格展示 mix 记录」：按既有约定**不进入歌曲历史页**（该页仅展示生成记录，分离/翻唱记录同样在各自 Tab 管理），改在编辑页「混音记录」列表内提供回放/下载/改名/删除，与分离 Tab 的记录管理方式一致。
+
+- `src/mix_web.py`（新增能力，仍为与 Web 框架解耦的纯函数层）：
+  - `save_project(payload, webui_root, name)`：工程先经 `parse_mix_project` 校验归一化，再落盘到 `outputs/mix_projects/<工程名>.json`（UTF-8、缩进 2、`ensure_ascii=False`，同名覆盖）；工程名清洗非法字符 `\/:*?"<>|`、去首尾点/空格、限长 60，为空回退时间戳。
+  - `list_projects(webui_root)`：已保存工程清单（名称/路径/保存时间/轨数/时长），按保存时间倒序，损坏 JSON 跳过。
+  - `load_project(webui_root, rel)`：读取工程——路径必须解析到 `outputs/mix_projects/` 之下（越界/缺失/非 JSON/校验失败分别返回中文错误），返回 `src` 已归一为相对 webui_root 的规范 JSON，可直接回灌编辑器。
+  - `_project_to_json(project, webui_root)`：把校验后的 `MixProject` 序列化为前端可回灌的规范 JSON（增益/响度等已钳制、素材路径相对化），保证「保存 → 载入 → 再保存」幂等。
+  - `rename_mix(history_mgr, task_id, new_name)` / `delete_mix(history_mgr, task_id)`：混音记录改名（走 `history.rename_project`，文件级重命名并保留时间戳）与删除（走 `history.delete_project`，整目录移入系统回收站 + 移除该目录全部记录）；记录不存在或删除无匹配时返回 `ok=false`。
+- `static/multitrack/index.html`：
+  - 新增「工程」区：已保存工程下拉 + 「保存工程」（工程名取「项目名」输入框，留空则后端用时间戳）+ 「打开」；打开工程可在未选素材时直接使用（轨道由工程自带 `src` 还原）。
+  - `buildTracks(items)` 改为接受通用轨道列表（素材记录与工程轨道共用一套渲染），新增 `applyTrackState()` 在波形就绪后回填增益/静音/切片/淡变到界面控件（工程载入后可继续编辑并再次保存/渲染）。
+  - 「混音记录」列表每项新增「改名」（`prompt` 输入新名）与「删除选中」（`confirm` 二次确认，文件入回收站）。
+  - 内嵌适配：`?embed=1` 时标记 `html[data-embed="1"]` 收紧内边距；`syncParentTheme()` 定时读取**父窗口** body 背景亮度决定明暗主题（同源可访问父窗口，跨源异常时回退系统主题），主题变化后重绘波形（波形颜色取自 CSS 变量）。
+- `app.py`：
+  - 新增 3 个接口：`GET /api/mix/projects`（工程清单）、`GET|POST /api/mix/project`（载入/保存工程）、`POST /api/mix/record`（混音记录改名/删除，`action=rename|delete`）；均带异常兜底，失败返回 `ok=false` + 中文错误。
+  - 分离 Tab 末尾新增内嵌多轨编辑器 `gr.HTML`（`iframe src=/static/multitrack/?embed=1`，`elem_id="sep-mix-embed"`）；原「多轨编辑」按钮（新窗口打开）保持不变，两种入口并存。
+- `src/i18n.py`：补充「工程/已保存工程/保存工程/打开/工程已保存/工程已载入/改名/新名称/记录不存在/删除失败/删除该混音记录？文件将移入回收站。」等中英词条（编辑页文案仍全部由后端下发，前端零硬编码）。
+- `tests/test_mix_web.py`：由 22 项扩到 27 项——新增工程保存/载入往返、非法工程拦截与工程名清洗、清单跳过损坏文件、载入路径越界、记录改名/删除的参数透传与无匹配分支（删除用桩函数，避免污染系统回收站）；文案抽查与源码接线断言同步扩展（3 个新接口、内嵌 iframe、主题跟随）。
+- 验证：`py_compile` 通过；`pytest tests/test_mix_web.py tests/test_mix_render.py` 49 项通过；全量 `pytest tests`（排除脚本式 `tests/test_i18n.py`）163 项通过；服务重启后真实 HTTP 冒烟：`GET /api/mix/projects` → `{"ok":true,"projects":[]}`、`GET /static/multitrack/?embed=1` → 200（含 `data-embed` 样式与 `syncParentTheme`）、`GET /api/mix/sources` → 4 组分离素材、非法工程保存 → 中文越界错误、未知记录删除 → `记录不存在`。
+
+---
+
 ## 2026-09-28 — 多轨混音 M2：独立编辑页 + Web 接口（端到端打通）
 
 > 方案与任务拆分见 `Docs/multitrack-editor-plan.md`（第 6 节 M2）。承接 M1 的后端渲染接口，补齐编辑与产物闭环。

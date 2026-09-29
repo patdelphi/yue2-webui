@@ -10,6 +10,11 @@
     submit_render(payload, webui_root, history_mgr, project) -> dict
     task_status(task_id, webui_root) -> dict
     cancel_render(task_id) -> dict
+    save_project(payload, webui_root, name) -> dict             # 工程持久化（M3）
+    list_projects(webui_root) -> dict
+    load_project(webui_root, rel) -> dict
+    rename_mix(history_mgr, task_id, new_name) -> dict          # 混音记录改名/删除（M3）
+    delete_mix(history_mgr, task_id) -> dict
 
 安全与健壮性约束：
 - 所有下发/读取的音频路径都必须经 resolve_audio 校验落在 <webui_root>/outputs 下，
@@ -38,6 +43,12 @@ logger = logging.getLogger(__name__)
 
 # 混音产物目录前缀（须与 history._PROJECT_DIR_PREFIXES 中的 "mix_" 保持一致）
 MIX_DIR_PREFIX = "mix_"
+
+# 保存的混音工程目录（相对 outputs/）；文件名即工程名，同名覆盖
+MIX_PROJECT_DIR = "mix_projects"
+# 工程名清洗：这些字符会破坏文件名/路径，统一替换为下划线
+_BAD_NAME_CHARS = '\\/:*?"<>|'
+_NAME_MAX = 60
 
 # 允许下发给浏览器的音频扩展名 → MIME（其余一律拒绝）
 AUDIO_MIME = {
@@ -230,6 +241,148 @@ def list_sources(history_mgr, webui_root) -> dict:
     return {"ok": True, "sources": sources, "mixes": mixes}
 
 
+# ------------------------------------------------------------------ 工程持久化（M3）
+def _safe_name(name: str) -> str:
+    """清洗工程名：替换非法字符、去首尾点/空格、限长；为空则返回空串。"""
+    s = "".join("_" if ch in _BAD_NAME_CHARS else ch for ch in (name or "").strip())
+    return s.strip(". ")[:_NAME_MAX]
+
+
+def _project_dir(root: Path) -> Path:
+    return Path(root) / "outputs" / MIX_PROJECT_DIR
+
+
+def _project_to_json(project, webui_root) -> dict:
+    """把校验后的 MixProject 序列化为前端可回灌的规范 JSON（src 转为相对路径）。"""
+    root = Path(webui_root)
+    return {
+        "version": project.version,
+        "sample_rate": project.sample_rate,
+        "duration": project.duration,
+        "source_root_task_id": project.source_root_task_id,
+        "tracks": [{
+            "id": t.id,
+            "name": t.name,
+            "src": _rel_to_root(root, t.src) or str(t.src),
+            "gain_db": t.gain_db,
+            "mute": bool(t.mute),
+            "clips": [{
+                "start": c.start, "in": c.in_, "out": c.out,
+                "fade_in": c.fade_in, "fade_out": c.fade_out,
+            } for c in (t.clips or [])],
+        } for t in project.tracks],
+        "master": dict(project.master or {}),
+    }
+
+
+def save_project(payload, webui_root, name: str = "") -> dict:
+    """保存混音工程为 JSON（先校验归一化，同名覆盖）；name 为空则用时间戳。"""
+    try:
+        project = parse_mix_project(payload, webui_root)
+    except MixProjectError as e:
+        return {"ok": False, "error": str(e)}
+    except Exception as e:
+        logger.exception("混音工程校验异常")
+        return {"ok": False, "error": f"工程校验失败: {e}"}
+
+    safe = _safe_name(name) or time.strftime("%Y%m%d_%H%M%S")
+    target = _project_dir(Path(webui_root)) / f"{safe}.json"
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(_project_to_json(project, webui_root), ensure_ascii=False, indent=2),
+            encoding="utf-8")
+    except OSError as e:
+        logger.exception("工程保存失败")
+        return {"ok": False, "error": f"工程保存失败: {e}"}
+    return {"ok": True, "name": safe, "path": _rel_to_root(Path(webui_root), target)}
+
+
+def list_projects(webui_root) -> dict:
+    """列出已保存的混音工程（按保存时间倒序）；损坏文件跳过。"""
+    d = _project_dir(Path(webui_root))
+    items = []
+    try:
+        files = sorted(d.glob("*.json")) if d.is_dir() else []
+    except OSError:
+        logger.exception("工程目录读取失败")
+        files = []
+    for f in files:
+        try:
+            stat = f.stat()
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        items.append({
+            "name": f.stem,
+            "path": _rel_to_root(Path(webui_root), f),
+            "saved_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)),
+            "mtime": stat.st_mtime,
+            "track_count": len((data or {}).get("tracks") or []),
+            "duration": (data or {}).get("duration", 0.0),
+        })
+    items.sort(key=lambda x: x["mtime"], reverse=True)
+    return {"ok": True, "projects": items}
+
+
+def load_project(webui_root, rel) -> dict:
+    """读取一个已保存工程；路径必须落在 outputs/mix_projects/ 下，且校验可通过。"""
+    root = Path(webui_root)
+    if not isinstance(rel, str) or not rel.strip():
+        return {"ok": False, "error": "工程路径为空"}
+    cand = Path(rel)
+    cand = cand if cand.is_absolute() else (root / cand)
+    try:
+        resolved = cand.resolve()
+        resolved.relative_to(_project_dir(root).resolve())
+    except (OSError, ValueError):
+        return {"ok": False, "error": "工程路径越界"}
+    if resolved.suffix.lower() != ".json" or not resolved.is_file():
+        return {"ok": False, "error": "工程文件不存在"}
+    try:
+        data = json.loads(resolved.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return {"ok": False, "error": f"工程文件损坏: {e}"}
+    try:
+        project = parse_mix_project(data, webui_root)
+    except MixProjectError as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "name": resolved.stem, "project": _project_to_json(project, webui_root)}
+
+
+# ------------------------------------------------------------------ 混音记录管理（M3）
+def rename_mix(history_mgr, task_id, new_name: str = "") -> dict:
+    """修改混音记录的项目名（文件级重命名，保留时间戳）；返回重命名文件数。"""
+    if not task_id:
+        return {"ok": False, "error": "未指定记录"}
+    try:
+        rec = history_mgr.get(str(task_id))
+        if rec is None:
+            return {"ok": False, "error": "记录不存在"}
+        n = history_mgr.rename_project(rec.output_dir, new_name or "")
+    except Exception as e:
+        logger.exception("混音记录改名失败")
+        return {"ok": False, "error": f"改名失败: {e}"}
+    return {"ok": True, "renamed": n}
+
+
+def delete_mix(history_mgr, task_id) -> dict:
+    """删除一条混音记录：整目录移入系统回收站，并移除该目录全部记录。"""
+    if not task_id:
+        return {"ok": False, "error": "未指定记录"}
+    try:
+        rec = history_mgr.get(str(task_id))
+        if rec is None:
+            return {"ok": False, "error": "记录不存在"}
+        n = history_mgr.delete_project(rec.output_dir)
+    except Exception as e:
+        logger.exception("混音记录删除失败")
+        return {"ok": False, "error": f"删除失败: {e}"}
+    if not n:
+        return {"ok": False, "error": "删除失败（目录不存在或不允许删除）"}
+    return {"ok": True, "removed": n}
+
+
 # ------------------------------------------------------------------ 文案
 # 编辑页需要的文案键（值即中文原文，统一经 tr 翻译，禁止前端硬编码文案）
 PAGE_TEXT_KEYS = (
@@ -240,6 +393,13 @@ PAGE_TEXT_KEYS = (
     "渲染成品", "取消渲染", "渲染中", "排队中", "渲染完成", "渲染失败", "已取消",
     "试听", "下载", "混音记录", "请先选择素材", "正在载入波形", "区间无效",
     "无可用素材，请先执行一次音轨分离",
+    # —— M3：工程持久化 + 混音记录管理 ——
+    "工程", "已保存工程", "保存工程", "打开", "工程已保存", "工程已载入",
+    "改名", "新名称", "删除该混音记录？文件将移入回收站。", "记录不存在", "删除失败",
+    # —— 单轨试听 ——
+    "试听本轨",
+    # —— 统一播放（DAW transport） ——
+    "播放", "暂停", "停止", "循环", "正在解码音频", "解码失败", "播放失败",
 )
 
 

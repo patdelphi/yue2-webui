@@ -1,12 +1,14 @@
-"""多轨混音 Web 接口（M2）单元测试。
+"""多轨混音 Web 接口（M2 + M3）单元测试。
 
 覆盖内容：
 - resolve_audio 路径白名单（越界/扩展名/不存在）与 audio_mime 映射
 - compute_peaks 峰值分桶（需系统 ffmpeg，缺失时自动跳过）与缺文件兜底
 - list_sources 素材清单（分离记录 → sources，混音记录 → mixes）
 - submit_render / task_status / cancel_render 的契约与错误分支
+- save_project / list_projects / load_project 工程持久化（M3）
+- rename_mix / delete_mix 混音记录管理（M3，删除走桩函数不污染回收站）
 - page_texts 文案完整性（含英文翻译）
-- app.py 路由注册与分离页编辑入口（源码级断言）
+- app.py 路由注册、分离页编辑入口/内嵌 iframe（源码级断言）
 
 运行方式：pytest tests/test_mix_web.py
 """
@@ -290,7 +292,101 @@ def test_cancel_render_forwards_to_queue(monkeypatch):
     assert seen["tid"] == "mix_test_0005"
 
 
-# ------------------------------------------------------------------ 5. 文案
+# ------------------------------------------------------------------ 5. 工程持久化（M3）
+def test_save_and_load_project_roundtrip(webui_root: Path):
+    """保存 → 落盘到 outputs/mix_projects/ → 原样载入（src 归一为相对路径）。"""
+    saved = mix_web.save_project(_payload(webui_root), webui_root, "我的工程")
+    assert saved["ok"] is True and saved["name"] == "我的工程"
+    p = webui_root / saved["path"]
+    assert p.is_file() and p.parent.name == mix_web.MIX_PROJECT_DIR
+
+    loaded = mix_web.load_project(webui_root, saved["path"])
+    assert loaded["ok"] is True and loaded["name"] == "我的工程"
+    proj = loaded["project"]
+    assert proj["version"] == 1
+    assert proj["duration"] == 1.0
+    assert proj["source_root_task_id"] == "sep_1"
+    assert proj["tracks"][0]["gain_db"] == -1.5
+    assert proj["tracks"][0]["src"].startswith("outputs/separations_")
+
+
+def test_save_project_rejects_invalid_and_sanitizes_name(webui_root: Path):
+    """非法工程不落盘；工程名清洗非法字符、空名回退时间戳。"""
+    bad = _payload(webui_root)
+    bad["tracks"][0]["src"] = "../../app.py"
+    assert mix_web.save_project(bad, webui_root, "x")["ok"] is False
+
+    dirty = mix_web.save_project(_payload(webui_root), webui_root, "../a:b?")
+    assert dirty["ok"] is True
+    for ch in "/\\:*?\"<>|":
+        assert ch not in dirty["name"], ch
+
+    auto = mix_web.save_project(_payload(webui_root), webui_root, "   ")
+    assert auto["ok"] is True and len(auto["name"]) == 15     # YYYYmmdd_HHMMSS
+
+
+def test_list_projects_skips_broken(webui_root: Path):
+    """工程清单只收录可解析 JSON，损坏文件跳过。"""
+    mix_web.save_project(_payload(webui_root), webui_root, "p1")
+    d = webui_root / "outputs" / mix_web.MIX_PROJECT_DIR
+    (d / "broken.json").write_text("{不是合法 json", encoding="utf-8")
+
+    data = mix_web.list_projects(webui_root)
+    assert data["ok"] is True
+    assert [p["name"] for p in data["projects"]] == ["p1"]
+    assert data["projects"][0]["track_count"] == 1
+
+
+def test_load_project_rejects_path_outside_or_missing(webui_root: Path):
+    """载入工程必须落在 mix_projects/ 内且存在。"""
+    assert mix_web.load_project(webui_root, "")["ok"] is False
+    assert mix_web.load_project(webui_root, "outputs/mix_projects/none.json")["ok"] is False
+    assert mix_web.load_project(webui_root, "../../app.py")["ok"] is False
+    # 白名单目录之外的同名 JSON 也不允许
+    (webui_root / "outputs" / "x.json").write_text("{}", encoding="utf-8")
+    assert mix_web.load_project(webui_root, "outputs/x.json")["ok"] is False
+
+
+# ------------------------------------------------------------------ 6. 混音记录管理（M3）
+def test_rename_mix_forwards_to_history(history_mgr: HistoryManager, monkeypatch):
+    """改名走 history.rename_project（文件级重命名，保留时间戳）。"""
+    seen = []
+
+    def _stub(out, name):
+        seen.append((out, name))
+        return 1
+
+    monkeypatch.setattr(history_mgr, "rename_project", _stub)
+    data = mix_web.rename_mix(history_mgr, "mix_1", "新名")
+    assert data == {"ok": True, "renamed": 1}
+    assert seen == [("outputs/mix_20260928_090000", "新名")]
+
+
+def test_mix_record_unknown_or_empty_task(history_mgr: HistoryManager):
+    """未知/空 task_id 一律返回 ok=False，不触碰历史。"""
+    assert mix_web.rename_mix(history_mgr, "nope", "x")["ok"] is False
+    assert mix_web.rename_mix(history_mgr, "", "x")["ok"] is False
+    assert mix_web.delete_mix(history_mgr, "nope")["ok"] is False
+    assert mix_web.delete_mix(history_mgr, "")["ok"] is False
+
+
+def test_delete_mix_uses_recycle(history_mgr: HistoryManager, monkeypatch):
+    """删除走 delete_project（整目录移入回收站），无匹配记录时返回 ok=False。"""
+    seen = []
+
+    def _stub(out):
+        seen.append(out)
+        return 1
+
+    monkeypatch.setattr(history_mgr, "delete_project", _stub)
+    assert mix_web.delete_mix(history_mgr, "mix_1") == {"ok": True, "removed": 1}
+    assert seen == ["outputs/mix_20260928_090000"]
+
+    monkeypatch.setattr(history_mgr, "delete_project", lambda out: 0)
+    assert mix_web.delete_mix(history_mgr, "mix_1")["ok"] is False
+
+
+# ------------------------------------------------------------------ 7. 文案
 def test_page_texts_complete():
     """编辑页文案表覆盖全部键，英文有翻译（禁止前端硬编码文案）。"""
     zh = mix_web.page_texts("zh")
@@ -300,30 +396,67 @@ def test_page_texts_complete():
         assert text                                        # 中文原文非空
         assert en[key]                                     # 英文译文非空
     # 抽查：中文键在英文表里必须给出不同译文（漏译会回退原文而相等）
-    for key in ("多轨编辑器", "静音", "下载", "混音记录", "渲染成品"):
+    for key in ("多轨编辑器", "静音", "下载", "混音记录", "渲染成品",
+                "保存工程", "打开", "改名", "试听本轨",
+                "播放", "暂停", "停止", "循环", "正在解码音频"):
         assert en[key] != zh[key], key
 
 
-# ------------------------------------------------------------------ 6. 源码接线
+# ------------------------------------------------------------------ 8. 源码接线
 def test_app_registers_mix_routes_and_entry():
-    """app.py 必须注册静态页/接口路由，并在分离页提供编辑入口。"""
+    """app.py 必须注册静态页/接口路由，并在分离页提供编辑入口与内嵌 iframe。"""
     app_src = (WEBUI_DIR / "app.py").read_text(encoding="utf-8")
     for path in ("/static/multitrack/", "/api/mix/sources", "/api/mix/peaks",
                  "/api/mix/audio", "/api/mix/render", "/api/mix/status",
-                 "/api/mix/cancel"):
+                 "/api/mix/cancel", "/api/mix/projects", "/api/mix/project",
+                 "/api/mix/record"):
         assert f'"{path}"' in app_src, path
     assert 'gr.Button(_t("多轨编辑")' in app_src
     assert "window.open('/static/multitrack/'" in app_src
+    # M3：分离页内嵌同一编辑页（embed=1 + 主题跟随）
+    assert '/static/multitrack/?embed=1' in app_src
+    assert 'elem_id="sep-mix-embed"' in app_src
 
 
 def test_editor_page_calls_expected_endpoints():
     """静态编辑页必须引用后端接口，且从后端文案表取词（无硬编码中文界面文案）。"""
     page = (WEBUI_DIR / "static" / "multitrack" / "index.html").read_text(encoding="utf-8")
     for path in ("/api/mix/sources", "/api/mix/peaks", "/api/mix/audio",
-                 "/api/mix/render", "/api/mix/status", "/api/mix/cancel"):
+                 "/api/mix/render", "/api/mix/status", "/api/mix/cancel",
+                 "/api/mix/projects", "/api/mix/project", "/api/mix/record"):
         assert path in page, path
     assert "S.T" in page and "T(" in page      # 文案取自后端下发的 strings
     assert "version: 1" in page                 # 工程契约版本与 mix_render 对齐
+    # M3：工程持久化 + 混音记录改名/删除 + 内嵌主题跟随
+    assert "syncParentTheme" in page          # 内嵌时跟随父页面明暗主题
+    assert 'html[data-embed="1"]' in page     # 内嵌模式收紧内边距
+    assert "applyTrackState" in page          # 载入工程后回填编辑状态
+    # 单轨试听：共享隐藏播放器 + Web Audio 增益 + 逐轨 ▶ 按钮
+    assert 'id="solo-audio"' in page          # 隐藏的共享播放器元素
+    assert "previewTrack" in page             # 每轨试听按钮的处理函数
+    assert "createMediaElementSource" in page  # 用 GainNode 套用该轨增益（支持 +dB）
+
+
+def test_editor_page_has_transport_playback():
+    """统一播放（transport）：单一播放/暂停、同步调度、播放头、空格键与循环。"""
+    page = (WEBUI_DIR / "static" / "multitrack" / "index.html").read_text(encoding="utf-8")
+    # UI：只有一套 transport 控件（每轨不再各播各的）
+    for elem in ('id="tp-play"', 'id="tp-stop"', 'id="tp-loop"', 'id="tp-time"'):
+        assert elem in page, elem
+    # 引擎：同一 AudioContext + 同一个 start(t0) → 样本级同步；按 path 缓存解码结果
+    assert "decodeAudioData" in page          # 首次播放解码并缓存 AudioBuffer
+    assert "createBufferSource" in page       # 每轨切片用 AudioBufferSourceNode 调度
+    assert "scheduleIteration" in page        # 循环 lookahead 复用同一调度函数
+    assert "setTargetAtTime" in page          # Mute/Solo/增益 播放中实时生效
+    # 片段/淡变/选区语义
+    assert "trackSegments" in page            # 裁切按切片调度，无裁切按整轨
+    assert "playRange" in page                # 有选区只播选区，无选区播整曲
+    assert "gAt" in page                      # 淡入淡出包络折线
+    # 交互：播放头、单击定位、空格键、循环
+    assert "updatePlayheads" in page          # 覆盖层竖线跟随播放进度
+    assert "seekTo" in page                   # 单击波形定位播放头
+    assert "isAudible" in page                # Solo > Mute > 默认发声，与渲染一致
+    assert "togglePlay" in page and "keydown" in page and 'ev.code !== "Space"' in page
 
 
 def test_history_recycles_mix_dir():
@@ -333,7 +466,7 @@ def test_history_recycles_mix_dir():
     assert H._DERIVED_DIR_PREFIXES.get("mix") == "mix_"
 
 
-# ------------------------------------------------------------------ 7. 端到端
+# ------------------------------------------------------------------ 9. 端到端
 @pytest.mark.skipif(not HAS_FFMPEG, reason="需要系统 ffmpeg")
 def test_end_to_end_render_writes_history(webui_root: Path, history_mgr: HistoryManager):
     """真实链路：提交 → 队列渲染 → 产物落盘 → 写 mix 历史 → 目录可整目录回收。"""

@@ -2759,6 +2759,17 @@ def build_ui():
                             lib_ref_del_btn = gr.Button(_t("删除选中"), size="sm", variant="stop", scale=1)
                             _reg(lib_ref_del_btn, lambda lang: gr.update(value=tr(lang, "删除选中")))
 
+                # —— 内嵌多轨编辑器（M3）：同一编辑页以 iframe 复用，无需另开窗口 ——
+                # embed=1 时页面收紧内边距并跟随父页面明暗主题（同源可读父窗口样式）
+                sep_mix_embed = gr.HTML(
+                    '<div style="margin-top:10px;">'
+                    '<iframe src="/static/multitrack/?embed=1" title="multitrack"'
+                    ' style="width:100%;height:760px;border:1px solid var(--border-color-primary, #d8dee4);'
+                    'border-radius:10px;background:transparent;display:block;"></iframe>'
+                    '</div>',
+                    elem_id="sep-mix-embed",
+                )
+
                 # 事件绑定
                 sep_src_mode.change(fn=on_voice_src_mode, inputs=sep_src_mode,
                                     outputs=[sep_src_history, sep_src_upload])
@@ -3354,6 +3365,46 @@ if __name__ == "__main__":
             task_id = (body or {}).get("task_id", "") if isinstance(body, dict) else ""
             return JSONResponse(mix_web.cancel_render(task_id))
 
+        # —— M3：工程持久化 + 混音记录改名/删除 ——
+        async def _mix_projects(request):
+            """已保存工程清单（按保存时间倒序）。"""
+            try:
+                data = mix_web.list_projects(WEBUI_ROOT)
+            except Exception as e:
+                logger.exception("工程清单读取失败")
+                data = {"ok": False, "error": f"工程清单读取失败: {e}", "projects": []}
+            return JSONResponse(data)
+
+        async def _mix_project(request):
+            """GET 载入工程（?path=）；POST 保存工程（体 {project, name}）。"""
+            if request.method == "GET":
+                return JSONResponse(mix_web.load_project(
+                    WEBUI_ROOT, request.query_params.get("path", "")))
+            try:
+                body = await request.json()
+            except Exception:
+                return JSONResponse({"ok": False, "error": "请求体不是合法 JSON"})
+            if not isinstance(body, dict) or not isinstance(body.get("project"), dict):
+                return JSONResponse({"ok": False, "error": "缺少工程数据"})
+            return JSONResponse(mix_web.save_project(
+                body["project"], WEBUI_ROOT, body.get("name", "")))
+
+        async def _mix_record(request):
+            """混音记录改名/删除（体 {action: rename|delete, task_id, name}）。"""
+            try:
+                body = await request.json()
+            except Exception:
+                return JSONResponse({"ok": False, "error": "请求体不是合法 JSON"})
+            if not isinstance(body, dict):
+                return JSONResponse({"ok": False, "error": "请求体必须是 JSON 对象"})
+            action = body.get("action", "")
+            if action == "rename":
+                return JSONResponse(mix_web.rename_mix(
+                    history_mgr, body.get("task_id", ""), body.get("name", "")))
+            if action == "delete":
+                return JSONResponse(mix_web.delete_mix(history_mgr, body.get("task_id", "")))
+            return JSONResponse({"ok": False, "error": f"未知操作: {action}"})
+
         for _path, _ep, _methods in (
             ("/api/mix/sources", _mix_sources, ["GET"]),
             ("/api/mix/peaks", _mix_peaks, ["GET"]),
@@ -3361,6 +3412,9 @@ if __name__ == "__main__":
             ("/api/mix/render", _mix_render, ["POST"]),
             ("/api/mix/status", _mix_status, ["GET"]),
             ("/api/mix/cancel", _mix_cancel, ["POST"]),
+            ("/api/mix/projects", _mix_projects, ["GET"]),
+            ("/api/mix/project", _mix_project, ["GET", "POST"]),
+            ("/api/mix/record", _mix_record, ["POST"]),
         ):
             demo.app.routes.insert(0, Route(_path, _ep, methods=_methods))
     threading.Thread(target=_register_custom_routes, daemon=True).start()

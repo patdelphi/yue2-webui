@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Multitrack Editor</title>
 <!--
-  多轨编辑器（M2 独立编辑页）
+  多轨编辑器（M2 独立编辑页 / M3 工程持久化 + 内嵌适配）
 
   设计说明：
   - 单文件自包含（CSS/JS 内联），由 app.py 以 /static/multitrack/ 路由下发，
@@ -14,6 +14,12 @@
     + 每轨淡入淡出；所有文案来自 /api/mix/sources 的 strings 字段（后端 i18n），
     本页不硬编码任何界面文案。
   - 本页只负责交互与波形显示，成品由后端 ffmpeg 按工程 JSON 离线渲染（mix_render）。
+  - 统一播放（transport）：所有轨共用一个 AudioContext 与同一个 start(t0) 实现样本级同步，
+    仅一套播放/暂停/停止；发声按 Solo > Mute > 默认发声（与渲染一致）；有全局选区只播选区；
+    播放头由覆盖层竖线跟随；空格键播放/暂停、单击波形定位、可循环。
+  - M3：编辑工程可保存/载入（outputs/mix_projects/，接口 /api/mix/projects|project）；
+    混音记录可改名/删除（/api/mix/record）；带 ?embed=1 时内嵌进分离 Tab，
+    并通过读取父窗口背景亮度跟随明暗主题（同源）。
 -->
 <style>
   :root {
@@ -21,18 +27,34 @@
     --card: #f7f8fa; --accent: #3b82f6; --accent-fg: #ffffff; --wave: #3b82f6;
     --sel: rgba(59,130,246,.18); --sec: #eef2f7; --danger: #ef4444; --ok: #16a34a;
   }
+  /* 深色变量：系统偏好（父页面未指定主题时生效）+ 父页面显式指定 data-theme="dark" */
   @media (prefers-color-scheme: dark) {
-    :root {
+    html:not([data-theme="light"]) {
       --bg: #16181d; --fg: #e6e8eb; --muted: #9aa4b2; --line: #2c3038;
       --card: #1d2026; --accent: #3b82f6; --accent-fg: #ffffff; --wave: #60a5fa;
       --sel: rgba(96,165,250,.22); --sec: #262a32;
     }
+  }
+  /* 内嵌进 Gradio 时由父页面主题驱动（见 syncParentTheme） */
+  html[data-theme="dark"] {
+    --bg: #16181d; --fg: #e6e8eb; --muted: #9aa4b2; --line: #2c3038;
+    --card: #1d2026; --accent: #3b82f6; --accent-fg: #ffffff; --wave: #60a5fa;
+    --sel: rgba(96,165,250,.22); --sec: #262a32;
+  }
+  html[data-theme="light"] {
+    --bg: #ffffff; --fg: #1f2328; --muted: #6b7280; --line: #d8dee4;
+    --card: #f7f8fa; --accent: #3b82f6; --accent-fg: #ffffff; --wave: #3b82f6;
+    --sel: rgba(59,130,246,.18); --sec: #eef2f7; --danger: #ef4444; --ok: #16a34a;
   }
   * { box-sizing: border-box; }
   body {
     margin: 0; padding: 14px 16px 40px; background: var(--bg); color: var(--fg);
     font: 13px/1.5 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
   }
+  /* 内嵌模式：收紧内边距，避免与外层 Tab 的留白叠加 */
+  html[data-embed="1"] body { padding: 6px 8px 24px; }
+  html[data-embed="1"] h1 { font-size: 14px; }
+  html[data-embed="1"] .hint { margin-bottom: 6px; }
   h1 { font-size: 16px; margin: 0 0 4px; }
   .hint { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
   .card {
@@ -63,6 +85,12 @@
   .tname { font-size: 12px; min-width: 64px; }
   .tstate { font-size: 12px; color: var(--muted); }
   .wave { display: block; width: 100%; height: 76px; cursor: crosshair; touch-action: none; }
+  /* 波形外层：承载播放头覆盖层（绝对定位，避免每帧整幅重绘 canvas） */
+  .wave-wrap { position: relative; }
+  .playhead {
+    position: absolute; top: 0; bottom: 0; left: 0; width: 2px; margin-left: -1px;
+    background: var(--danger); pointer-events: none;
+  }
   .gain { width: 130px; }
   .gain-val { font-size: 12px; color: var(--muted); width: 58px; display: inline-block; }
   .chk { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 3px; }
@@ -72,6 +100,11 @@
   .mixitem:first-child { border-top: none; }
   .mixname { min-width: 200px; font-size: 12px; }
   a.dl { font-size: 12px; color: var(--accent); }
+  /* 单轨试听按钮：仅显示 ▶/⏸ 符号，紧凑排版 */
+  button.pl { padding: 2px 8px; font-size: 12px; line-height: 1.2; }
+  /* 统一播放行：所有轨共用一套 transport（播放/暂停、停止、循环、时间码） */
+  .transport { border-top: 1px solid var(--line); padding-top: 8px; gap: 10px; }
+  .transport .tstate { font-variant-numeric: tabular-nums; min-width: 104px; }
 </style>
 </head>
 <body>
@@ -88,6 +121,17 @@
     </div>
   </section>
 
+  <!-- 工程持久化：保存当前编辑状态 / 载入已保存工程（可脱离素材下拉单独使用） -->
+  <section class="card">
+    <div class="row">
+      <label class="lb" id="t-prj"></label>
+      <select id="project"></select>
+      <button id="save-proj"></button>
+      <button id="open-proj"></button>
+      <span id="prj-msg" class="msg"></span>
+    </div>
+  </section>
+
   <section class="card" id="editor" hidden>
     <div class="row">
       <label class="lb" id="t-sel"></label>
@@ -98,6 +142,14 @@
       <button id="reset-all"></button>
     </div>
     <div id="tracks"></div>
+    <!-- 统一 transport：一个播放/暂停、一个停止，所有轨同一时钟同步（标准 DAW 逻辑） -->
+    <div class="row transport">
+      <button id="tp-play" class="pl"></button>
+      <button id="tp-stop" class="pl"></button>
+      <label class="chk"><input id="tp-loop" type="checkbox"><span id="t-loop"></span></label>
+      <span id="tp-time" class="tstate"></span>
+      <span id="tp-msg" class="msg"></span>
+    </div>
     <div class="row">
       <label class="lb" id="t-master"></label>
       <label class="msg" id="t-loud"></label><input id="loud" type="number" step="0.5" min="-30" max="-5" value="-14">
@@ -122,23 +174,41 @@
     <div id="mix-list"></div>
   </section>
 
+  <!-- 单轨试听：隐藏的共享播放器（配合每轨 ▶ 按钮，见 previewTrack） -->
+  <audio id="solo-audio" hidden></audio>
+
 <script>
 "use strict";
 /* ==================================================================== 状态 */
 const S = {
   T: {},            // 后端下发的文案表
   sources: [],      // 可分轨素材（分离记录）
+  projects: [],     // 已保存工程清单
   tracks: [],       // 当前载入的轨道
   dur: 0,           // 全局时长（秒）
   rootTaskId: "",   // 素材所属分离任务 id（写入工程 derived_from）
   sel: [0, 0],      // 全局选区 [起, 止]
   taskId: null,     // 当前渲染任务 id
   timer: null,      // 轮询定时器
+  embed: new URLSearchParams(location.search).get("embed") === "1",  // 是否内嵌在 Gradio Tab
+  // —— 统一播放（transport）状态 ——
+  ctx: null, master: null,   // AudioContext / 总输出增益
+  bufs: {},                  // path → AudioBuffer 缓存（首次播放解码）
+  nodes: [],                 // 当前已调度的 AudioBufferSourceNode
+  playing: false,            // 是否正在播放
+  loop: false,               // 是否循环播放
+  pos: 0,                    // 播放头位置（时间轴秒）
+  t0: 0,                     // 本轮播放的在音频时钟上的起点
+  playStart: 0, playEnd: 0,  // 本轮播放的时间轴区间
+  nextLoopAt: 0,             // 循环模式下下一轮的在音频时钟起点（lookahead 预调度）
+  raf: 0,                    // requestAnimationFrame 句柄
+  gen: 0,                    // 播放代次：重排后旧动画帧回调据此自我作废，避免双循环
 };
 const $ = (id) => document.getElementById(id);
 const T = (key) => (S.T && S.T[key]) || key;
 const enc = encodeURIComponent;
 const r3 = (v) => Math.round(v * 1000) / 1000;
+const baseName = (p) => String(p || "").split(/[\\/]/).pop() || "";
 
 /* ==================================================================== 工具 */
 function setMsg(text, cls) {
@@ -151,8 +221,22 @@ function setStatus(text, cls) {
   el.textContent = text || "";
   el.className = "msg" + (cls ? " " + cls : "");
 }
+function setPrjMsg(text, cls) {
+  const el = $("prj-msg");
+  el.textContent = text || "";
+  el.className = "msg" + (cls ? " " + cls : "");
+}
 async function getJSON(url) {
   const resp = await fetch(url);
+  const data = await resp.json().catch(() => ({ ok: false, error: "invalid json" }));
+  if (!data || data.ok === undefined) return { ok: false, error: "invalid response" };
+  return data;
+}
+async function postJSON(url, body) {
+  const resp = await fetch(url, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
   const data = await resp.json().catch(() => ({ ok: false, error: "invalid json" }));
   if (!data || data.ok === undefined) return { ok: false, error: "invalid response" };
   return data;
@@ -178,6 +262,11 @@ function applyTexts() {
   $("t-preview").textContent = T("试听");
   $("t-mixes").textContent = T("混音记录");
   $("refresh-mixes").textContent = T("刷新");
+  $("t-prj").textContent = T("工程");
+  $("save-proj").textContent = T("保存工程");
+  $("open-proj").textContent = T("打开");
+  $("t-loop").textContent = T("循环");
+  syncTransportLabels();
 }
 
 /* ==================================================================== 素材清单 */
@@ -270,15 +359,19 @@ function updateTrackState(t) {
 }
 
 /* ==================================================================== 轨道区 */
-function buildTracks(src) {
+/* items: [{type, label, path, name}]，来自素材记录或已保存工程 */
+function buildTracks(items) {
   const box = $("tracks");
+  stopPlayback();            // 重建轨道前先停掉统一播放并复位播放头
+  $("solo-audio").pause();   // 重建轨道前先停掉上一轮试听（pause 事件会刷新按钮）
+  S.bufs = {};               // 换素材后释放上一组的解码缓存
   box.textContent = "";
   S.tracks = [];
   S.sel = [0, 0];
   $("sel-start").value = "0";
   $("sel-end").value = "0";
 
-  src.tracks.forEach((item, i) => {
+  items.forEach((item, i) => {
     const wrap = document.createElement("div");
     wrap.className = "track";
 
@@ -288,6 +381,15 @@ function buildTracks(src) {
     name.className = "tname";
     name.textContent = item.label || item.name;
     head.appendChild(name);
+
+    // 单轨试听：▶ 按钮，共享 #solo-audio 播放本轨原文件（本地套用该轨增益）
+    const playBtn = document.createElement("button");
+    playBtn.className = "pl";
+    playBtn.textContent = "▶";
+    playBtn.title = T("试听本轨");
+    playBtn.dataset.path = enc(item.path);   // 用于判定"当前播放的是哪一轨"
+    playBtn.addEventListener("click", () => previewTrack(track));
+    head.appendChild(playBtn);
 
     const gain = document.createElement("input");
     gain.type = "range"; gain.min = "-30"; gain.max = "12"; gain.step = "0.5"; gain.value = "0";
@@ -328,23 +430,36 @@ function buildTracks(src) {
 
     const cv = document.createElement("canvas");
     cv.className = "wave";
+    // 播放头覆盖层：绝对定位竖线，跟随统一播放进度（避免每帧重绘 canvas）
+    const ph = document.createElement("div");
+    ph.className = "playhead";
+    const waveWrap = document.createElement("div");
+    waveWrap.className = "wave-wrap";
+    waveWrap.appendChild(cv);
+    waveWrap.appendChild(ph);
     wrap.appendChild(head);
-    wrap.appendChild(cv);
+    wrap.appendChild(waveWrap);
     box.appendChild(wrap);
 
     const track = {
       key: item.type || ("track" + (i + 1)), label: item.label || item.name,
       path: item.path, name: item.name, gain: 0, mute: false, solo: false,
       fadeIn: 0, fadeOut: 0, clips: [], peaks: [], canvas: cv, stateEl: stateEl,
+      gainEl: gain, gainValEl: gainVal, muteEl: mute, soloEl: solo,
+      finEl: fin, foutEl: fout, playheadEl: ph, node: null,
     };
     S.tracks.push(track);
 
     gain.addEventListener("input", () => {
       track.gain = parseFloat(gain.value) || 0;
       gainVal.textContent = track.gain.toFixed(1) + " dB";
+      applyTrackGain(track);                    // 播放中调增益即时生效
     });
-    mute.addEventListener("change", () => { track.mute = mute.checked; });
-    solo.addEventListener("change", () => { track.solo = solo.checked; });
+    mute.addEventListener("change", () => { track.mute = mute.checked; applyTrackGain(track); });
+    solo.addEventListener("change", () => {
+      track.solo = solo.checked;
+      S.tracks.forEach(applyTrackGain);         // Solo 影响全部轨的发声门控
+    });
     fin.addEventListener("change", () => { track.fadeIn = Math.max(0, parseFloat(fin.value) || 0); });
     fout.addEventListener("change", () => { track.fadeOut = Math.max(0, parseFloat(fout.value) || 0); });
     trimBtn.addEventListener("click", () => {
@@ -360,9 +475,287 @@ function buildTracks(src) {
   });
 }
 
-/* 在波形上拖拽选择全局区间（所有轨共用同一时间轴） */
+/* ============================================================== 单轨试听 */
+/* 共享一个隐藏 audio 元素播放单轨原文件（/api/mix/audio），并用 Web Audio 的
+   GainNode 套用该轨增益——audio.volume 只能衰减（0~1），无法表达 +12dB。
+   AudioContext 延迟到首次点击才创建，以满足浏览器"必须用户手势"的限制。
+   按钮符号由播放器事件统一刷新（按 currentSrc 匹配归属轨）：切换轨道时改 src
+   会异步触发 pause 事件，若靠手工维护按钮标记会导致两个按钮同时显示 ⏸。 */
+let _pvCtx = null, _pvGain = null;
+function syncPreviewButtons() {
+  const el = $("solo-audio");
+  const cur = el.paused ? "" : (el.currentSrc || "");
+  document.querySelectorAll("#tracks .track button.pl").forEach((b) => {
+    b.textContent = (cur && b.dataset.path && cur.includes(b.dataset.path)) ? "⏸" : "▶";
+  });
+}
+function previewTrack(t) {
+  const el = $("solo-audio");
+  // 正在播放本轨 → 再点一次 = 停止
+  if (!el.paused && el.currentSrc && el.currentSrc.includes(enc(t.path))) {
+    el.pause();
+    return;
+  }
+  stopPlayback();          // 单轨试听与统一播放互斥，避免两路声音叠加
+  try {
+    if (!_pvCtx) {                                            // 首次点击才建上下文
+      _pvCtx = new (window.AudioContext || window.webkitAudioContext)();
+      _pvGain = _pvCtx.createGain();
+      _pvCtx.createMediaElementSource(el).connect(_pvGain).connect(_pvCtx.destination);
+    }
+    _pvCtx.resume();
+    _pvGain.gain.value = Math.pow(10, (Number(t.gain) || 0) / 20);  // dB → 线性增益
+    el.src = "/api/mix/audio?path=" + enc(t.path);
+    el.play().catch(() => syncPreviewButtons());
+  } catch (e) { /* 播放失败静默处理：不阻断编辑 */ }
+}
+
+/* ========================================================== 统一播放（transport） */
+/* 标准 DAW 播放逻辑：
+   1) 所有轨共用一个 AudioContext 与同一个 start(t0) 调度 → 同一时钟、样本级同步，
+      只有一套播放/暂停/停止（不再每轨各播各的）；
+   2) 发声规则与后端渲染一致：任一轨 Solo → 只听 Solo 轨，否则 Mute 轨静音，其余发声；
+   3) 播放即复现编辑结果：裁切（clips）、淡入淡出、增益、Mute/Solo 全部实时生效；
+   4) 有全局选区只播选区，无选区播整曲。
+   AudioContext 延迟到首次播放才创建（浏览器要求用户手势）。 */
+function audioCtx() {
+  if (!S.ctx) {
+    S.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    S.master = S.ctx.createGain();
+    S.master.connect(S.ctx.destination);
+  }
+  return S.ctx;
+}
+function linGain(db) { return Math.pow(10, (Number(db) || 0) / 20); }
+function fmtTime(sec) {
+  const s = Math.max(0, sec || 0);
+  const m = Math.floor(s / 60);
+  return m + ":" + (s - m * 60).toFixed(1).padStart(4, "0");
+}
+/* 该轨是否发声（与 buildPayload 的 mute 语义保持一致） */
+function isAudible(t) {
+  const anySolo = S.tracks.some((x) => x.solo);
+  return !t.mute && (!anySolo || t.solo);
+}
+/* 播放区间：有效全局选区 → 只播选区；否则播整曲 */
+function playRange() {
+  if (S.dur > 0 && S.sel[1] > S.sel[0] + 0.005) {
+    return [Math.max(0, S.sel[0]), Math.min(S.dur, S.sel[1])];
+  }
+  return [0, S.dur];
+}
+/* 轨道在时间轴上的片段：有裁切按切片，无裁切按整轨一段 */
+function trackSegments(t) {
+  if (t.clips && t.clips.length) {
+    return t.clips.map((c) => ({
+      start: c.start, end: c.start + (c.out - c.in), srcIn: c.in,
+      fadeIn: c.fade_in || 0, fadeOut: c.fade_out || 0,
+    }));
+  }
+  return [{ start: 0, end: S.dur, srcIn: 0, fadeIn: t.fadeIn || 0, fadeOut: t.fadeOut || 0 }];
+}
+/* 把轨节点增益设成「轨增益 × 发声门控」；播放中切换即时生效（短时间常数避免爆音） */
+function applyTrackGain(t) {
+  if (!t.node || !S.ctx) return;
+  const v = isAudible(t) ? linGain(t.gain) : 0;
+  t.node.gain.setTargetAtTime(v, S.ctx.currentTime, 0.01);
+}
+function syncTransportLabels() {
+  const el = $("tp-play");
+  el.textContent = S.playing ? "⏸" : "▶";
+  el.title = T(S.playing ? "暂停" : "播放");
+  $("tp-stop").textContent = "■";     // 用实心方块，避免 ⏹ 在部分字体下过小/缺字形
+  $("tp-stop").title = T("停止");
+}
+/* 顺序解码并缓存全部轨音频；返回 false 表示有轨解码失败 */
+async function ensureBuffers() {
+  const ctx = audioCtx();
+  const todo = S.tracks.filter((t) => !S.bufs[t.path]);
+  if (!todo.length) return true;
+  for (let i = 0; i < todo.length; i++) {
+    const t = todo[i];
+    $("tp-msg").textContent = T("正在解码音频") + " " + (i + 1) + "/" + todo.length;
+    try {
+      const resp = await fetch("/api/mix/audio?path=" + enc(t.path));
+      S.bufs[t.path] = await ctx.decodeAudioData(await resp.arrayBuffer());
+    } catch (e) {
+      $("tp-msg").textContent = T("解码失败") + ": " + (t.label || t.name);
+      return false;
+    }
+  }
+  $("tp-msg").textContent = "";
+  return true;
+}
+function stopNodes() {
+  S.nodes.forEach((n) => {
+    try { n.stop(); } catch (e) { /* 已自然结束 */ }
+    try { n.disconnect(); } catch (e) { /* 忽略 */ }
+  });
+  S.nodes = [];
+  S.tracks.forEach((t) => { t.node = null; });
+}
+/* 调度一轮播放：时间轴 startTime 对应音频时钟 atCtx；atCtx 可落在未来（循环预调度） */
+function scheduleIteration(startTime, atCtx) {
+  const ctx = S.ctx, span = S.playEnd - startTime;
+  if (span <= 0.002) return;
+  S.tracks.forEach((t) => {
+    const buf = S.bufs[t.path];
+    if (!buf || !t.node) return;
+    trackSegments(t).forEach((seg) => {
+      const s = Math.max(seg.start, startTime), e = Math.min(seg.end, S.playEnd);
+      if (e - s <= 0.002) return;
+      const offset = seg.srcIn + (s - seg.start);
+      if (offset >= buf.duration) return;
+      const dur = Math.min(e - s, buf.duration - offset);
+      if (dur <= 0.002) return;
+      const when = atCtx + (s - startTime);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      const env = ctx.createGain();
+      src.connect(env); env.connect(t.node);
+      // 淡变包络：按片段边界生成折线，起点已在淡入区内则从当前值续接
+      const segLen = seg.end - seg.start;
+      const gAt = (p) => {                       // p 为片段内相对位置（秒）
+        let g = 1;
+        if (seg.fadeIn > 0 && p < seg.fadeIn) g = Math.max(0, p / seg.fadeIn);
+        if (seg.fadeOut > 0 && p > segLen - seg.fadeOut) {
+          g = Math.min(g, Math.max(0, (segLen - p) / seg.fadeOut));
+        }
+        return g;
+      };
+      const pts = [];
+      if (seg.fadeIn > 0) pts.push([atCtx + (seg.start + seg.fadeIn - startTime), 1]);
+      if (seg.fadeOut > 0) {
+        pts.push([atCtx + (seg.end - seg.fadeOut - startTime), 1]);
+        pts.push([atCtx + (seg.end - startTime), 0]);
+      }
+      env.gain.setValueAtTime(gAt(s - seg.start), when);
+      pts.filter((p) => p[0] > when + 0.0001)
+        .sort((x, y) => x[0] - y[0])
+        .forEach((p) => env.gain.linearRampToValueAtTime(p[1], p[0]));
+      src.start(when, offset, dur);
+      src._endAt = when + dur;
+      S.nodes.push(src);
+    });
+  });
+}
+function currentPos() {
+  if (!S.playing || !S.ctx) return S.pos;
+  const span = S.playEnd - S.playStart;
+  if (span <= 0) return S.playStart;
+  let d = Math.max(0, S.ctx.currentTime - S.t0);
+  d = S.loop ? d % span : Math.min(d, span);
+  return S.playStart + d;
+}
+/* 播放头：所有轨叠加的同一条竖线 + 时间码 */
+function updatePlayheads() {
+  const d = S.dur || 0;
+  const pos = Math.min(S.pos, d);
+  S.tracks.forEach((t) => {
+    const el = t.playheadEl;
+    if (!el) return;
+    const w = el.parentElement.clientWidth || 0;
+    el.style.transform = "translateX(" + (d > 0 ? (pos / d) * w : 0) + "px)";
+  });
+  $("tp-time").textContent = fmtTime(pos) + " / " + fmtTime(d);
+}
+function tick(gen) {
+  if (!S.playing || gen !== S.gen) return;      // 已停止/已重排：旧回调直接作废
+  const span = S.playEnd - S.playStart;
+  if (!S.loop && S.ctx.currentTime - S.t0 >= span) {
+    stopNodes();
+    S.playing = false;
+    S.pos = S.playEnd;
+    $("tp-msg").textContent = "";
+  } else {
+    S.pos = currentPos();
+  }
+  syncTransportLabels();
+  updatePlayheads();
+  if (S.playing) S.raf = requestAnimationFrame(() => tick(gen));
+}
+/* 从时间轴 pos 处开始（或重新开始）统一播放 */
+async function playFrom(pos) {
+  if (!S.tracks.length || S.dur <= 0) { $("tp-msg").textContent = T("请先选择素材"); return; }
+  if (S.playing) { stopNodes(); S.playing = false; }
+  $("solo-audio").pause();                                    // 与单轨试听互斥
+  if (!(await ensureBuffers())) return;
+  const ctx = audioCtx();
+  try { if (ctx.state === "suspended") await ctx.resume(); } catch (e) { /* 忽略 */ }
+  const [a, b] = playRange();
+  let start = Math.max(a, Math.min(b, pos));
+  if (start >= b - 0.005) start = a;                          // 已在末尾 → 回到区间起点
+  if (b - start <= 0.005) return;
+  stopNodes();
+  S.playStart = start; S.playEnd = b;
+  S.t0 = ctx.currentTime + 0.05;
+  S.nextLoopAt = S.t0 + (b - start);
+  // 每轨一个增益节点：承载轨增益 + Mute/Solo 门控（播放中可实时改）
+  S.tracks.forEach((t) => {
+    const g = ctx.createGain();
+    g.gain.value = isAudible(t) ? linGain(t.gain) : 0;
+    g.connect(S.master);
+    t.node = g;
+  });
+  scheduleIteration(start, S.t0);
+  S.playing = true;
+  S.pos = start;
+  syncTransportLabels();
+  updatePlayheads();
+  S.gen++;                                   // 作废旧动画帧，保证只有一个 tick 循环
+  const gen = S.gen;
+  if (S.raf) cancelAnimationFrame(S.raf);
+  S.raf = requestAnimationFrame(() => tick(gen));
+}
+function pausePlayback() {
+  if (!S.playing) return;
+  S.pos = currentPos();
+  stopNodes();
+  S.playing = false;
+  S.gen++;
+  if (S.raf) { cancelAnimationFrame(S.raf); S.raf = 0; }
+  syncTransportLabels();
+  updatePlayheads();
+}
+/* 停止：回到播放区间起点（DAW 惯例），而不是停在当前位置 */
+function stopPlayback() {
+  S.gen++;
+  if (S.raf) { cancelAnimationFrame(S.raf); S.raf = 0; }
+  stopNodes();
+  S.playing = false;
+  S.pos = playRange()[0];
+  $("tp-msg").textContent = "";
+  syncTransportLabels();
+  updatePlayheads();
+}
+function togglePlay() {
+  if (S.playing) pausePlayback();
+  else playFrom(S.pos);
+}
+/* 单击波形定位播放头；播放中定位 = 从新位置继续播 */
+function seekTo(time) {
+  const [a, b] = playRange();
+  S.pos = Math.max(a, Math.min(b, time));
+  if (S.playing) playFrom(S.pos);
+  else updatePlayheads();
+}
+/* 循环 lookahead：在每轮结束前 ~0.5s 预排下一轮，保证循环接缝不留空档 */
+setInterval(() => {
+  if (!S.playing || !S.ctx) return;
+  // 清理已播完的节点引用，避免长时间循环时数组无限膨胀
+  if (S.nodes.length > 40) S.nodes = S.nodes.filter((n) => n._endAt > S.ctx.currentTime);
+  if (!S.loop) return;
+  const span = S.playEnd - S.playStart;
+  if (span <= 0.01) return;
+  if (S.nextLoopAt - S.ctx.currentTime < 0.5) {
+    scheduleIteration(S.playStart, S.nextLoopAt);
+    S.nextLoopAt += span;
+  }
+}, 200);
+
+/* 在波形上拖拽选择全局区间（所有轨共用同一时间轴）；未拖动的单击 = 定位播放头 */
 function attachSelection(cv) {
-  let dragging = false, anchor = 0;
+  let dragging = false, anchor = 0, downX = 0, moved = false;
   const timeAt = (ev) => {
     const rect = cv.getBoundingClientRect();
     const x = Math.max(0, Math.min(rect.width, ev.clientX - rect.left));
@@ -370,13 +763,13 @@ function attachSelection(cv) {
   };
   cv.addEventListener("pointerdown", (ev) => {
     if (S.dur <= 0) return;
-    dragging = true; anchor = timeAt(ev);
-    S.sel = [anchor, anchor];
-    syncSelInputs(); redrawAll();
+    dragging = true; moved = false; downX = ev.clientX; anchor = timeAt(ev);
     try { cv.setPointerCapture(ev.pointerId); } catch (e) { /* 忽略：部分浏览器不支持 */ }
   });
   cv.addEventListener("pointermove", (ev) => {
     if (!dragging) return;
+    if (!moved && Math.abs(ev.clientX - downX) < 4) return;   // 阈值内仍视为单击
+    moved = true;
     const p = timeAt(ev);
     S.sel = [Math.min(anchor, p), Math.max(anchor, p)];
     syncSelInputs(); redrawAll();
@@ -385,6 +778,8 @@ function attachSelection(cv) {
     if (!dragging) return;
     dragging = false;
     try { cv.releasePointerCapture(ev.pointerId); } catch (e) { /* 忽略 */ }
+    if (!moved) { seekTo(timeAt(ev)); return; }               // 单击：定位（保留原选区）
+    if (S.playing) playFrom(playRange()[0]);                  // 播放中改选区 → 从新区间重播
   };
   cv.addEventListener("pointerup", stop);
   cv.addEventListener("pointercancel", () => { dragging = false; });
@@ -395,6 +790,20 @@ function syncSelInputs() {
 }
 
 /* ==================================================================== 载入素材 */
+/* 逐轨串行解码波形，避免并发拉起多个 ffmpeg 争抢磁盘 */
+async function loadPeaks() {
+  for (const t of S.tracks) {
+    const data = await getJSON(`/api/mix/peaks?path=${enc(t.path)}`);
+    t.peaks = data.ok ? (data.peaks || []) : [];
+    if (data.ok && data.duration > 0) S.dur = Math.max(S.dur, data.duration);
+    drawTrack(t);
+  }
+  $("sel-end").value = r3(S.dur);
+  S.sel = [0, 0];
+  redrawAll();
+  updatePlayheads();      // 时长确定后复位播放头/时间码
+}
+
 async function loadTracks() {
   const idx = $("source").value;
   const src = S.sources[parseInt(idx, 10)];
@@ -403,23 +812,101 @@ async function loadTracks() {
   $("load").disabled = true;
   try {
     S.rootTaskId = src.task_id || "";
-    buildTracks(src);
+    S.dur = 0;
+    buildTracks(src.tracks);
     $("editor").hidden = false;
-    // 逐轨串行解码，避免并发拉起多个 ffmpeg 争抢磁盘
-    for (const t of S.tracks) {
-      const data = await getJSON(`/api/mix/peaks?path=${enc(t.path)}`);
-      t.peaks = data.ok ? (data.peaks || []) : [];
-      if (data.ok && data.duration > 0) S.dur = Math.max(S.dur, data.duration);
-      drawTrack(t);
-    }
-    $("sel-end").value = r3(S.dur);
-    S.sel = [0, 0];
-    redrawAll();
+    await loadPeaks();
     setMsg("");
   } catch (e) {
     setMsg(String(e), "err");
   } finally {
     $("load").disabled = false;
+  }
+}
+
+/* ==================================================================== 工程持久化 */
+async function loadProjects() {
+  const data = await getJSON("/api/mix/projects");
+  S.projects = data.ok ? (data.projects || []) : [];
+  const sel = $("project");
+  const prev = sel.value;
+  sel.textContent = "";
+  S.projects.forEach((p, i) => {
+    const opt = document.createElement("option");
+    opt.value = String(i);
+    opt.textContent = `${p.name} · ${p.track_count} ${T("音轨")} · ${p.saved_at}`;
+    sel.appendChild(opt);
+  });
+  if (prev && S.projects[prev]) sel.value = prev;
+  return data;
+}
+
+/* 把已保存工程的轨道状态回填到界面控件（增益/静音/淡变/切片） */
+function applyTrackState(t, st) {
+  t.gain = Number(st.gain_db) || 0;
+  t.gainEl.value = String(t.gain);
+  t.gainValEl.textContent = t.gain.toFixed(1) + " dB";
+  t.mute = !!st.mute;
+  t.muteEl.checked = t.mute;
+  const clips = Array.isArray(st.clips) ? st.clips : [];
+  t.clips = clips.map((c) => ({
+    start: Number(c.start) || 0,
+    in: Number(c.in) || 0,
+    out: c.out === null || c.out === undefined ? 0 : Number(c.out) || 0,
+    fade_in: Number(c.fade_in) || 0,
+    fade_out: Number(c.fade_out) || 0,
+  }));
+  // 淡变值优先取切片内的值，便于界面显示与再次编辑
+  const c0 = t.clips[0];
+  t.fadeIn = c0 ? c0.fade_in : 0;
+  t.fadeOut = c0 ? c0.fade_out : 0;
+  t.finEl.value = String(t.fadeIn);
+  t.foutEl.value = String(t.fadeOut);
+  updateTrackState(t);
+  drawTrack(t);
+}
+
+async function saveProject() {
+  if (!S.tracks.length) { setPrjMsg(T("请先选择素材"), "err"); return; }
+  const name = ($("proj").value || "").trim();
+  setPrjMsg("...");
+  try {
+    const data = await postJSON("/api/mix/project", { project: buildPayload(), name: name });
+    if (!data.ok) { setPrjMsg((data.error || T("渲染失败")), "err"); return; }
+    setPrjMsg(T("工程已保存") + ": " + data.name, "ok");
+    await loadProjects();
+  } catch (e) {
+    setPrjMsg(String(e), "err");
+  }
+}
+
+async function openProject() {
+  const rec = S.projects[parseInt($("project").value, 10)];
+  if (!rec) { setPrjMsg(T("请先选择素材"), "err"); return; }
+  $("open-proj").disabled = true;
+  setPrjMsg(T("正在载入波形") + "...");
+  try {
+    const data = await getJSON("/api/mix/project?path=" + enc(rec.path));
+    if (!data.ok) { setPrjMsg(data.error || T("渲染失败"), "err"); return; }
+    const p = data.project || {};
+    S.rootTaskId = p.source_root_task_id || "";
+    S.dur = Number(p.duration) || 0;
+    const items = (p.tracks || []).map((t) => ({
+      type: t.id, label: t.name || t.id, path: t.src, name: baseName(t.src),
+    }));
+    buildTracks(items);
+    $("editor").hidden = false;
+    const master = p.master || {};
+    if (master.loudness_target !== undefined) $("loud").value = master.loudness_target;
+    if (master.true_peak !== undefined) $("tp").value = master.true_peak;
+    await loadPeaks();
+    // 波形就绪后再回填编辑状态（此时 S.dur 已确定，切片压暗与选区绘制才准确）
+    (p.tracks || []).forEach((t, i) => { if (S.tracks[i]) applyTrackState(S.tracks[i], t); });
+    setPrjMsg(T("工程已载入") + ": " + (data.name || ""), "ok");
+  } catch (e) {
+    setPrjMsg(String(e), "err");
+  } finally {
+    $("open-proj").disabled = false;
   }
 }
 
@@ -548,14 +1035,58 @@ function renderMixList(mixes) {
     dl.href = "/api/mix/audio?path=" + enc(m.path) + "&download=1";
     dl.textContent = T("下载");
     row.appendChild(dl);
+    const rn = document.createElement("button");
+    rn.textContent = T("改名");
+    rn.addEventListener("click", () => renameMix(m));
+    row.appendChild(rn);
+    const del = document.createElement("button");
+    del.textContent = T("删除选中");
+    del.addEventListener("click", () => deleteMix(m));
+    row.appendChild(del);
     box.appendChild(row);
   });
+}
+
+async function renameMix(m) {
+  const name = window.prompt(T("新名称"), m.name || "");
+  if (name === null) return;
+  const data = await postJSON("/api/mix/record",
+    { action: "rename", task_id: m.task_id, name: name });
+  if (!data.ok) { setMsg(data.error || T("删除失败"), "err"); return; }
+  await loadSources(true);
+}
+
+async function deleteMix(m) {
+  if (!window.confirm(T("删除该混音记录？文件将移入回收站。"))) return;
+  const data = await postJSON("/api/mix/record", { action: "delete", task_id: m.task_id });
+  if (!data.ok) { setMsg(data.error || T("删除失败"), "err"); return; }
+  await loadSources(true);
+}
+
+/* ==================================================================== 主题跟随 */
+/* 内嵌进 Gradio 时，读取父页面背景亮度决定明暗主题（同源可直接访问父窗口） */
+function syncParentTheme() {
+  if (!S.embed) return;
+  try {
+    const bg = getComputedStyle(window.parent.document.body).backgroundColor || "";
+    const m = bg.match(/[\d.]+/g);
+    if (!m || m.length < 3) return;
+    const lum = 0.299 * +m[0] + 0.587 * +m[1] + 0.114 * +m[2];
+    const theme = lum < 128 ? "dark" : "light";
+    if (document.documentElement.dataset.theme !== theme) {
+      document.documentElement.dataset.theme = theme;
+      redrawAll();  // 波形颜色取自 CSS 变量，主题变化后需重绘
+    }
+  } catch (e) { /* 父窗口不可访问时保持系统主题 */ }
 }
 
 /* ==================================================================== 事件绑定 */
 $("load").addEventListener("click", loadTracks);
 $("refresh").addEventListener("click", () => loadSources(true));
 $("refresh-mixes").addEventListener("click", () => loadSources(true));
+$("save-proj").addEventListener("click", saveProject);
+$("open-proj").addEventListener("click", openProject);
+$("project").addEventListener("change", () => setPrjMsg(""));
 $("apply-all").addEventListener("click", () => {
   const a = S.sel[0], b = S.sel[1];
   if (!(b > a)) { setMsg(T("区间无效"), "err"); return; }
@@ -577,9 +1108,33 @@ $("sel-end").addEventListener("change", () => {
 });
 $("render").addEventListener("click", startRender);
 $("cancel").addEventListener("click", cancelRender);
-window.addEventListener("resize", redrawAll);
+/* 统一 transport：一个播放/暂停、一个停止，所有轨同步 */
+$("tp-play").addEventListener("click", togglePlay);
+$("tp-stop").addEventListener("click", stopPlayback);
+$("tp-loop").addEventListener("change", () => { S.loop = $("tp-loop").checked; });
+/* 空格键播放/暂停（焦点在输入类控件时不拦截，避免影响正常输入） */
+document.addEventListener("keydown", (ev) => {
+  if (ev.code !== "Space" && ev.key !== " ") return;
+  const el = document.activeElement;
+  const tag = el && el.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (el && el.isContentEditable)) return;
+  ev.preventDefault();
+  togglePlay();
+});
+window.addEventListener("resize", () => { redrawAll(); updatePlayheads(); });
+/* 单轨试听播放器状态 → 按钮符号统一刷新（播放中该轨 ⏸，其余 ▶） */
+$("solo-audio").addEventListener("play", syncPreviewButtons);
+$("solo-audio").addEventListener("pause", syncPreviewButtons);
+$("solo-audio").addEventListener("ended", syncPreviewButtons);
 
-loadSources(false);
+/* 启动：内嵌模式标记 → 主题跟随 → 素材/工程清单（文案表由 sources 接口下发） */
+(async () => {
+  if (S.embed) document.documentElement.dataset.embed = "1";
+  syncParentTheme();
+  setInterval(syncParentTheme, 1500);
+  try { await loadSources(false); } catch (e) { setMsg(String(e), "err"); }
+  try { await loadProjects(); } catch (e) { setPrjMsg(String(e), "err"); }
+})();
 </script>
 </body>
 </html>

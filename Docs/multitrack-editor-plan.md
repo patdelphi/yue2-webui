@@ -1,6 +1,6 @@
 ﻿# 多轨编辑器接入方案（multitrack editor plan）
 
-> 状态：**M1/M2 已实施**（后端渲染接口 + 独立编辑页端到端打通），M3（Tab 内嵌与打磨）待定。目标是把「音色工坊」分离出的多轨（vocals / accompaniment / drums / bass / other）载入一个多轨编辑器，人工编辑后再合成成品并写回历史。
+> 状态：**M1/M2/M3 已实施**（后端渲染接口 + 独立编辑页端到端打通 + 工程持久化/记录管理/分离页内嵌）。目标是把「音色工坊」分离出的多轨（vocals / accompaniment / drums / bass / other）载入一个多轨编辑器，人工编辑后再合成成品并写回历史。
 > 关联文档：`Docs/voice-tools-plan.md`、`Docs/optimization-plan-cover-quality.md`、`Docs/changelog.md`
 
 ---
@@ -65,6 +65,8 @@
 | **C1 最小验证** | iframe 挂 AudioMass（或 wp 示例页），用户手动选/拖分轨，编辑后导出下载 | 高 | 流程割裂（导出文件需再上传回系统）；用于验证"多轨编辑是否真的有用" |
 | **C2 生产接入（推荐）** | 独立页面预载分轨 → 编辑 → **回传结构参数** → 后端 ffmpeg 渲染 → 写历史 | 中高 | 主要工作量在后端渲染接口 + 数据契约 |
 | **C3 完全内嵌 Tab** | 不用 iframe，直接嵌进 Gradio Tab | 中 | 需处理 Gradio 重渲染冲突（可复用现有 `MutationObserver` 重绑先例），收益有限 |
+
+> **M3 实际落地方式**：采用「iframe 内嵌分离 Tab」——复用同一静态编辑页（`?embed=1`），避免 Gradio 重渲染与组件生命周期耦合；内嵌页定时读取父窗口背景亮度跟随明暗主题。原「多轨编辑」按钮（新窗口打开）保留，两种入口并存。未新增 Tab（集成进现有分离流程）。
 
 ### 为什么 C2 回传"参数"而不是"浏览器渲染的成品"
 
@@ -140,7 +142,11 @@
 - **M2｜端到端**：前端预载分轨 → 保存工程 → 触发渲染 → 产物写入历史 → 历史页回放/下载。✅ 已完成（2026-09-28）：`src/mix_web.py` + `static/multitrack/index.html` + `app.py` 路由/入口 + `tests/test_mix_web.py`（22 项全通过）。
   - 编辑粒度（已确认）：轨间平衡（增益/静音/独奏）+ 全局选区裁切 + 每轨淡入淡出；不做多切片自由摆放。
   - 交付形态：独立静态页 `/static/multitrack/`（分离页「多轨编辑」按钮新窗口打开），混音产物的回放/下载在编辑页内完成。
-- **M3｜打磨**：Tab 内嵌、进度与取消接入现有机制、中英文案（`src/i18n.py`）、`changelog.md` 更新。部分已完成（进度/取消、i18n、changelog 随 M2 落地），仅剩 Tab 内嵌（C3）与工程持久化待定。
+- **M3｜打磨**：Tab 内嵌、进度与取消接入现有机制、中英文案（`src/i18n.py`）、`changelog.md` 更新。进度/取消、i18n、changelog 随 M2 落地。✅ 已完成（2026-09-28）：
+  - **工程持久化**：`mix_web.save_project / list_projects / load_project` + `GET /api/mix/projects`、`GET|POST /api/mix/project`；工程落 `outputs/mix_projects/<工程名>.json`（同名覆盖、工程名清洗、空名回退时间戳），载入路径白名单限定在该目录下，`src` 归一为相对路径可回灌编辑器。
+  - **混音记录管理**：`mix_web.rename_mix / delete_mix` + `POST /api/mix/record`（`action=rename|delete`），编辑页「混音记录」列表每项可改名（`prompt`）/删除（`confirm`，整目录入回收站）。**未进入歌曲历史页**——该页按既有约定仅展示生成记录，分离/翻唱记录同样在各自 Tab 管理。
+  - **Tab 内嵌**：分离 Tab 末尾 `gr.HTML` iframe（`/static/multitrack/?embed=1`，`elem_id="sep-mix-embed"`），内嵌页收紧内边距并跟随父页面明暗主题。
+  - 测试：`tests/test_mix_web.py` 22 → 27 项；`pytest tests/test_mix_web.py tests/test_mix_render.py` 49 项通过、全量 163 项通过。
 
 ---
 
@@ -168,7 +174,7 @@
 
 - ~~是否需要"局部静音/淡变"这类精细编辑，还是"轨间平衡 + 静音/独奏"就满足？~~ 已定：轨间平衡 + 全局选区裁切 + 每轨淡入淡出（M2 落地），不做多切片自由摆放。
 - 成品格式：flac（无损、体积小）还是 wav？——M2 取 flac（`render_mix` 按扩展名选编码器，wav 路径仍保留）。
-- 是否需要把混音工程持久化为可再次打开的项目？（M3 待定）
+- ~~是否需要把混音工程持久化为可再次打开的项目？~~ 已定：需要。工程以 JSON 落 `outputs/mix_projects/`，「保存工程 / 打开」在编辑页工程区完成（M3 落地）；未提供「删除工程」入口，同名保存即覆盖。
 
 ---
 
