@@ -514,3 +514,22 @@
 - **一致性**：历史页 4 回调（删除选中/清空/改名/删除项目）outputs 补播放器三元组——删除清空播放器、改名按新路径重填（对齐分离/翻唱页）；分离/翻唱源下拉类型词经 _QUEUE_TYPE_LABELS+tr 中文化，i18n 补"翻唱": "Cover"；三处删除项目按钮加前端确认弹窗（实测 Gradio 5.x js 返回 false 不阻止 fn，须 throw 中断，弹窗双语文案）。
 - **验证**：pytest 81 passed；i18n 17 通过；py_compile 通过；浏览器 E2E——弹窗取消（记录不动）/确定（3 条记录全删+目录入回收站）、改名后 3 记录+15 文件同步、播放器按新路径重载音频、选中行与显示行一致。
 - **未执行**：git commit（待批准）。
+
+## 2026-09-30 18:40 — 多轨编辑器：iframe 随内容长高 + 音质/压缩归零 + FX 工具工具栏
+
+- **需求**：(1) 编辑器别锁在固定 iframe 里（顶部标题/菜单无法随滚动消失，浪费顶部空间）；(2) 音质、压缩各加一键归零，并把该行右侧空白放点功能。
+- **T1 内嵌自适应高度**：`index.html` 新增 `fitParentHeight` / `watchEmbedHeight`——同源用 `window.frameElement` 反写自身 iframe 高度，父页 `app.py` 不改。修掉三个真坑：① 用 rAF 句柄当「已排队」哨兵 → 内嵌 Tab 未渲染时 rAF 不触发、句柄非 0 永久卡死（实测高度停在 262px），改布尔标记 + `setTimeout` 兜底；② `ResizeObserver` 实例不持有引用会被回收、回调不再触发；③ 父 Tab 隐藏时 body 矩形为 0，加 `if (!h) return` 防守。
+- **T2 一键归零**：`mkFxCtl` 增加 `resetV`，`mkMod` 标题条右侧渲染 `.fxmod-r`「归零」；音质 6 项、压缩 2 项分别登记。
+- **T4/T6/T7 FX 工具**：旁通（`.fxpanel.fx-off` 只压暗处理模块 + 电平表）、FX 预设（中性/人声/伴奏 + localStorage 自定义 + 保存为预设…）、复制到（惰性重建目标列表 + 全部其他轨 + 一并复制旁通态）。
+- **T3/T5**：`--fxmod-w: 362px` 音质=压缩同宽（压缩居中）；工程 JSON 每轨新增 `fx_on`，前端 `buildPayload` 写出、`applyTrackState` 回灌，后端 `mix_render._fx_filters` 遇 false 直接返回空滤镜链。
+- **布局取舍**：压缩加宽后该行仅剩 ~66px，放不下工具卡；竖排三行会把面板撑到 283px，故改为独占整行、内部三组横向均布的工具栏（面板高 232px）。
+- **验证**：`pytest` 177 passed（基线 175 + 2 个新用例）；`node --check` / `py_compile` 通过；浏览器实测 iframe 双向跟随（1337↔1937）、归零/旁通/预设/复制/自定义预设落 localStorage/渲染请求体 `fx_on=[false,true]` 全部命中、741px 无横向溢出、明暗主题正确。
+- **未执行**：git commit / push（待批准）。服务已重启，浏览器需刷新。
+
+## 2026-09-30 12:04 — 多轨编辑器：回声模块一键归零
+
+- **需求**：在已有音质/压缩归零基础上，回声模块也加「归零」。
+- **改动**：`static/multitrack/index.html` 新增 `echoResets` 并传给 `mkMod("echo", "回声", echoResets)`，登记 `echoDelayEl / echoFbEl / echoMixEl` 三项 `resetV`（中性值均为 0，混合 0 即关闭回声）；`tests/test_mix_web.py` 的 `test_editor_fx_reset_tools_presets_and_embed_fit` 补 3 条断言（`echoResets` 存在、`mkMod` 传参、三项登记）。
+- **验证**：`pytest tests/test_mix_web.py -q` → 34 passed；`pytest tests/ --ignore=tests/test_i18n.py -q` → 177 passed（无回归）。
+- **未执行**：push（需另行批准）。
+

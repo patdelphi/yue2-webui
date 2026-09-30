@@ -493,6 +493,22 @@ EN_TABLE: Dict[str, str] = {
     "IN": "IN",
     "OUT": "OUT",
     "GR": "GR",
+    # —— 多轨编辑器：模块归零 + FX 工具（旁通 / 预设 / 复制到其他轨） ——
+    "归零": "Reset",
+    "全部复位到中性值": "Reset all to neutral",
+    "FX 工具": "FX Tools",
+    "开关": "Switch",
+    "正常": "Active",
+    "旁通": "Bypass",
+    "旁通本轨全部音质与音效": "Bypass all tone/FX on this track",
+    "预设": "Preset",
+    "应用": "Apply",
+    "保存为预设…": "Save as preset…",
+    "预设名称": "Preset name",
+    "中性": "Flat",
+    "复制到": "Copy to",
+    "复制": "Copy",
+    "全部其他轨": "All other tracks",
 }
 
 

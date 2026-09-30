@@ -38,7 +38,7 @@
     --accent-soft: rgba(59,130,246,.10);
     /* FX 面板（专业效果器风）：面板底/描边/旋钮盘面/推子轨道 + 三个模块主色 */
     --panel: #eef1f5; --panel-line: #dde3ea; --knob-bg: #ffffff; --knob-track: #cfd8e3;
-    --mod-eq: #3b82f6; --mod-dyn: #d97706; --mod-echo: #7c3aed;
+    --mod-eq: #3b82f6; --mod-dyn: #d97706; --mod-echo: #7c3aed; --mod-tool: #0d9488;
     /* 轨道色板（按轨索引循环）+ 波形网格线 */
     --trk-1: #3b82f6; --trk-2: #8b5cf6; --trk-3: #0ea5e9;
     --trk-4: #f59e0b; --trk-5: #ec4899; --trk-6: #10b981;
@@ -51,7 +51,7 @@
       --card: #1d2026; --card-2: #22262e; --accent: #3b82f6; --accent-fg: #ffffff;
       --wave: #60a5fa; --sel: rgba(96,165,250,.22); --sec: #262a32;
       --panel: #22262e; --panel-line: #343a45; --knob-bg: #2b303a; --knob-track: #414857;
-      --mod-eq: #60a5fa; --mod-dyn: #f59e0b; --mod-echo: #a855f7;
+      --mod-eq: #60a5fa; --mod-dyn: #f59e0b; --mod-echo: #a855f7; --mod-tool: #2dd4bf;
       --trk-1: #60a5fa; --trk-2: #a78bfa; --trk-3: #38bdf8;
       --trk-4: #fbbf24; --trk-5: #f472b6; --trk-6: #34d399;
       --grid: rgba(255,255,255,.10);
@@ -66,7 +66,7 @@
     --card: #1d2026; --card-2: #22262e; --accent: #3b82f6; --accent-fg: #ffffff;
     --wave: #60a5fa; --sel: rgba(96,165,250,.22); --sec: #262a32;
     --panel: #22262e; --panel-line: #343a45; --knob-bg: #2b303a; --knob-track: #414857;
-    --mod-eq: #60a5fa; --mod-dyn: #f59e0b; --mod-echo: #a855f7;
+    --mod-eq: #60a5fa; --mod-dyn: #f59e0b; --mod-echo: #a855f7; --mod-tool: #2dd4bf;
     --trk-1: #60a5fa; --trk-2: #a78bfa; --trk-3: #38bdf8;
     --trk-4: #fbbf24; --trk-5: #f472b6; --trk-6: #34d399;
     --grid: rgba(255,255,255,.10);
@@ -80,7 +80,7 @@
     --wave: #3b82f6; --sel: rgba(59,130,246,.18); --sec: #eef2f7;
     --danger: #ef4444; --ok: #16a34a;
     --panel: #eef1f5; --panel-line: #dde3ea; --knob-bg: #ffffff; --knob-track: #cfd8e3;
-    --mod-eq: #3b82f6; --mod-dyn: #d97706; --mod-echo: #7c3aed;
+    --mod-eq: #3b82f6; --mod-dyn: #d97706; --mod-echo: #7c3aed; --mod-tool: #0d9488;
     --trk-1: #3b82f6; --trk-2: #8b5cf6; --trk-3: #0ea5e9;
     --trk-4: #f59e0b; --trk-5: #ec4899; --trk-6: #10b981;
     --grid: rgba(16,24,40,.10);
@@ -302,35 +302,84 @@
   /* ===== FX 面板（专业效果器风）：模块分组框 + 彩色标题 + 旋钮 + 垂直推子 =====
      设计参照硬件/插件惯例：左侧模块色圆点 + 同色标题，旋钮盘面带行程弧·值弧·刻度·指针，
      双极参数的值弧从中性点向两侧生长；推子为纵向轨道 + 模块色填充。
-     每个控件为「盘面 → 标签 → 数值徽标」三段，模块按内容自适应高度。 */
-  .fxpanel { display: flex; align-items: flex-start; gap: var(--sp-2); flex-wrap: wrap; margin: 0 0 var(--sp-2) 12px; }
+     每个控件为「盘面 → 标签 → 数值徽标」三段。
+     排版约定：三个模块等高（面板 align-items:stretch），每个模块内部「可视化区 + 控件区」
+     统一为 --fx-h 高（EQ 曲线 / GR 表 / 推子轨道 / 旋钮列都吃同一高度），因此各模块的
+     顶端、底端与数值徽标基线完全对齐；控件区不足则垂直居中兜底。 */
+  .fxpanel {
+    /* --fx-h：模块内「可视化区 + 控件区」的统一高度，三个模块都吃这个高度以保证上下沿对齐 */
+    --fx-h: 122px;
+    /* --fxmod-w：音质与压缩模块的固定同宽（以音质「曲线 176 + 间隙 8 + 三旋钮 156 + 内边距」的实测宽度为准） */
+    --fxmod-w: 362px;
+    display: flex; align-items: stretch; gap: var(--sp-2); flex-wrap: wrap; margin: 0 0 var(--sp-2) 12px;
+  }
   .fxmod {
-    display: flex; flex-direction: column; padding: 8px 11px 9px;
+    display: flex; flex-direction: column; padding: 7px 10px 8px;
     border: 1px solid var(--panel-line); border-radius: var(--r-md); background: var(--panel);
     box-shadow: inset 0 1px 0 rgba(255,255,255,.05);
   }
   .fxmod[data-mod="eq"] { --mod: var(--mod-eq); }
   .fxmod[data-mod="dyn"] { --mod: var(--mod-dyn); }
   .fxmod[data-mod="echo"] { --mod: var(--mod-echo); }
-  /* 模块标题条：左侧色点 + 着色标题 + 底部分隔线 */
+  .fxmod[data-mod="tool"] { --mod: var(--mod-tool); }
+  /* 音质 = 压缩 固定同宽：压缩内容（GR 表 + 两旋钮）水平居中，两块左右边框严格对齐 */
+  .fxmod[data-mod="eq"], .fxmod[data-mod="dyn"] { width: var(--fxmod-w); }
+  .fxmod[data-mod="dyn"] .fxmod-b { align-items: center; }
+  /* FX 工具模块：独占一整行（flex-basis 100% 强制换行并铺满），内部三组控件横向均布。
+     做成"工具栏"而非窄卡：音质/压缩/回声那一行只剩 ~66px（压缩加宽到与音质同宽后），
+     塞不下窄卡；若竖排三行会把面板撑到 283px，横向一行只需 ~222px。 */
+  .fxmod[data-mod="tool"] { flex: 1 1 100%; }
+  .fxmod[data-mod="tool"] .fxmod-b { flex-direction: row; align-items: center; justify-content: space-between; gap: 18px; }
+  .fxmod[data-mod="tool"] .ftrow + .ftrow { margin-top: 0; }   /* 横向排列时清掉竖排用的行距 */
+  /* 旁通：只压暗「受影响的处理模块」，FX 工具模块本身保持全亮（要能点回来） */
+  .fxpanel.fx-off .fxmod:not([data-mod="tool"]), .fxpanel.fx-off .fxmeter { opacity: .42; }
+  /* 模块标题条：左侧色点 + 着色标题 + 底部分隔线（固定高度，不参与拉伸） */
   .fxmod-h {
-    display: flex; align-items: center; gap: 6px; margin-bottom: 9px; padding-bottom: 5px;
+    flex: none; display: flex; align-items: center; gap: 5px; margin-bottom: 6px; padding-bottom: 4px;
     border-bottom: 1px solid var(--panel-line);
-    font-size: 11px; font-weight: 600; letter-spacing: .06em; color: var(--mod);
+    font-size: 10.5px; line-height: 1; font-weight: 600; letter-spacing: .06em; color: var(--mod);
   }
   .fxmod-h::before {
     content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--mod);
     box-shadow: 0 0 6px color-mix(in srgb, var(--mod) 70%, transparent);
   }
-  .fxmod-b { display: flex; flex-direction: column; }
+  .fxmod-h .fxmod-t { flex: 1 1 auto; }
+  /* 「归零」小按钮：平时低调，hover 才用模块色强调（音质 / 压缩各一个） */
+  .fxmod-r {
+    flex: none; margin-left: 6px; padding: 0 6px; height: 16px; line-height: 14px;
+    border: 1px solid var(--panel-line); border-radius: 4px; background: transparent;
+    color: var(--muted); font-size: 9.5px; letter-spacing: .04em; cursor: pointer;
+    transition: color .12s, border-color .12s, background .12s;
+  }
+  .fxmod-r:hover { color: var(--mod); border-color: var(--mod); background: color-mix(in srgb, var(--mod) 14%, transparent); }
+  /* —— FX 工具模块（旁通 / 预设 / 复制到其他轨）：三行紧凑控件 —— */
+  .ftrow { display: flex; align-items: center; gap: 6px; }
+  .ftrow + .ftrow { margin-top: 5px; }
+  .ftrow > .ftlbl { flex: none; min-width: 30px; font-size: 10px; color: var(--muted); white-space: nowrap; }
+  .ftsel {
+    flex: 1 1 auto; min-width: 0; height: 21px; padding: 0 4px; border-radius: 4px;
+    border: 1px solid var(--panel-line); background: var(--knob-bg); color: var(--fg); font-size: 10.5px;
+  }
+  .ftbtn {
+    flex: none; height: 21px; padding: 0 8px; border-radius: 4px; cursor: pointer;
+    border: 1px solid var(--panel-line); background: var(--sec); color: var(--fg);
+    font-size: 10.5px; white-space: nowrap;
+    transition: color .12s, border-color .12s, background .12s;
+  }
+  .ftbtn:hover { color: var(--mod); border-color: var(--mod); }
+  .ftbtn.on { color: var(--mod); border-color: var(--mod); background: color-mix(in srgb, var(--mod) 16%, transparent); }
+  .ftrow > .ftbtn.wfull { flex: 1 1 auto; }        /* 旁通行：按钮吃掉标签外的剩余宽度 */
+  /* 模块内容区：吃掉剩余高度，内容不足时垂直居中（保证与兄弟模块上下沿对齐） */
+  .fxmod-b { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; justify-content: center; }
   .knobrow { display: flex; align-items: flex-start; gap: 6px; }
-  /* —— 旋钮：SVG 盘面（行程弧 + 值弧 + 刻度 + 指针）+ 标签 + 可编辑数值徽标 —— */
-  .kb { width: 50px; display: flex; flex-direction: column; align-items: center; gap: 2px; outline: none; }
+  /* —— 旋钮：SVG 盘面（行程弧 + 值弧 + 刻度 + 指针）+ 标签 + 可编辑数值徽标 ——
+     旋钮列总高 = 盘面 32 + 间隙 2 + 标签 11 + 间隙 2 + 徽标 13 = 60，两行（+行距 2）= 122 = --fx-h */
+  .kb { width: 48px; display: flex; flex-direction: column; align-items: center; gap: 2px; outline: none; }
   .kb-d {
-    position: relative; width: 40px; height: 40px; cursor: ns-resize; touch-action: none;
+    position: relative; width: 32px; height: 32px; cursor: ns-resize; touch-action: none;
     border-radius: 50%; filter: drop-shadow(0 1px 1px rgba(16,24,40,.18));
   }
-  .kb-d svg { display: block; width: 40px; height: 40px; }
+  .kb-d svg { display: block; width: 32px; height: 32px; }
   .kb-ring { fill: url(#kbFill); stroke: var(--panel-line); stroke-width: 1; }
   .kb-track { fill: none; stroke: var(--knob-track); stroke-width: 2.5; stroke-linecap: round; opacity: .9; }
   .kb-tk { stroke: var(--muted); stroke-width: 1; opacity: .55; }
@@ -338,27 +387,28 @@
   .kb-ptr { stroke: var(--fg); stroke-width: 2.2; stroke-linecap: round; }
   .kb-cap { fill: var(--fg); opacity: .85; }
   .kb:focus-visible .kb-d, .kb:focus-visible .fd-t { box-shadow: var(--ring); }
-  .kb-l, .fd-l { font-size: 10px; line-height: 1.2; color: var(--muted); white-space: nowrap; }
-  /* 数值徽标：常态为只读文本，双击原地换成输入框 */
+  .kb-l, .fd-l { height: 11px; font-size: 10px; line-height: 11px; color: var(--muted); white-space: nowrap; }
+  /* 数值徽标：常态为只读文本，双击原地换成输入框（固定高度，保证各模块徽标基线齐平） */
   .kb-v, .fd-v {
-    width: 100%; padding: 0 1px; border-radius: 3px; text-align: center; cursor: text;
-    font-size: 11px; line-height: 1.35; color: var(--fg); font-variant-numeric: tabular-nums;
+    width: 100%; height: 13px; padding: 0; border-radius: 3px; text-align: center; cursor: text;
+    font-size: 11px; line-height: 13px; color: var(--fg); font-variant-numeric: tabular-nums;
     white-space: nowrap; overflow: hidden;
   }
   .kb-v:hover, .fd-v:hover { background: var(--sec); box-shadow: inset 0 0 0 1px var(--panel-line); }
   .fxnum {
-    width: 100%; padding: 0 1px; border: none; border-radius: 3px; background: var(--knob-bg);
-    text-align: center; font-size: 11px; line-height: 1.35; color: var(--fg);
+    width: 100%; height: 13px; padding: 0; border: none; border-radius: 3px; background: var(--knob-bg);
+    text-align: center; font-size: 11px; line-height: 13px; color: var(--fg);
     font-variant-numeric: tabular-nums; outline: none;
     box-shadow: inset 0 0 0 1px var(--mod);
     -moz-appearance: textfield; appearance: textfield;
   }
   .fxnum::-webkit-outer-spin-button, .fxnum::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
-  /* —— 垂直推子：纵向轨道 + 模块色填充 + 带纹理的滑块（拖拽/点击跳转） —— */
-  .faderrow { display: flex; align-items: flex-start; gap: 10px; }
-  .fd { width: 40px; display: flex; flex-direction: column; align-items: center; gap: 2px; outline: none; }
+  /* —— 垂直推子：纵向轨道 + 模块色填充 + 带纹理的滑块（拖拽/点击跳转） ——
+     推子列总高 = 轨道 (--fx-h - 28) + 间隙 2 + 标签 11 + 间隙 2 + 徽标 13 = --fx-h */
+  .faderrow { display: flex; align-items: flex-start; gap: 8px; }
+  .fd { width: 48px; display: flex; flex-direction: column; align-items: center; gap: 2px; outline: none; }
   .fd-t {
-    position: relative; width: 8px; height: 76px; border-radius: 4px;
+    position: relative; width: 8px; height: calc(var(--fx-h) - 28px); border-radius: 4px;
     background: var(--knob-track); cursor: ns-resize; touch-action: none;
     box-shadow: inset 0 0 0 1px var(--panel-line);
   }
@@ -382,33 +432,35 @@
      GR 表填充自上而下（压缩越深越长），故遮罩改为从底部往上盖。 */
   .fxmeter {
     display: flex; flex-direction: column; align-items: center; gap: 4px;
-    align-self: stretch; min-height: 76px; padding: 8px 7px 8px;
+    align-self: stretch; min-height: 0; padding: 7px 6px;
     border: 1px solid var(--panel-line); border-radius: var(--r-md); background: var(--panel);
   }
-  .mt-bars { display: flex; gap: 2px; flex: 1; min-height: 76px; position: relative; }
+  .mt-bars { display: flex; gap: 2px; flex: 1; min-height: 0; position: relative; }
   .mt-col { position: relative; width: 11px; border-radius: 2px; background: var(--knob-track); overflow: hidden; }
   .mt-col.lv { background: linear-gradient(to top, #22c55e 0%, #22c55e 52%, #eab308 76%, #ef4444 94%); }
   .mt-col.gr { background: linear-gradient(to bottom, #f59e0b 0%, var(--danger) 70%); }
   .mt-mask { position: absolute; left: 0; right: 0; top: 0; height: 100%; background: var(--knob-track); }
   .mt-mask.bot { top: auto; bottom: 0; }
   .mt-peak { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: var(--fg); opacity: .8; }
-  .mt-lab { font-size: 9px; line-height: 1; letter-spacing: .04em; color: var(--muted); }
+  .mt-lab { height: 11px; font-size: 9.5px; line-height: 11px; letter-spacing: .04em; color: var(--muted); }
   /* 电平刻度：贴在表条上方的参考线（-6/-12/-24/-48 dBFS），不再需要读数字即可判断量级 */
   .mt-tick {
     position: absolute; left: 0; right: 0; height: 1px; background: var(--panel-line);
     z-index: 2; pointer-events: none;
   }
-  /* 压缩模块内的 GR 表：与旋钮同高，占据一列 */
-  .mt-gr { display: flex; flex-direction: column; align-items: center; gap: 4px; width: 20px; }
-  .mt-gr .mt-col { height: 76px; flex: none; }
-  /* —— 「可视化 + 旋钮」并排：音质模块（左 EQ 频响曲线 / 右 6 旋钮）、压缩模块（左 GR 表 / 右 2 旋钮） —— */
-  .fxside { display: flex; align-items: center; gap: 9px; }
-  .fxknobs { display: flex; flex-direction: column; gap: 6px; }
+  /* 压缩模块内的 GR 表：整列吃满 --fx-h（= 列高 + 间隙 + 「GR」标签），与左侧 EQ 曲线同高 */
+  .mt-gr { display: flex; flex-direction: column; align-items: center; gap: 2px; width: 20px; }
+  .mt-gr .mt-col { height: calc(var(--fx-h) - 13px); flex: none; }
+  /* —— 「可视化 + 控件」并排：音质模块（左 EQ 频响曲线 / 右 6 旋钮两行）、压缩模块（左 GR 表 / 右 2 旋钮两行） —— */
+  .fxside { display: flex; align-items: center; gap: 8px; }
+  .fxknobs { display: flex; flex-direction: column; gap: 2px; }
+  /* 边框用 inset 阴影而非 border：保证画布内容区尺寸与 JS 的 EQ_W/EQ_H 严格一致，曲线不被缩放 */
   .eqc {
-    display: block; width: 186px; height: 88px; flex: none; border: 1px solid var(--panel-line);
-    border-radius: var(--r-sm); background: var(--knob-bg); cursor: ns-resize; touch-action: none;
+    display: block; width: 176px; height: var(--fx-h); flex: none;
+    border: 0; border-radius: var(--r-sm); background: var(--knob-bg); cursor: ns-resize; touch-action: none;
+    box-shadow: inset 0 0 0 1px var(--panel-line);
   }
-  .eqc:focus-visible { box-shadow: var(--ring); }
+  .eqc:focus-visible { box-shadow: var(--ring), inset 0 0 0 1px var(--panel-line); }
   /* —— 母带行：参数成组，渲染按钮与状态同排 —— */
   .master { gap: var(--sp-3); }
   .master .mg { display: inline-flex; align-items: center; gap: 5px; }
@@ -864,17 +916,30 @@ function buildTracks(items) {
     // 控件值实时写回 track 并驱动节点链，保证「听到什么就导出什么」。
     const fxPanel = document.createElement("div");
     fxPanel.className = "fxpanel";
-    const mkMod = (key, titleKey) => {
+    // mkMod：建一个模块分组框（色点 + 标题 + 可选「归零」按钮），返回内容区 DOM。
+    // resets 为空数组时无按钮；传入的数组在控件建好后 push 复位函数（点击时实时读取）。
+    const mkMod = (key, titleKey, resets) => {
       const mod = document.createElement("section");
       mod.className = "fxmod"; mod.dataset.mod = key;
       const h = document.createElement("div");
-      h.className = "fxmod-h"; h.textContent = T(titleKey);
+      h.className = "fxmod-h";
+      const title = document.createElement("span");
+      title.className = "fxmod-t"; title.textContent = T(titleKey);
+      h.appendChild(title);
+      if (resets) {
+        const rb = document.createElement("button");
+        rb.type = "button"; rb.className = "fxmod-r";
+        rb.textContent = T("归零"); rb.title = T("全部复位到中性值");
+        rb.addEventListener("click", () => resets.forEach((fn) => fn()));
+        h.appendChild(rb);
+      }
       const b = document.createElement("div");
       b.className = "fxmod-b";
       mod.append(h, b);
       fxPanel.appendChild(mod);
       return b;
     };
+    const eqResets = [], dynResets = [], echoResets = [];  // 音质 / 压缩 / 回声的「归零」目标（建控件后填充）
     const mkRow = (body, cls) => {
       const r = document.createElement("div");
       r.className = cls; body.appendChild(r);
@@ -887,17 +952,18 @@ function buildTracks(items) {
     const eqRowA = mkRow(eqKnobs, "knobrow");
     const eqRowB = mkRow(eqKnobs, "knobrow");
     eqWrap.append(eqCv, eqKnobs);
-    mkMod("eq", "音质").appendChild(eqWrap);
+    mkMod("eq", "音质", eqResets).appendChild(eqWrap);
     // 压缩模块：左侧 GR 表（自上而下填充，压缩越深越长），右侧阈值/比率两个旋钮
+    // 旋钮竖排（而非横排）以吃满 --fx-h，保证与音质/回声模块上下沿对齐
     const dynWrap = document.createElement("div"); dynWrap.className = "fxside";
     const grWrap = document.createElement("div"); grWrap.className = "mt-gr";
     const grCol = mkMtrCol("gr", false);
     const grLab = document.createElement("div"); grLab.className = "mt-lab"; grLab.textContent = T("GR");
     grWrap.append(grCol.col, grLab);
-    const dynKnobs = document.createElement("div"); dynKnobs.className = "knobrow";
+    const dynKnobs = document.createElement("div"); dynKnobs.className = "fxknobs";
     dynWrap.append(grWrap, dynKnobs);
-    mkMod("dyn", "压缩").appendChild(dynWrap);
-    const echoRow = mkRow(mkMod("echo", "回声"), "faderrow");
+    mkMod("dyn", "压缩", dynResets).appendChild(dynWrap);
+    const echoRow = mkRow(mkMod("echo", "回声", echoResets), "faderrow");
 
     // 控件区间与后端钳制区间一致；中性值 = 双击盘面 / Home 的复位目标
     const panEl = mkFxCtl({ label: "声像", tip: "声像", kind: "pan", bipolar: true,
@@ -969,6 +1035,9 @@ function buildTracks(items) {
       // 音质（P1）/音效（P2）：参数值 + 对应控件；fx 为播放时建立的节点链（未播放时为 null）
       pan: 0, eqLow: 0, eqMid: 0, eqHigh: 0, hpf: 0, lpf: 0, fx: null,
       compTh: 0, compRatio: 1, echoDelay: 0, echoFb: 0, echoMix: 0,
+      // 旁通：false = 本轨全部音质/音效不生效（旋钮数值保留，便于 A/B 与恢复）
+      // fxToolsPaint 在 paintBypass 定义之后再挂（此处不能引用，const 存在暂时性死区）
+      fxOn: true, fxToolsPaint: null,
       // FX 控件（工程回灌时调用其 setV，见 applyTrackState）
       panEl: panEl, eqLowEl: eqLowEl, eqMidEl: eqMidEl,
       eqHighEl: eqHighEl, hpfEl: hpfEl, lpfEl: lpfEl,
@@ -983,6 +1052,113 @@ function buildTracks(items) {
     // 曲线：绑定手柄拖拽（改 gain）并首次绘制
     attachEqCurve(track, eqCv);
     drawEqCurve(track);
+
+    // —— 「归零」目标：音质 6 项 / 压缩 2 项 / 回声 3 项（点击后该模块全部回到中性值） ——
+    eqResets.push(panEl.resetV, eqLowEl.resetV, eqMidEl.resetV,
+                  eqHighEl.resetV, hpfEl.resetV, lpfEl.resetV);
+    dynResets.push(compThEl.resetV, compRatioEl.resetV);
+    echoResets.push(echoDelayEl.resetV, echoFbEl.resetV, echoMixEl.resetV);
+
+    // —— FX 工具模块（靠右停靠）：旁通开关 / FX 预设 / 复制 FX 到其他轨 ——
+    const toolBody = mkMod("tool", "FX 工具");
+    const ftRow = (labelKey) => {
+      const r = document.createElement("div"); r.className = "ftrow";
+      const l = document.createElement("span"); l.className = "ftlbl"; l.textContent = T(labelKey);
+      const sel = document.createElement("select"); sel.className = "ftsel";
+      const btn = document.createElement("button");
+      btn.type = "button"; btn.className = "ftbtn";
+      r.append(l, sel, btn);
+      toolBody.appendChild(r);
+      return { sel: sel, btn: btn };
+    };
+    // 第 1 行：旁通开关（只影响音频链与导出，不动旋钮数值，便于 A/B 对比）
+    const byRow = document.createElement("div"); byRow.className = "ftrow";
+    const byLbl = document.createElement("span");
+    byLbl.className = "ftlbl"; byLbl.textContent = T("开关");
+    const byBtn = document.createElement("button");
+    byBtn.type = "button"; byBtn.className = "ftbtn wfull";
+    byRow.append(byLbl, byBtn);
+    toolBody.appendChild(byRow);
+    const paintBypass = () => {
+      byBtn.classList.toggle("on", track.fxOn === false);
+      byBtn.textContent = track.fxOn === false ? T("旁通") : T("正常");
+      byBtn.title = T("旁通本轨全部音质与音效");
+      fxPanel.classList.toggle("fx-off", track.fxOn === false);
+    };
+    track.fxToolsPaint = paintBypass;           // 挂到轨道对象：复制 FX / 工程回灌时刷新按钮状态
+    byBtn.addEventListener("click", () => {
+      track.fxOn = track.fxOn === false;        // 取反（默认 true = 正常）
+      paintBypass();
+      applyTrackFx(track);
+    });
+    // 第 2 行：FX 预设（内置 + 自定义）+ 应用；选「保存为预设…」则把当前轨参数存为自定义预设
+    const preRow = ftRow("预设");
+    preRow.btn.textContent = T("应用");
+    const paintPresets = () => {
+      const keep = preRow.sel.value;
+      preRow.sel.textContent = "";
+      const opt = (val, text) => {
+        const o = document.createElement("option"); o.value = val; o.textContent = text;
+        preRow.sel.appendChild(o);
+      };
+      FX_PRESET_BUILTIN.forEach((p) => opt("b:" + p.id, T(p.name)));
+      loadCustomPresets().forEach((p) => opt("c:" + p.name, p.name));
+      opt("__save__", T("保存为预设…"));
+      preRow.sel.value = keep && preRow.sel.querySelector('option[value="' + keep + '"]')
+        ? keep : ("b:" + FX_PRESET_BUILTIN[0].id);
+    };
+    preRow.btn.addEventListener("click", () => {
+      const v = preRow.sel.value || "";
+      if (v === "__save__") {                   // 保存当前轨参数为自定义预设
+        const name = (window.prompt(T("预设名称"), "") || "").trim();
+        if (!name) { paintPresets(); return; }
+        saveCustomPreset(name, collectTrackFx(track));
+        paintPresets();
+        preRow.sel.value = "c:" + name;
+        return;
+      }
+      let p = null;
+      if (v.indexOf("b:") === 0) {
+        const b = FX_PRESET_BUILTIN.find((x) => x.id === v.slice(2));
+        if (b) p = presetToParams(b.v);
+      } else if (v.indexOf("c:") === 0) {
+        const c = loadCustomPresets().find((x) => x.name === v.slice(2));
+        if (c) p = presetToParams(c.v);
+      }
+      if (p) setTrackFx(track, p);
+    });
+    // 第 3 行：复制 FX 到其他轨（下拉在展开前重建，保证轨道列表是最新的）
+    const cpRow = ftRow("复制到");
+    cpRow.btn.textContent = T("复制");
+    const paintTargets = () => {
+      const keep = cpRow.sel.value;
+      cpRow.sel.textContent = "";
+      const opt = (val, text) => {
+        const o = document.createElement("option"); o.value = val; o.textContent = text;
+        cpRow.sel.appendChild(o);
+      };
+      S.tracks.forEach((o) => { if (o !== track) opt(o.key, o.label); });
+      if (S.tracks.length > 1) opt("__all__", T("全部其他轨"));
+      if (keep && cpRow.sel.querySelector('option[value="' + keep + '"]')) cpRow.sel.value = keep;
+    };
+    cpRow.sel.addEventListener("mousedown", paintTargets);
+    cpRow.sel.addEventListener("focus", paintTargets);
+    cpRow.btn.addEventListener("click", () => {
+      const v = cpRow.sel.value || "";
+      if (!v) return;
+      const p = collectTrackFx(track);
+      const targets = v === "__all__"
+        ? S.tracks.filter((o) => o !== track)
+        : S.tracks.filter((o) => o !== track && o.key === v);
+      targets.forEach((o) => {
+        setTrackFx(o, p);
+        o.fxOn = track.fxOn;                    // 旁通状态一并复制
+        if (o.fxToolsPaint) o.fxToolsPaint();
+      });
+    });
+    paintBypass();
+    paintPresets();
+    paintTargets();
 
     // 增益：滑块、± 步进按钮、数值徽标三者共用同一写值入口，始终保持一致
     const setGain = (v) => {
@@ -1230,7 +1406,12 @@ function mkFxCtl(opt) {
   });
 
   paint();
-  return { el: box, setV: (v) => set(v, false), getV: () => cur };
+  return {
+    el: box,
+    setV: (v) => set(v, false),                  // 仅刷新显示（工程回灌用，不广播）
+    getV: () => cur,
+    resetV: () => set(neutral, true),            // 复位到中性值并广播（模块「归零」按钮用）
+  };
 }
 
 /* ========================================================== 统一播放（transport） */
@@ -1267,6 +1448,67 @@ const FX_ECHO_DEF_MS = 250;   // 混合 > 0 但延迟未填时的兜底（与后
 const FX_COMP_ATTACK = 0.02;  // 压缩启动（秒）= 后端 attack 20ms
 const FX_COMP_RELEASE = 0.25; // 压缩释放（秒）= 后端 release 250ms
 const FX_COMP_KNEE = 6;       // 压缩拐点（dB）= 后端 knee
+/* —— FX 参数白名单 + 中性值（归零 / 预设 / 复制 三处的唯一真源） ——
+   键名与 track 上的字段同名，键序即「音质 → 压缩 → 回声」的处理顺序。 */
+const FX_FIELDS = ["pan", "eqLow", "eqMid", "eqHigh", "hpf", "lpf",
+  "compTh", "compRatio", "echoDelay", "echoFb", "echoMix"];
+const FX_NEUTRAL = { pan: 0, eqLow: 0, eqMid: 0, eqHigh: 0, hpf: 0, lpf: 0,
+  compTh: 0, compRatio: 1, echoDelay: 0, echoFb: 0, echoMix: 0 };
+/* —— FX 预设：内置档（v 只写非中性项，其余按中性补齐）+ 用户自定义（localStorage） ——
+   仅含 FX 参数，不含增益 / 静音 / 切片 / 旁通（旁通是轨道级状态，不随预设走）。 */
+const FX_PRESET_BUILTIN = [
+  { id: "flat", name: "中性", v: {} },
+  { id: "vocal", name: "人声", v: { hpf: 80, eqLow: -2, eqMid: 1, eqHigh: 2, compTh: -20, compRatio: 3 } },
+  { id: "music", name: "伴奏", v: { eqLow: 1, eqMid: -1, eqHigh: 1, compTh: -12, compRatio: 2 } },
+];
+const FX_PRESET_STORE = "yue2.mix.fxPresets";   // localStorage 键：自定义预设数组
+/* 读自定义预设（损坏/不可用时返回空数组，不阻断页面） */
+function loadCustomPresets() {
+  try {
+    const raw = window.localStorage.getItem(FX_PRESET_STORE);
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr.filter((p) => p && typeof p.name === "string" && p.v) : [];
+  } catch (e) { return []; }
+}
+/* 写自定义预设（重名覆盖）；写入失败（隐私模式等）静默忽略 */
+function saveCustomPreset(name, v) {
+  try {
+    const arr = loadCustomPresets().filter((p) => p.name !== name);
+    arr.push({ name: name, v: v });
+    window.localStorage.setItem(FX_PRESET_STORE, JSON.stringify(arr));
+    return true;
+  } catch (e) { return false; }
+}
+/* 把预设值补齐为完整参数（缺项用中性值），并按各参数区间钳制 */
+function presetToParams(v) {
+  const lim = { pan: [-1, 1], eqLow: [-15, 15], eqMid: [-15, 15], eqHigh: [-15, 15],
+    hpf: [0, 2000], lpf: [0, 20000], compTh: [-60, 0], compRatio: [1, 20],
+    echoDelay: [0, 2000], echoFb: [0, 0.95], echoMix: [0, 1] };
+  const out = {};
+  FX_FIELDS.forEach((k) => {
+    const raw = (v && v[k] !== undefined) ? Number(v[k]) : FX_NEUTRAL[k];
+    const lim2 = lim[k];
+    out[k] = clampNum(Number.isFinite(raw) ? raw : FX_NEUTRAL[k], lim2[0], lim2[1]);
+  });
+  return out;
+}
+/* 把一组 FX 参数写入轨道：① 写回 track 字段 ② 刷新控件显示 ③ 同步节点链与 EQ 曲线。
+   与 applyTrackState 的做法一致（直接写字段 + setV，不走 onChange，避免重复广播）。 */
+function setTrackFx(t, p) {
+  FX_FIELDS.forEach((k) => {
+    t[k] = p[k];
+    const ctl = t[k + "El"];
+    if (ctl) ctl.setV(p[k]);
+  });
+  applyTrackFx(t);
+  drawEqCurve(t);
+}
+/* 收集轨道当前的 FX 参数（复制到其他轨 / 存为预设用） */
+function collectTrackFx(t) {
+  const out = {};
+  FX_FIELDS.forEach((k) => { out[k] = t[k]; });
+  return out;
+}
 /* 建一条固定的音质+音效节点链（参数为中性时等同旁通），返回 {head, tail, nodes} */
 function buildFxChain(ctx) {
   const mk = (type, freq, q) => {
@@ -1308,28 +1550,34 @@ function buildFxChain(ctx) {
     nodes: { hpf, lpf, low, mid, high, pan, comp, echoIn, echoOut, taps },
   };
 }
-/* 把音质/音效参数写入节点链（短时间常数平滑，播放中改动即时生效且不爆音） */
+/* 把音质/音效参数写入节点链（短时间常数平滑，播放中改动即时生效且不爆音）
+   旁通（s.fxOn === false）时不改用户参数，只把整条链推回中性值 —— 与后端
+   mix_render 对 fx_on=false 直接不生成滤镜的行为等价（听感/导出都一致）。 */
 function applyFxParams(ctx, nodes, s) {
   if (!nodes) return;
+  const v = s.fxOn === false
+    ? { pan: 0, eqLow: 0, eqMid: 0, eqHigh: 0, hpf: 0, lpf: 0,
+        compTh: 0, compRatio: 1, echoDelay: 0, echoFb: 0, echoMix: 0 }
+    : s;
   const now = ctx.currentTime, tc = 0.02;
-  nodes.hpf.frequency.setTargetAtTime(s.hpf > 0 ? s.hpf : FX_HPF_OFF, now, tc);
-  nodes.lpf.frequency.setTargetAtTime(s.lpf > 0 ? s.lpf : FX_LPF_OFF, now, tc);
-  nodes.low.gain.setTargetAtTime(s.eqLow, now, tc);
-  nodes.mid.gain.setTargetAtTime(s.eqMid, now, tc);
-  nodes.high.gain.setTargetAtTime(s.eqHigh, now, tc);
-  if (nodes.pan) nodes.pan.pan.setTargetAtTime(s.pan, now, tc);
+  nodes.hpf.frequency.setTargetAtTime(v.hpf > 0 ? v.hpf : FX_HPF_OFF, now, tc);
+  nodes.lpf.frequency.setTargetAtTime(v.lpf > 0 ? v.lpf : FX_LPF_OFF, now, tc);
+  nodes.low.gain.setTargetAtTime(v.eqLow, now, tc);
+  nodes.mid.gain.setTargetAtTime(v.eqMid, now, tc);
+  nodes.high.gain.setTargetAtTime(v.eqHigh, now, tc);
+  if (nodes.pan) nodes.pan.pan.setTargetAtTime(v.pan, now, tc);
   if (nodes.comp) {
     // 阈值 >= 0dB 或比率 <= 1 视为关闭（与后端 _comp_filter 判据一致）
-    const on = s.compTh < -0.05 && s.compRatio > 1.05;
-    nodes.comp.threshold.setTargetAtTime(on ? s.compTh : 0, now, tc);
-    nodes.comp.ratio.setTargetAtTime(on ? s.compRatio : 1, now, tc);
+    const on = v.compTh < -0.05 && v.compRatio > 1.05;
+    nodes.comp.threshold.setTargetAtTime(on ? v.compTh : 0, now, tc);
+    nodes.comp.ratio.setTargetAtTime(on ? v.compRatio : 1, now, tc);
   }
-  const echoOn = s.echoMix >= 0.01;
-  const dsec = (s.echoDelay > 0 ? s.echoDelay : FX_ECHO_DEF_MS) / 1000;
+  const echoOn = v.echoMix >= 0.01;
+  const dsec = (v.echoDelay > 0 ? v.echoDelay : FX_ECHO_DEF_MS) / 1000;
   nodes.taps.forEach((t, i) => {
     const k = i + 1;
     t.d.delayTime.setTargetAtTime(dsec * k, now, tc);
-    t.g.gain.setTargetAtTime(echoOn ? s.echoMix * Math.pow(s.echoFb, k) : 0, now, tc);
+    t.g.gain.setTargetAtTime(echoOn ? v.echoMix * Math.pow(v.echoFb, k) : 0, now, tc);
   });
 }
 function applyTrackFx(t) {
@@ -1476,7 +1724,7 @@ function meterLoop() {
    5 个 biquad 与 buildFxChain 的参数完全一致（高通/低通/低频架 200Hz/中频峰 1kHz Q=1/高频架 4kHz），
    在 OfflineAudioContext 上调用 getFrequencyResponse 取各频点幅度，串联合计（dB 相加）后绘制。
    3 个手柄（200Hz / 1kHz / 4kHz）只能上下拖拽改 gain —— 频率后端未暴露，固定不动。 */
-const EQ_W = 186, EQ_H = 88;      // 画布 CSS 尺寸（与 .eqc 一致）
+const EQ_W = 176, EQ_H = 122;     // 画布 CSS 尺寸（与 .eqc 的 --fx-h 保持一致）
 const EQ_PTS = 200;               // 对数采样点数
 const EQ_DB_RANGE = 18;           // 纵轴 ±18dB（略大于参数 ±15dB，避免贴边）
 const EQ_GAIN_MAX = 15;           // 手柄增益上限，与旋钮区间一致
@@ -2040,6 +2288,9 @@ function applyTrackState(t, st) {
   t.echoDelayEl.setV(t.echoDelay);
   t.echoFbEl.setV(t.echoFb);
   t.echoMixEl.setV(t.echoMix);
+  // 旁通：工程未记录该字段时按「正常」处理（向后兼容旧工程）
+  t.fxOn = st.fx_on === undefined ? true : !!st.fx_on;
+  if (t.fxToolsPaint) t.fxToolsPaint();
   applyTrackFx(t);
   drawEqCurve(t);                            // 三段 EQ / 高通 / 低通回灌后重绘频响曲线
   updateTrackState(t);
@@ -2111,6 +2362,8 @@ function buildPayload() {
       // 音效参数（P2）：压缩（阈值/比率）+ 回声（延迟/反馈/混合），同样与后端字段名/钳制一致
       comp_th: t.compTh, comp_ratio: t.compRatio,
       echo_delay: t.echoDelay, echo_fb: t.echoFb, echo_mix: t.echoMix,
+      // 旁通：false 时后端不生成任何音质/音效滤镜（参数仍随工程保存，便于恢复）
+      fx_on: t.fxOn !== false,
     };
   });
   return {
@@ -2274,6 +2527,47 @@ function syncParentTheme() {
   } catch (e) { /* 父窗口不可访问时保持系统主题 */ }
 }
 
+/* ============================================================ 内嵌自适应高度 */
+/* 内嵌进 Gradio Tab 时，父页给的是固定高度，导致内容在本页内滚动、外层标题与菜单
+   无法随页面滚走，白白占用顶部空间。同源下可直接拿到自己的 iframe 元素（frameElement）
+   并改写其高度：本页长多高，iframe 就多高，滚动交给父页统一处理。
+   高度用 body 的 border-box 高度（而非 documentElement.scrollHeight）——后者会被
+   视口高度撑大，短内容时无法回落，形成"只能长不能缩"的死锁。 */
+let _fitScheduled = false;
+let _fitObserver = null;
+function fitParentHeight() {
+  if (!S.embed) return;
+  let fe = null;
+  try { fe = window.frameElement; } catch (e) { fe = null; }
+  if (!fe) return;
+  const h = Math.ceil(document.body.getBoundingClientRect().height);
+  if (!h) return;   // 父 Tab 隐藏时 body 未参与布局（矩形为 0），跳过以免误设成 0 高
+  if (Math.abs(h - (parseFloat(fe.style.height) || 0)) > 1) fe.style.height = h + "px";
+}
+function watchEmbedHeight() {
+  if (!S.embed) return;
+  /* 合并到一帧内执行。注意不能拿 rAF 句柄当"已排队"哨兵：隐藏 iframe 里 rAF
+     不会触发，句柄非 0 会让后续更新永久卡死（实测内嵌 Tab 内高度不再跟随内容）。
+     因此用布尔标记 + 定时器兜底，保证任何情况下都会跑到一次。 */
+  const kick = () => {
+    if (_fitScheduled) return;
+    _fitScheduled = true;
+    const run = () => {
+      if (!_fitScheduled) return;
+      _fitScheduled = false;
+      fitParentHeight();
+    };
+    requestAnimationFrame(run);
+    setTimeout(run, 150);
+  };
+  if (window.ResizeObserver) {
+    _fitObserver = new ResizeObserver(kick);   // 必须持有引用，否则可能被回收后不再回调
+    _fitObserver.observe(document.body);
+  }
+  window.addEventListener("resize", kick);
+  kick();
+}
+
 /* ==================================================================== 事件绑定 */
 $("load").addEventListener("click", loadTracks);
 $("refresh").addEventListener("click", () => loadSources(true));
@@ -2343,8 +2637,10 @@ $("solo-audio").addEventListener("ended", syncPreviewButtons);
   if (S.embed) document.documentElement.dataset.embed = "1";
   syncParentTheme();
   setInterval(syncParentTheme, 1500);
+  watchEmbedHeight();                          // 内嵌时让 iframe 随内容长高（顶部菜单可滚走）
   try { await loadSources(false); } catch (e) { setMsg(String(e), "err"); }
   try { await loadProjects(); } catch (e) { setPrjMsg(String(e), "err"); }
+  fitParentHeight();
 })();
 </script>
 </body>

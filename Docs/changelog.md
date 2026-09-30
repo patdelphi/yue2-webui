@@ -4,6 +4,68 @@
 
 ---
 
+## 2026-09-30 — 多轨编辑器：iframe 随内容长高 + 音质/压缩一键归零 + 「FX 工具」工具栏
+
+> 目的：用户两点诉求——(1) 编辑器锁在固定 760px 的 iframe 里，顶部标题与菜单常驻、不能随页面滚走，浪费顶部空间；(2) 音质、压缩要「一键归零」，并把该行右侧没用上的空白放点别的功能。
+
+- `static/multitrack/index.html`：
+  - **内嵌自适应高度**：新增 `fitParentHeight()` / `watchEmbedHeight()`。同源下用 `window.frameElement` 反向改写自身 iframe 高度，父页 app.py 零改动。高度源取 `document.body.getBoundingClientRect().height`（**不用** `documentElement.scrollHeight`，后者会被视口撑大导致「只能长不能缩」）。`ResizeObserver(document.body)` + `resize` 事件触发，实测内容长高/缩短后 iframe 双向跟随（1337 ↔ 1937px）。
+    - 踩坑 1：不能拿 `requestAnimationFrame` 的**句柄**当「已排队」哨兵——内嵌 Tab 未渲染时 rAF 不触发，句柄非 0 会让后续更新**永久卡死**（实测加载轨道后高度不再跟随、停在 262px）。改为布尔标记 + `setTimeout(run, 150)` 兜底。
+    - 踩坑 2：`ResizeObserver` 实例必须持有引用，实测不持有引用时回调不再触发，改为模块级 `_fitObserver`。
+    - 踩坑 3：父 Tab 隐藏时 body 未参与布局、矩形为 0，`fitParentHeight` 增加 `if (!h) return` 防守，避免把 iframe 误设成 0 高。
+  - **一键归零**：`mkFxCtl` 返回值新增 `resetV`（复位到中性值并广播）；`mkMod(key, title, resets)` 在标题条右侧渲染 `.fxmod-r` 归零按钮。音质登记 6 项（声像/低/中/高/高通/低通），压缩登记 2 项（阈值/比率），回声登记 3 项（延迟/反馈/混合）。实测：套用「人声」预设后点音质归零 → 三频/高通/声像回中性、压缩值保持不动；点压缩归零 → `-20dB / 3.0:1` 回 `0.0dB / 1.0:1`；点回声归零 → 延迟/反馈/混合一并回 `0`（混合 0 即关闭回声）。
+  - **「FX 工具」模块**（新增 `--mod-tool` 主题色）：旁通开关（`.ftbtn.on` + `.fxpanel.fx-off` 只压暗处理模块与电平表，工具模块保持全亮）/ FX 预设（内置 中性·人声·伴奏 + localStorage 自定义 `yue2.mix.fxPresets` + 「保存为预设…」）/ 复制到（目标列表在 `mousedown` / `focus` 时惰性重建，含「全部其他轨」）。实测：旁通按钮 正常 ↔ 旁通 切换并给面板加 `fx-off`；预设「人声」套用 -2/+1/+2 / 80Hz / -20 / 3.0:1；「复制到 → 全部其他轨」把伴奏轨写成 +1/-1/+1 / -12 / 2.0:1；自定义预设写入 localStorage 并立即出现在下拉里。
+  - **布局取舍**：`--fxmod-w: 362px` 让音质与压缩严格同宽（压缩内容居中）；此时该行只剩 ~66px，并排已塞不下工具卡，故 FX 工具做成**独占整行、内部三组横向均布**的工具栏（`flex: 1 1 100%`）——面板高 165 → 232px；若改回竖排三行堆叠则要 283px。741px 视口下三组仍在同一行，无横向溢出。
+  - 工程契约 version 1 新增每轨 `fx_on`：`buildPayload` 写出、`applyTrackState` 回灌（缺省 true）。旁通语义为「不改用户旋钮数值，只把节点链推中性」，与后端「`fx_on=false` 不生成滤镜」等价，试听与导出一致。实测拦截 `/api/mix/render` 请求体：正常 `[true,true]`，第一轨旁通后 `[false,true]`。
+- `src/mix_render.py`：`MixTrack.fx_on`（默认 True）+ `_parse_track` 归一化 + `_fx_filters()` 首行 `if not track.fx_on: return []`。
+- `src/mix_web.py` / `src/i18n.py`：新增 15 个文案键与英文译文（归零 / 全部复位到中性值 / FX 工具 / 开关 / 正常 / 旁通 / 旁通本轨全部音质与音效 / 预设 / 应用 / 保存为预设… / 预设名称 / 中性 / 复制到 / 复制 / 全部其他轨）。
+- `tests/test_mix_render.py`：新增 `test_fx_bypass_skips_all_filters`。
+- `tests/test_mix_web.py`：新增 `test_editor_fx_reset_tools_presets_and_embed_fit`；`test_page_texts_complete` 抽查表补入 15 个新键。
+
+**验证**
+
+- `pytest tests/ --ignore=tests/test_i18n.py -q --basetemp=".pytest_tmp_all"` → **177 passed**（基线 175 + 新增 2 个用例）。
+- `node --check`（提取内联脚本）通过；`py_compile`（mix_render / mix_web / i18n / app）通过。
+- 浏览器实测（Chrome DevTools MCP，服务已重启、页面已硬刷新）：
+  - iframe 高度 262 → 1337px 跟随内容；追加 600px 占位块 → 1937px，移除后回 1337px（双向）。
+  - 面板高 232px；音质/压缩同宽 362px；FX 工具整行 1078px，三组左沿 70 / 496 / 1017，右端 1127 与 OUT 表右沿对齐。
+  - 741px 视口：模块自动折行（IN+音质 / 压缩 / 回声+OUT / FX 工具），`scrollWidth == clientWidth`（无横向溢出）。
+  - 明暗主题：父页 body 置白 → 子页 `data-theme=light`，工具条边线 `#dde3ea`、下拉底 `#fff`、按钮底 `#eef2f7`；恢复后回到 dark。
+
+**未执行 / 待确认**
+
+- 未执行任何 git 操作（需用户明确批准）。
+- 已重启本地服务（改了 mix_render.py / mix_web.py / i18n.py），浏览器需刷新页面。
+
+## 2026-09-30 — 多轨编辑器：轨道 FX 面板降高与内部排版规整
+
+> 目的：用户反馈轨道效果面板「区域高度太高了，内部排版不合理、不规整」。实测面板高 197px，三个模块底边参差（197 / 138 / 156），且模块内部控件各行其是：压缩模块的 GR 列（89px）与旋钮行（71px）居中错位 9px、回声推子块（107px）顶端对齐导致「延迟/反馈/混合」标签明显低于「阈值/比率」、EQ 画布 88px 在 148px 的旋钮块里上下各空 30px。
+
+- `static/multitrack/index.html`（内联 CSS + 两处 JS）：
+  - `.fxpanel` 新增统一高度变量 `--fx-h: 122px`，`align-items: flex-start` → `stretch`：三个模块与 IN/OUT 电平表等高（实测均 159px，顶/底沿完全对齐，此前 197/138/156 参差）。
+  - `.fxmod-b` 改为 `flex: 1 1 auto; justify-content: center`，内容不足时垂直居中兜底；`.fxmod-h` 固定 `flex: none`（标题条不参与拉伸）。
+  - 让「可视化区」和「控件区」都吃 `--fx-h`：`.eqc` 高 `var(--fx-h)`、`.mt-gr .mt-col` 高 `calc(var(--fx-h) - 13px)`（13 = 间隙 + `GR` 标签）、`.fd-t` 高 `calc(var(--fx-h) - 28px)`。三者与旋钮列（32 + 2 + 11 + 2 + 13 = 60，两行 + 行距 2 = 122）严格等高，因此各模块的**数值徽标基线全部齐平**（实测第 1 行徽标底 375、第 2 行与推子徽标底 437）。
+  - 收紧控尺寸：`.fxmod` 内边距 `8/11/9` → `7/10/8`、`.fxmod-h` 字号 11 → 10.5px、下边距 9 → 6px；`.kb` 宽 50 → 48px、盘面 40 → 32px（SVG 为 `viewBox="0 0 40 40"`，等比缩放安全）；`.kb-l/.fd-l` 与 `.kb-v/.fd-v`（含 `.fxnum`）改为固定行高 11px / 13px，消除行高浮动带来的错位。
+  - JS：`const EQ_W = 186, EQ_H = 88` → `176, 122`（与 `.eqc` 的 `--fx-h` 一致）；`.eqc` 改用 `inset box-shadow` 画边线而非 `border`，使画布内容区尺寸与 `EQ_W/EQ_H` 严格相等、曲线不再被 1.6% 缩放。
+  - JS：压缩模块的两个旋钮由 `.knobrow` 改为 `.fxknobs`（竖排两行），吃满 `--fx-h`，从而与音质/回声模块上下沿对齐；列宽由 9px → 8px 与 `.faderrow` 统一为 8px。
+
+**验证**
+
+- 浏览器实测（Chrome DevTools MCP，多轨编辑器页，2 轨）：
+  - 面板高度 197 → **159px**；5 个直接子项（IN / 音质 / 压缩 / 回声 / OUT）实测均为 159px 且 `top/bottom` 完全相同。
+  - 音质模块 `EQ` 画布 176 × 122，与旋钮两行（y 315–375 / 377–437）等高；压缩模块 GR 列 109px + `GR` 标签 = 122px；回声推子轨道 94px，推子列总高 122px。
+  - 标签对齐实测：`低频/中频/高频` 与 `阈值` 同为 y=349，`高通/低通/声像` 与 `比率/延迟/反馈/混合` 同为 y=411；全部数值徽标底沿落在 375 或 437。
+  - 741px 视口自动折行成两行（IN+音质+压缩 / 回声+OUT），`docSW 731 ≤ vw 741`，模块内 0 处元素越界，无横向滚动条。
+  - 深/浅主题截图与取色确认：卡片底 `#22262e / #eef1f5`、边线 `#343a45 / #dde3ea`、画布底 `#2b303a / #ffffff` 均正确。
+- `pytest tests/ --ignore=tests/test_i18n.py -q --basetemp=".pytest_tmp_all"` → **175 passed**（与基线一致，含 `test_mix_web.py` 对 FX 面板 token 的断言）。
+
+**未执行 / 待确认**
+
+- 未执行任何 git 操作（需用户明确批准）；本次仅改静态 HTML，**无需重启服务**（浏览器硬刷新即可）。
+- 音质模块宽 361px、压缩模块宽 97px，模块宽度不齐是内容决定的（压缩仅 2 个参数），如希望视觉更均衡可再议。
+
+---
+
 ## 2026-09-30 — 修复卡片内层灰底与「使用上一次」按钮样式（整体复检）
 
 > 目的：用户反馈「使用上一次」按钮样式很怪、没有上下间距，要求整体复检。复检后发现上一轮只处理了问题的一半：Gradio 6 的 `gr.Group` 真实结构是「外层 `gr-group.y2-sec`（卡片）→ 内层 `gr-group.y2-sec` → **`.styler`（真正的内容容器）** → 各组件」，而上一轮只把内层 `gr-group` 清零，漏掉了夹在中间的 `.styler`。该元素上 Gradio 的原生规则是 `background: var(--border-color-primary); gap: var(--form-gap-width)`，这才是灰底与"没有上下间距"的真正来源。

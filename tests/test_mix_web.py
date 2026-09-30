@@ -424,7 +424,10 @@ def test_page_texts_complete():
                 "播放控制", "取消选择区", "起始", "时长",
                 "音质", "声像", "低频", "中频", "高频", "高通", "低通",
                 "分贝", "Hz（0 = 关闭）",
-                "压缩", "阈值", "比率", "回声", "延迟", "延迟（0 = 自动 250ms）", "反馈", "混合"):
+                "压缩", "阈值", "比率", "回声", "延迟", "延迟（0 = 自动 250ms）", "反馈", "混合",
+                "归零", "全部复位到中性值", "FX 工具", "开关", "正常", "旁通",
+                "旁通本轨全部音质与音效", "预设", "应用", "保存为预设…", "预设名称",
+                "中性", "复制到", "复制", "全部其他轨"):
         assert en[key] != zh[key], key
     # 电平表 / GR 表标签为音频术语，中英一致（不参与「译文不同」抽查）
     for key in ("IN", "OUT", "GR"):
@@ -548,6 +551,47 @@ def test_editor_defaults_hotkey_and_stepper():
     assert ".eqLowEl.setV(t.eqLow)" in page
     assert "drawEqCurve(t);" in page                 # applyTrackState 回灌后重绘
     assert "drawEqCurve(track);" in page             # 旋钮 onChange 驱动重绘
+
+
+def test_editor_fx_reset_tools_presets_and_embed_fit():
+    """第三批：内嵌自适应高度、音质/压缩/回声一键归零、FX 工具模块（旁通/预设/复制）。"""
+    page = (WEBUI_DIR / "static" / "multitrack" / "index.html").read_text(encoding="utf-8")
+    # 内嵌自适应高度：同源反向改写自身 iframe 高度 + ResizeObserver 跟随内容
+    for token in ("fitParentHeight", "watchEmbedHeight", "window.frameElement",
+                  "ResizeObserver", "getBoundingClientRect().height"):
+        assert token in page, token
+    assert "watchEmbedHeight();" in page          # 启动时挂上监听
+    assert "fitParentHeight();" in page           # 载入素材后补一次高度
+    # 音质/压缩/回声「一键归零」：控件工厂暴露 resetV，模块标题右侧渲染归零按钮
+    assert "resetV: () => set(neutral, true)" in page
+    assert 'rb.className = "fxmod-r"' in page
+    assert 'rb.textContent = T("归零")' in page
+    assert "eqResets.push(" in page and "dynResets.push(" in page and "echoResets.push(" in page
+    assert 'mkMod("echo", "回声", echoResets)' in page
+    assert "echoResets.push(echoDelayEl.resetV, echoFbEl.resetV, echoMixEl.resetV);" in page
+    # 音质 = 压缩 固定同宽（压缩内容居中），回声自适应
+    assert "--fxmod-w: 362px;" in page
+    assert '.fxmod[data-mod="eq"], .fxmod[data-mod="dyn"] { width: var(--fxmod-w); }' in page
+    assert '.fxmod[data-mod="dyn"] .fxmod-b { align-items: center; }' in page
+    # FX 工具模块（独占整行、内部横向均布）：旁通开关 / 预设（内置+自定义）/ 复制到其他轨
+    assert 'mkMod("tool", "FX 工具")' in page
+    assert '.fxmod[data-mod="tool"] { flex: 1 1 100%; }' in page
+    assert ".fxmod[data-mod=\"tool\"] .fxmod-b { flex-direction: row;" in page
+    for token in ("ftrow", "ftlbl", "ftsel", "ftbtn", "ftbtn wfull", "fxToolsPaint"):
+        assert token in page, token
+    # 旁通：只压暗被影响的处理模块，弹回时参数不变（前端推中性值，后端不生成滤镜）
+    assert ".fxpanel.fx-off .fxmod:not([data-mod=\"tool\"]), .fxpanel.fx-off .fxmeter" in page
+    assert "const v = s.fxOn === false" in page
+    # 工程契约 version 1 新增 fx_on：前端 buildPayload 写出、applyTrackState 回灌
+    assert "fx_on: t.fxOn !== false," in page
+    assert "t.fxOn = st.fx_on === undefined ? true : !!st.fx_on;" in page
+    # FX 预设：内置三档 + localStorage 自定义（保存项为下拉里的特殊选项）
+    assert "FX_PRESET_BUILTIN" in page and "FX_PRESET_STORE" in page
+    assert '"yue2.mix.fxPresets"' in page
+    assert 'opt("__save__", T("保存为预设…"))' in page
+    # 复制 FX：目标列表在展开时惰性重建（此时轨道列表才完整），含「全部其他轨」
+    assert 'opt("__all__", T("全部其他轨"))' in page
+    assert "o.fxOn = track.fxOn;" in page          # 旁通状态一并复制
 
 
 def test_editor_meters_wiring_is_bypass_only():

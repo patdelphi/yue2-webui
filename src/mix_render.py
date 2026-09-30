@@ -92,6 +92,8 @@ class MixTrack:
     音效参数（P2）默认同样中性：
         comp_th/comp_ratio 压缩阈值 dB 与比率（0dB / 1 = 不压缩）；
         echo_delay/echo_fb/echo_mix 回声延迟 ms、反馈、混合（混合 0 = 关闭）。
+    旁通：
+        fx_on=False 时上面全部音质/音效滤镜都不生成（参数仍解析保留，便于恢复/A-B）。
     """
     id: str
     name: str
@@ -99,6 +101,7 @@ class MixTrack:
     gain_db: float = 0.0
     mute: bool = False
     clips: list = field(default_factory=list)
+    fx_on: bool = True
     pan: float = 0.0
     eq_low: float = 0.0
     eq_mid: float = 0.0
@@ -217,7 +220,8 @@ def _parse_track(raw, idx: int, outputs_root: Path) -> MixTrack:
         "echo_mix": _clamp(_as_float(raw.get("echo_mix"), 0.0),
                            _ECHO_MIX_MIN, _ECHO_MIX_MAX),
     }
-    return MixTrack(id=tid, name=name, src=src, gain_db=gain, mute=mute, clips=clips, **fx)
+    return MixTrack(id=tid, name=name, src=src, gain_db=gain, mute=mute, clips=clips,
+                    fx_on=bool(raw.get("fx_on", True)), **fx)
 
 
 def parse_mix_project(payload, webui_root) -> MixProject:
@@ -319,7 +323,12 @@ def _echo_filter(track) -> str:
 
 
 def _fx_filters(track) -> list:
-    """每轨音质/音效滤镜：高通→低通→低中高 EQ→声像→压缩→回声；中性参数不产生滤镜。"""
+    """每轨音质/音效滤镜：高通→低通→低中高 EQ→声像→压缩→回声；中性参数不产生滤镜。
+
+    旁通（fx_on=False）时整条链直接置空 —— 与前端 applyFxParams 把节点推回中性值等价。
+    """
+    if not track.fx_on:
+        return []
     out = []
     if track.hpf > 0:
         out.append(f"highpass=f={_num(track.hpf)}:width_type=q:width=0.707")

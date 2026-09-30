@@ -410,6 +410,27 @@ def test_fx_filters_p2_order_after_pan(webui_root: Path):
     assert _fx_filters(neutral) == []
 
 
+def test_fx_bypass_skips_all_filters(webui_root: Path):
+    """旁通（fx_on=False）：音质/音效滤镜全部不生成，但参数仍解析保留（便于恢复/A-B）。"""
+    src = "outputs/separations_20260927_104930/demo_20260927_104930_vocals.wav"
+    fx = {"pan": -0.5, "eq_low": 3.0, "hpf": 100, "lpf": 8000,
+          "comp_th": -18, "comp_ratio": 3.0, "echo_mix": 0.4, "echo_fb": 0.4}
+    active = parse_mix_project(
+        _payload(tracks=[dict(id="t", src=src, clips=[], **fx)]), webui_root).tracks[0]
+    assert active.fx_on is True                  # 缺省 = 正常（向后兼容旧工程）
+    assert _fx_filters(active) != []
+
+    bypassed = parse_mix_project(
+        _payload(tracks=[dict(id="t", src=src, clips=[], fx_on=False, **fx)]),
+        webui_root).tracks[0]
+    assert bypassed.fx_on is False
+    assert _fx_filters(bypassed) == []           # 滤镜链清空
+    # 参数原样保留，便于取消旁通后恢复
+    assert (bypassed.pan, bypassed.eq_low, bypassed.hpf, bypassed.lpf,
+            bypassed.comp_th, bypassed.comp_ratio, bypassed.echo_mix,
+            bypassed.echo_fb) == (-0.5, 3.0, 100.0, 8000.0, -18.0, 3.0, 0.4, 0.4)
+
+
 def test_build_cmd_includes_fx_after_volume(webui_root: Path):
     """音质/音效滤镜必须排在 volume 之后、adelay 之前（增益→音质音效→时间线偏移）。"""
     src = "outputs/separations_20260927_104930/demo_20260927_104930_vocals.wav"
