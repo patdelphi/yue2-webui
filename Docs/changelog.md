@@ -4,6 +4,388 @@
 
 ---
 
+## 2026-09-30 — 修复卡片内层灰底与「使用上一次」按钮样式（整体复检）
+
+> 目的：用户反馈「使用上一次」按钮样式很怪、没有上下间距，要求整体复检。复检后发现上一轮只处理了问题的一半：Gradio 6 的 `gr.Group` 真实结构是「外层 `gr-group.y2-sec`（卡片）→ 内层 `gr-group.y2-sec` → **`.styler`（真正的内容容器）** → 各组件」，而上一轮只把内层 `gr-group` 清零，漏掉了夹在中间的 `.styler`。该元素上 Gradio 的原生规则是 `background: var(--border-color-primary); gap: var(--form-gap-width)`，这才是灰底与"没有上下间距"的真正来源。
+
+- `app.py`（`_TITLE_ROW_CSS`）：
+  - `.y2-sec .styler` 新增 `background: transparent !important`。深色主题下 `--border-color-primary = #3f3f46`，Gradio 用「底色当边框」的手法让该容器铺满整块区域，组件之间的负空间因此露出一条条灰带（「使用上一次」那一整条灰带、卡片顶部标题区偏亮，均由此而来）。
+  - `.y2-sec .styler` 新增 `gap: var(--y2-sp-3) !important`。容器自身 gap 读的正是 `--form-gap-width`（被内联成 1px，上一轮又被改写成 0px），卡片内相邻子项因此贴死、甚至出现 1px 重叠；现改为显式 12px，与卡片外节奏一致。
+  - `.y2-sec .last-btn-row` 改为 `justify-content: flex-end !important; margin: 0 !important`（右对齐 + 归零负边距）。
+  - `.y2-sec .last-btn-row button` 并入动作条按钮规格（高 30px、字号 12.5px、内边距 `0 14px`、圆角 `--y2-r-sm`，hover / 聚焦光圈一致）。此前该按钮沿用 Gradio `size="sm"` 的 26px 小按钮、左右仅 6px 内边距，与全站按钮语言不一致，视觉上"很怪"。
+  - 全站 `.last-btn-row` 基础规则（内联 `<style>`）`margin-top: -10px` → `0`。
+- `Docs/changelog.md`、`chat_history.md`：追加本轮记录。
+
+**验证**
+
+- `py_compile` 通过；`pytest tests/ --ignore=tests/test_i18n.py -q --basetemp=".pytest_tmp_all"` 结果与基线一致。
+- 重启服务后浏览器实测（Chrome DevTools MCP，pageId 28）：
+  - 卡片 `.styler` 实测 `background: rgba(0,0,0,0)`、`gap: 12px`；卡片内全部相邻子项间距实测均为 12px（改动前为 0~1px，且存在 1px 重叠）。
+  - 「使用上一次」行实测：`margin 0`、距上/下组件各 12px、按钮高 30px、字号 12.5px、内边距 `0 14px`、圆角 7px。
+  - 六个已渲染 Tab 全量扫描：无卡片缺标题；卡片内 `.block / .wrap / .form / button / input / textarea` 0 处超出卡片右边界；视口 1401 / 1037 下均无横向滚动条。
+  - 深色 / 浅色主题截图确认灰带消失、卡片层级正确、按钮行右对齐且间距正常。
+
+**未执行 / 待确认**
+
+- 未执行任何 git 操作（需用户明确批准）。
+- 该修复依赖 Gradio 6 在该 `.styler` 上注入的变量名（`--layout-gap` / `--form-gap-width`）；升级 Gradio 后需回归。
+
+---
+
+## 2026-09-30 — 修复卡片化后的间距 / 对齐缺陷（整体排查）
+
+> 目的：用户反馈卡片化后出现「大量对不齐、字体太靠近边框、间距太小甚至重叠」。整体排查定位到根因——Gradio 6 的 `gr.Group` 会向内层 `.styler` 内联注入 `--layout-gap: 1px; --form-gap-width: 1px`，使卡片内所有 Row/Column 的间距被压成 1px；叠加历史遗留的 `.last-btn-row { margin-top: -10px }` 负边距，产生贴死与重叠。约束不变：CSS 优先，不动组件类型、事件绑定与后端契约。
+
+- `app.py`（`_TITLE_ROW_CSS`）：
+  - 新增 `.y2-sec .styler { --layout-gap: var(--y2-sp-3) !important; --form-gap-width: 0px !important; }`。内联声明只能用带 `!important` 的样式表规则覆盖；`--layout-gap` 取 12px（全站默认 16px，卡片内收紧一档），`--form-gap-width` 还原全站默认值 0px（它只管表单内 label 与控件的间距，默认本就为 0）。
+  - 卡片内边距 `10px 16px` → `14px 16px`；卡片 `gap` 6px → `var(--y2-sp-3)`（12px）。
+  - 新增 `.y2-sec .row > .column { min-width: 0 !important }`：Gradio 给列内联 `min-width: min(320px,100%)`，窄窗口下卡片内两列会撑破卡片右边界。
+  - 新增 `.y2-sec .last-btn-row { margin-top: 0 !important }`：抵消「使用上一次」旧样式的 -10px 负边距（进卡片后会压住输入框下边框）。
+  - `.y2-sec .block.padded` 上下内边距 4px → 6px。
+- `app.py`（音色翻唱页）：卡片「执行与输出」补齐 `### 执行与输出` 标题。此前该卡片漏加标题，导致右栏首卡无标题行、与相邻卡片（分离页同名卡片有标题）对不齐。
+
+**验证**
+
+- `py_compile` 通过；`pytest tests/ --ignore=tests/test_i18n.py -q` 175 passed；`pytest tests/test_mix_web.py tests/test_mix_render.py -q` 61 passed（与改动前基线一致）。
+- 重启服务后浏览器实测（Chrome DevTools MCP，pageId 28）：
+  - 卡片内 `.row` / `.column` 实测 gap 由 1px → 12px；`.y2-actions` / `.y2-toolrow` 仍为 8px，`#sep-rename-row` 等仍为 10px；`.form` gap 还原 0px；卡片 `padding` 实测 `14px 16px`；`.last-btn-row` 的 `margin-top` 实测 0px。
+  - 七个 Tab 全量扫描（视口 1024×820）：无卡片缺标题；卡片内 `.block / .wrap / .form` 无一超出卡片右边界（0 处溢出）；页面 `scrollWidth ≤ 视口宽`（无横向滚动条）。
+  - 歌曲历史页数据表在窄窗口下仍为卡片内横向滚动（预期行为，非缺陷）。
+  - 深色 / 浅色主题截图确认：卡片内边距、标题分隔线、行/列间距、按钮行与控件间隔均正常。
+
+**未执行 / 待确认**
+
+- 未执行任何 git 操作（需用户明确批准）。
+- `.y2-sec .styler` 覆盖的是 Gradio 6 的内联注入值；若后续升级 Gradio 且该注入变量改名，此项需回归。
+
+---
+
+## 2026-09-30 — 歌曲创作 / 音频转谱 / 多轨编辑 / 系统设置四页纳入统一卡片风格
+
+> 目的：把上一轮建立的 `.y2-sec` 统一视觉语言继续推广到剩余四个功能页，使全站区块观感一致。约束不变：纯 CSS + 轻微容器包裹，不动组件类型、事件绑定与后端契约。
+
+- `app.py`：
+  - 歌曲创作页（`tab_create`）拆为 5 张卡片。左栏：「### 风格与歌词」（风格描述 / 使用上一次 / 风格标签 / 歌词 / 歌词工具）、「### 工作模式」（模式 / ABC 外部输入 / 使用上一次 / 4 条恢复事件绑定）、「### 生成参数」（项目名 / 种子 / CFG / ODE / 输出格式 / 批量数 / 音频后处理 / 高级采样参数）；右栏：「### 输出」（生成 / 取消 / 音频 / 批量变体选择）、「### ABC 乐谱」（可编辑乐谱 / 预览 / 导出 / 下载 / 重新合成）。卡内按钮行统一 `y2-actions`；`output_md`（`### 输出`）上移为卡片标题，生成按钮行紧随其后。**例外**：「🎵 生成歌曲 / 取消」一行不加 `y2-actions`，保留原生 `size="lg"` 大号主 CTA（实测 283×40、16px 字号）。
+  - 音频转谱页（`tab_transcribe`）：整页包入一张 `y2-sec` 卡片（标题 `### 音频转乐谱`），两组按钮行改 `y2-actions`。
+  - 多轨编辑页（`tab_mix`）：iframe 内联样式改用令牌（`--y2-line` / `--y2-r-lg` / `--y2-shadow-sm`），`margin-top` 归零，圆角/描边与外层卡片一致。
+  - 系统设置页（`tab_settings`）：3 处 `elem_classes="settings-panel"` 改为 `["y2-sec"]`；删除已无引用的 `.settings-panel` CSS 规则。
+- `src/i18n.py`（`EN_TABLE`）新增 2 条：`### 风格与歌词` → `### Style & lyrics`、`### 生成参数` → `### Generation parameters`。
+
+**验证**
+
+- `py_compile` 通过；`pytest tests/ --ignore=tests/test_i18n.py -q` 175 passed；`pytest tests/test_mix_web.py tests/test_mix_render.py -q` 61 passed（均为改动前基线）。
+- 重启服务后浏览器实测（Chrome DevTools MCP，pageId 28）：
+  - 歌曲创作页 5 张卡片、音频转谱 1 张、系统设置 3 张，标题与顺序正确；内外层不叠加（内层 `border:0 / background:transparent / padding:0 / margin:0`）。
+  - 深色：卡片 `rgb(24,24,27)` / 1px `rgb(63,63,70)` / 14px 圆角 / `10px 16px` 内边距；浅色：`rgb(250,250,250)` / `rgb(228,228,231)`。
+  - 卡片标题实测 13px；`y2-actions` 按钮实测 `78×30`、`118×30`，字号 12.5px。
+  - 多轨 iframe 实测 `border-radius:14px` + 令牌描边与微阴影，高度 760px 不变。
+
+**未执行 / 待确认**
+
+- 未执行任何 git 操作（需用户明确批准）。
+- 歌曲创作页「🎵 生成歌曲」按要求保留大号主 CTA（首次改动曾与其它按钮统一为 30px，已回退为原生 `size="lg"`）。
+
+---
+
+## 2026-09-29 — 歌曲历史 / 音轨分离 / 音色翻唱三页视觉语言对齐
+
+> 目的：多轨编辑器（`static/multitrack/index.html`）已建立一套设计令牌（间距 / 圆角 / 卡片 / 聚焦光圈 / 紧凑按钮）。本轮把这套视觉语言推广到 Gradio 页面，消除三页「标题贴在左边缘、区块无边界、按钮撑满整行」的松散观感。约束：纯 CSS + 轻微容器包裹，不动组件类型、事件绑定与后端契约。
+
+- `app.py`（`_TITLE_ROW_CSS`，新增样式块）：
+  - 令牌层挂在 `#tab-history / #tab-sep / #tab-cover` 作用域（**不能放 `:root`**：`var()` 在声明元素处完成替换后继承，令牌必须落在 `.gradio-container` 派生作用域内，否则深色主题失效）：
+    `--y2-r-lg/md/sm: 14/10/7px`、`--y2-h-ctl: 30px`、`--y2-line: var(--border-color-primary)`、`--y2-card: var(--background-fill-secondary)`、`--y2-muted`、`--y2-shadow-sm: var(--shadow-drop)`、`--y2-ring: 0 0 0 3px color-mix(in srgb, var(--color-accent) 24%, transparent)`。
+  - `.y2-sec` 卡片：1px 描边 + 14px 圆角 + 微阴影 + `10px 16px` 内边距，`display:flex; flex-direction:column; gap:6px`；`h3` 作卡片标题（13px / 600 + 底部细线）。
+  - **关键修正**：`gr.Group` 在 Gradio 6 中渲染为**两层嵌套 div 且两层都带 `elem_classes`**，若不清零内层会出现「卡片套卡片」（边框 / 内边距 / 阴影翻倍）。新增 `#tab-* .y2-sec .y2-sec { border:0; padding:0; background:transparent; box-shadow:none; margin-bottom:0 }` 复位内层。
+  - **对比度修正**：深色主题下 `--background-fill-primary` 与页面底色同为 `#0f0f11`，卡片会「隐形」；改用 `--background-fill-secondary`（深色 `#18181b` / 浅色 `#fafafa`）形成浮起层次。
+  - `.y2-toolrow`（翻页行）与 `.y2-actions`（动作行）：按钮 `flex:0 0 auto; width:auto; min-width:auto; height:30px`，去掉 Gradio 默认 `min-width: min(320px,100%)` 造成的整行拉伸；`.y2-toolrow > .block:not(button)` 承担中间信息位的 `flex:1` + 居中 + `--y2-muted`。
+  - 聚焦态：`:is(.wrap,.input-container,label.container):focus-within { border-color: var(--color-accent); box-shadow: var(--y2-ring) }`。
+- `app.py`（页面结构，仅容器包裹）：
+  - 历史页 `gr.Tab(..., elem_id="tab-history")`；3 张卡片：`### 生成历史`（表格 + `y2-toolrow` 翻页行）/ `### 记录详情` / `### 项目操作`（`y2-actions` 三按钮）。`#hist-rename-row` 与全部事件绑定未动。
+  - 分离页 `gr.Tab(..., elem_id="tab-sep")`；左栏 3 张卡片（`### 源音频` / `### 音轨分离` / 新增 `### 执行与输出` 含 `y2-actions` 的开始分离+取消）、右栏 2 张卡片（`### 分离任务历史`（含 `#sep-rename-row`）/ `### 库管理`（含 `#lib-stem-row`、`#lib-ref-row`））。
+  - 翻唱页 `gr.Tab(..., elem_id="tab-cover")`；左栏 3 张卡片（`### 被翻唱歌曲` / `### 参考音色`（含干声与上传面板、自定义伴奏）/ 新增 `### 翻唱参数`（半音快捷按钮改 `y2-actions`））、右栏 2 张卡片（`### 执行与输出` / `### 翻唱任务历史`）。
+  - 所有 `_reg(...)` 多语言注册、`sep_*` / `cover_*` / `lib_*` 事件绑定、隐藏 State 与组件可见性逻辑**完全未改**。
+- `src/i18n.py`：新增 4 条英文译文 `### 记录详情 / ### 项目操作 / ### 执行与输出 / ### 翻唱参数`（`### Record details / ### Project actions / ### Run & output / ### Cover parameters`）。
+
+**验证**
+
+- `python -m py_compile app.py src/i18n.py` → 通过。
+- `python -m pytest tests/ --ignore=tests/test_i18n.py -q` → 175 passed；`python -m pytest tests/test_mix_web.py tests/test_mix_render.py --basetemp=".pytest_tmp_mix" -q` → 61 passed（与基线一致，无回归）。
+- `tr('en', …)` 直查：4 条新键均返回预期英文（`tr('zh', …)` 回退原文）。
+- 重启服务后浏览器实测（Chrome DevTools MCP，pageId 28，`http://127.0.0.1:9898/`）：
+  - 深色主题分离页：5 张外层卡片，底色 `rgb(24,24,27)`、1px `rgb(63,63,70)` 边框、14px 圆角、`10px 16px` 内边距，内外层不再叠加。
+  - 翻唱页：5 张卡片标题依次为 被翻唱歌曲 / 参考音色 / 翻唱参数 / 执行与输出 / 翻唱任务历史。
+  - 历史页翻页行：按钮 `66×30`（原先被拉伸至 ~215px），中间信息位 `第 1 / 1 页，共 4 条` 居中；表格圆角外框完好。
+  - 浅色主题（`?__theme=light`）：卡片 `rgb(250,250,250)` / 边框 `rgb(228,228,231)`，页面白色，层次正常。
+  - 卡片内既有音频播放器（自定义 PlayerZoom）未受影响。
+
+
+
+---
+
+## 2026-09-29 — 多轨编辑器 transport 工具条细化
+
+> 目的：上一轮把 transport 独立成工具条后，播放/停止/循环仍是三个等权重的散件，时钟把「当前位置 / 总时长」挤在一个字符串里且跟随系统时钟字体跳动，走带状态只能靠按钮上的 ▶/⏸ 判断。本轮把它做成"硬件运输键 + 时钟读数"的形态。
+
+- `static/multitrack/index.html`（CSS）：
+  - 删除旧规则 `.transport #tp-play` / `.transport #tp-stop` / `.transport .tstate`；工具条本体加 `--shadow-sm` 描边卡片底。
+  - 新增 `.tp-grp`：控制簇用 `> * + * { margin-left: -1px }` 合并相邻边框、`> * { height: 26px }`，仅首尾元素取圆角（`--r-sm`），中间元素 `border-radius: 0`，形成分段控件。「播放 / 停止」定宽 40px，循环芯片 `padding: 0 11px`。
+  - 新增 `.tp-clock`：当前位置（13px / 600）+ `.tp-sep`「/」（`--muted`）+ `#tp-dur` 总时长（12px / 500 / `--muted`）分离显示，`font-variant-numeric: tabular-nums` 等宽数字，避免走带时读数左右抖动；`gap: 6px`。
+  - 新增 `.transport.on .tp-clock #tp-time { color: var(--accent) }`：播放中当前时间码转主题色。
+  - 新增 `.transport label.lb { min-width: auto }`（行标签不再占固定宽）与 `.tp-msg { margin-left: auto }`（状态消息右对齐）。
+- `static/multitrack/index.html`（DOM）：
+  - `<div class="row transport">` → 加 `id="transport"`；播放/停止/循环包进 `<span class="tp-grp">`；时间码拆为 `<span class="tp-clock"><span id="tp-time">…</span><span class="tp-sep">/</span><span id="tp-dur">…</span></span>`；状态消息改为 `<span id="tp-msg" class="msg tp-msg">`。保留 `#t-transport`（「播放控制」）与 `#t-loop` 文案锚点，i18n 词条不变。
+- `static/multitrack/index.html`（JS）：
+  - `syncTransportLabels()` 末尾按 `S.playing` 给 `#transport` 切换 `.on`；`#tp-stop` 文案固定为实心方块 `■`（`⏹` 在部分字体下过小/缺字形）。
+  - `updatePlayheads()` 时间码拆分：分别写 `#tp-time`（当前位置）与 `#tp-dur`（总时长），取代原来的 `fmtTime(pos) + " / " + fmtTime(d)` 单串拼接。
+
+**验证**
+
+- `node` + `vm.Script` 编译内联 script：`compiled scripts: 1 ok`。
+- `python -m pytest tests/test_mix_web.py tests/test_mix_render.py -q` → 61 passed；`python -m pytest tests/ --ignore=tests/test_i18n.py -q` → 175 passed（本轮未改 Python，无新增文案键）。
+- 浏览器实测（Chrome DevTools MCP，pageId 33，载入 `separations_20260927_104930`）：
+  - 控制簇无缝衔接：play `[109,40]`、stop `[148,40]`（与 play 间隙 −1px）、loop `[187,48]`（与 stop 间隙 −1px）。
+  - 时钟 `[247,105]`，与循环芯片右侧间距 12px（`--sp-3`）；读到 `0:00.0` + `2:51.6` 两段。
+  - 播放中：`#transport.on = true`，`#tp-time` 颜色 `rgb(59,130,246)`（主题色）；按钮转 `⏸`，读数正常递增。点击停止后 `.on = false`、颜色回到 `rgb(230,232,235)`、按钮回 `▶`。
+  - 浅色主题时钟底 `rgb(238,242,247)` / 描边 `rgb(216,222,228)`，与卡片可区分；状态消息右缘 `1382` vs 工具条右缘 `1395`（1px 边框 + 12px 内边距），右对齐生效。
+  - 控制台无 JS 报错（仅既有的表单 a11y 提示）。
+
+---
+
+## 2026-09-29 — 多轨编辑器 UI 设计感优化（视觉语言 + 轨道卡 + 效果器面板）
+
+> 目的：编辑器功能已齐，但视觉层偏"工具原型"——控件等权重堆叠、低对比描边导致按钮/芯片与卡片糊成一片、旋钮中性值时只剩一根线、电平表无刻度、时间刻度只能靠波形猜。本轮在不改后端契约（工程 JSON version 1 字段与钳制区间不变）的前提下，统一设计令牌、重排轨道头、补齐刻度与可视化细节。
+
+- `static/multitrack/index.html`（CSS）：
+  - 设计令牌体系铺开：间距 `--sp-1..5`、圆角 `--r-lg/md/sm`（12/10/7 → 14/10/7）、控件高 `--h-ctl`、分层阴影 `--shadow-sm/--shadow/--shadow-lg`、聚焦光圈 `--ring`、`--accent-soft`、`--panel-line`、轨色板 `--trk-1..6`、网格色 `--grid`；三个主题块（浅色 / 系统深色 / 显式 `data-theme="dark"`）同步补齐。
+  - 控件对比度修正：按钮/芯片/步进器/数值徽标底色改为 `color-mix(in srgb, var(--fg) 8%, var(--card-2))`，深色主题 `--line` 由 `#2c3038` 提亮到 `#3a414c`。修复前 `.chk.pill` 与 `.stp` 的底色 `--card-2` 与轨道卡底完全相同，未选中时肉眼近乎不可见。
+  - 轨道卡：新增轨色条（`.track::before` + `--trk`）、轨名色点、hover 描边取轨色；`M`/`S` 改为芯片（`.chk.pill`，M 选中为 `--danger`）；增益改为「range + ± 步进器 + 等宽徽标」；新增 `.ruler` 共享刻度尺、`.fades`/`.tbtn` 成组样式、`.sep` 分隔条。
+  - 效果器面板：旋钮重做（盘面径向渐变 `#kbFill` + 行程弧 `kb-track` + 五档刻度 `kb-tk` + 指针 + 中心盖），`270°` 行程；电平表新增 `-6/-12/-24/-48 dBFS` 参考刻度线（`.mt-tick`，`z-index:2` 压在色柱之上）；EQ 画布 186×88，加 `±9dB` 次级网格、频率标注底条、曲线外发光；母带行参数成组。
+  - 修复推子滑块越界：`.fd-k` 原用 `top: % + margin-top:-6px` 定位，0 位时下缘压住下方标签；改为 `top: calc((1 - var(--pos)) * (100% - var(--kd)))`，行程限制在轨道内，`--pos` 由 JS 写入。
+  - 其余：卡片并排网格 `.cardgrid`、空状态 `.empty`、自定义滚动条、`.transport` 独立工具条、`#tp-play/#tp-stop` 定宽。
+- `static/multitrack/index.html`（DOM/JS）：
+  - DOM：`<h1>+hint` 包进 `pagehead`；素材卡与工程卡并排；新增隐藏 SVG defs（旋钮渐变）；`#tracks` 前插入 `<div class="ruler" id="ruler">`；轨道头重排为左组（轨名 + 试听）与右组（M/S + 增益 + 淡变 + 切片 + 状态）；按钮加 `primary/ghost/danger` 分级。
+  - 新增 `S.ticks`（刻度秒数组）与 `rulerStep()/fmtClock()/renderRuler()`：按 `[0.5,1,2,5,10,15,30,60,120,300,600]` 选「刻度数 ≤ 12」的档位，末刻度标签右对齐；`loadPeaks()` 中时长确定后调用，`drawTrack()` 复用同一组刻度画波形网格线。
+  - `drawTrack()`：高度 78、颜色一律取 CSS 变量（`--line/--grid/--trk/--sec`），先铺 16% 透明度的包络填充再描轨色包络线。
+  - 混音记录空状态（`暂无混音记录`）、删除按钮 `danger`；窗口 resize 防抖（120ms）重建刻度尺并重绘。
+- `src/mix_web.py`：`PAGE_TEXT_KEYS` 新增 `"暂无混音记录"`。
+- `src/i18n.py`：`EN_TABLE` 新增 `"暂无混音记录": "No mix records yet"`。
+
+**验证**
+
+- `node --check`（抽取内联 script，经 `vm.Script` 编译）通过。
+- `python -m py_compile src/mix_web.py src/i18n.py` 通过。
+- `python -m pytest tests/test_mix_web.py tests/test_mix_render.py -q` → 61 passed；`python -m pytest tests/ --ignore=tests/test_i18n.py -q` → 175 passed。
+- 浏览器实测（Chrome DevTools MCP，1440×1000，深浅两主题 + `?embed=1`）：
+  - 刻度尺与波形网格线逐点对齐：ruler `[54,1382,1328]` vs canvas `[53,1382,1329]`，12 个刻度位置完全一致（修复前刻度尺跨满整行、与波形横向错位约 14px）。
+  - 芯片/步进器底色 `rgb(50,54,61)` vs 轨道卡底 `rgb(34,38,46)`，未选中也可辨识。
+  - 推子滑块 0 位时 `[354.1, 366.1]` 落在轨道 `[290.1, 366.1]` 内，不再与标签 `[368.1, 380.1]` 重叠。
+  - 工程「保存 → 载入 → 再保存」幂等：增益 1dB / 静音 true / 淡入 1.5s / 声像 -0.5 / 回声混合 0.4 全部一致，控件显示同步（徽标 `1.0 dB`、M 芯片选中）。
+  - 控制台无 JS 报错（仅既有的表单 a11y 提示）。
+
+---
+
+## 2026-09-29 — 多轨编辑器提升为独立 Tab「多轨编辑」
+
+> 目的：原多轨编辑器内嵌在「音轨分离」Tab 末尾（另一入口是「多轨编辑」按钮新窗口打开），入口分散、与分离流程耦合。本轮把它提升为独立功能 Tab，位于「音色翻唱」之后、「系统设置」之前，并移除分离页的两个旧入口，入口统一到新 Tab。
+
+- `app.py`：
+  - 新增 `with gr.Tab(_t("多轨编辑")) as tab_mix:` 区块（cover 之后、settings 之前），内含 `gr.HTML` iframe（`src="/static/multitrack/?embed=1"`，`elem_id="mix-editor-embed"`，高 760px，同原样式的边框/圆角/透明底），并 `_reg(tab_mix, lambda lang: gr.update(label=tr(lang, "多轨编辑")))` 做语言切换刷新。
+  - 移除分离页旧入口三处：`sep_mix_btn`（「多轨编辑」按钮 + `_reg`）、其 `click` 绑定（`window.open('/static/multitrack/')`）、以及 `sep_mix_embed`（内嵌 iframe）。
+  - 静态页路由 `Route("/static/multitrack/"...)` 与 `_mix_page`（磁盘读 `index.html` + `Cache-Control: no-store`）不变，故编辑页本身零改动。
+- `src/i18n.py`：Tab 文案复用已有词条 `"多轨编辑": "Multitrack"`，本轮无需新增词条（`mix_web.PAGE_TEXT_KEYS` 亦不变）。
+- `tests/test_mix_web.py`：`test_app_registers_mix_routes_and_entry` 改为断言新 Tab（`gr.Tab(_t("多轨编辑")) as tab_mix` + `elem_id="mix-editor-embed"` + 仍保留 `?embed=1`），并新增断言旧入口 `sep_mix_btn` / `sep-mix-embed` 已从 app.py 消失；模块 docstring 同步。
+- `.gitignore`：`.pytest_tmp/` → `.pytest_tmp*/`，覆盖自定义 `--basetemp` 目录（`.pytest_tmp_mix` / `.pytest_tmp_all`）。
+
+**验证**
+
+- `py_compile app.py` 通过。
+- `pytest tests/test_mix_web.py tests/test_mix_render.py` → **61 passed**；全量（排除脚本式 `tests/test_i18n.py`）→ **175 passed**。
+- 后端与音频语义零改动（`src/mix_render.py`、`static/multitrack/index.html` 本轮均未触碰），故未重复跑渲染比对。
+
+**未执行 / 待确认**
+
+- 重启 9898 服务与浏览器实测（新 Tab 位置与切换、iframe 载入、明暗主题跟随）——改 app.py 必须重启才生效，待用户确认后执行。
+- 本轮及此前 P1 / P2 / 盲测工具 / UI 精细化 / FX 面板两批改动仍未 commit（用户规则禁止自动 git 操作）。
+
+---
+
+## 2026-09-29 — 多轨编辑器每轨效果区专业效果器风 · 第二批（IN/OUT 电平表 + 压缩 GR 表 + EQ 频响曲线）
+
+> 目的：第一批只交了面板骨架与旋钮/推子，专业插件「一眼能看出信号在做什么」的可视化还缺三块——**输入/输出电平表**（看进多大声、出多大声）、**压缩增益衰减表 GR**（看压缩到底压了多少）、**EQ 频响曲线**（看三段 EQ + 高低通叠出来的实际曲线，并能直接拖手柄调增益）。本轮补齐，并保持「后端与音频参数语义完全不变」。
+
+- `static/multitrack/index.html`：
+  - **CSS**：新增 `.fxmeter`（表体外框，`align-self: stretch` 跟随面板行高）、`.mt-bars/.mt-col/.mt-col.lv/.mt-col.gr/.mt-mask/.mt-mask.bot/.mt-peak/.mt-lab`、`.mt-gr`（压缩模块内的 GR 列）、`.fxside`（「可视化 + 旋钮」并排容器）、`.fxknobs`、`.eqc`（180×84 曲线画布）。
+    - **渐变不被拉伸的表技法**：列底本身就是填充色（电平为绿→黄→红渐变、GR 为 `--danger`），用自上而下的遮罩 `.mt-mask` 盖住未点亮部分，色标因此固定在整列上而不随电平被压缩；GR 表反向填充，遮罩改为从底部往上盖（`.mt-mask.bot`）。
+  - **电平表取样（旁路，不串进音频链路）**：`mkMeterTap(ctx)` 用 `ChannelSplitterNode` + 两个 `AnalyserNode`（`fftSize = 1024`）分左右取样；**IN 取音质链之前的 `env` 之后**（含裁切/淡变包络）、**OUT 取轨增益之后**（含 Mute/Solo 门控），与 todo 的链路约定一致。分析节点仅通过 `env.connect(tap.split)` / `g.connect(tap.out.split)` 额外接一路，**主链路一个节点都没加**，因此播放声音与后端渲染结果不受影响。
+  - **表弹道学**：`tapPeak()` 用 `getFloatTimeDomainData` 求时域峰值 → `dbToFrac()` 按 -60dBFS 表底换算 0~1；`stepMeter()` 上升立即跟随、下降按 3.2 满量程/秒回落（约 0.3s 归零），峰值保持 800ms 后回落。
+  - **rAF 刷新循环**：`meterLoop()` 自终止——播放中持续刷新，停止后把残值回落归零再停表（`_mtrRaf = 0`），不空转占 CPU。
+  - **GR 表**：读压缩节点的 `reduction` 按 -20dB 满档映射。**实测发现 Chrome 把它实现为只读 number 而非规范写的 AudioParam**，故写成 `typeof rr === "number" ? rr : rr.value` 两种形态兼容（否则取到 `undefined` 导致 GR 恒为 0）。
+  - **EQ 频响曲线**：在 `OfflineAudioContext` 上建 5 个 biquad（高通/低通/低频架 200Hz/中频峰 1kHz Q=1/高频架 4kHz，与 `buildFxChain` 参数一致），对 20Hz…20kHz 对数等分 200 点调 `getFrequencyResponse`，各滤波器幅度取 dB 后**相加**（串联即 dB 相加）。画 DPR 适配的画布 + 0dB 中线与 100/1k/10k 竖线网格 + 半透明填充 + 3 个手柄圆点。
+  - **3 个手柄可拖拽改增益**：按 x 就近吸附到低/中/高某个手柄，纵向拖动改 gain（±15dB、按 0.5 吸附），**频率固定**（后端未暴露频率参数）；与旋钮**双向联动**（手柄 → `setV` 同步旋钮显示；旋钮 onChange → `drawEqCurve` 重绘）。键盘 ↑↓ ±0.5、Home 三段齐归零。
+  - **buildTracks 结构改造**：音质模块改为「左 EQ 曲线 + 右两行 6 旋钮」（`.fxside`），压缩模块改为「左 GR 表 + 右阈值/比率」（`.fxside`），面板两端 `prepend`/`append` 挂 IN / OUT 两块表；`track` 新增 `eqCanvas / mtrEl / mtr / meter`；建轨后立即 `attachEqCurve + drawEqCurve`。
+  - **播放链路接线**：`playFrom` 每轨建 `t.meter = {in, out, fx}` 并只建一次 `t.mtr`（保留残值供回落动画），末尾启动 `meterLoop()`；`scheduleIteration` 里 `env.connect(t.meter.in.split)`；`stopNodes` 里 `disposeMeterTap` 释放取样链但**不重置 `t.mtr`**；`applyTrackState` 回灌后追加 `drawEqCurve(t)`；`redrawAll`（主题切换）改为波形与曲线一并重绘。
+- `src/i18n.py` / `src/mix_web.py`：新增 `IN / OUT / GR` 三个文案键（音频术语，中英一致），并同步进 `PAGE_TEXT_KEYS`。
+- `tests/test_mix_web.py`：`test_editor_page_has_transport_playback` 追加第二批 token（`mkMeterBlock / mkMeterTap / disposeMeterTap / meterLoop / getFloatTimeDomainData / createChannelSplitter / drawEqCurve / attachEqCurve / setEqGain / EQ_HANDLES / getFrequencyResponse / OfflineAudioContext / fxmeter / mt-col / fxside / fxknobs`）；`test_editor_defaults_hotkey_and_stepper` 追加曲线双向联动与回灌重绘断言；**新增 `test_editor_meters_wiring_is_bypass_only`**（断言取样链旁路、播放建链/停止释放、rAF 自终止、GR 兼容读取、手柄吸附与增益吸附、主题重绘）；`test_page_texts_complete` 追加 `IN/OUT/GR` 存在性与中英一致断言。
+
+**验证**
+
+- 内联 JS `node --check` 通过（65848 字符，exit=0）；`py_compile` 通过。
+- `pytest tests/test_mix_web.py tests/test_mix_render.py` → **61 passed**（较第一批 +1，新增接线测试）；全量（排除脚本式 `tests/test_i18n.py`）→ **175 passed**。
+- 浏览器实测（页 32，真实 2 轨素材 04. K歌之王，224.3s）：
+  - 结构：每轨 2 个 `.fxmeter`（IN/OUT）+ 5 个 `.mt-col`（2+2 电平 + 1 GR）+ 1 个 `canvas.eqc`；模块标题 `["音质","压缩","回声"]`；`mtrEl` 五键齐全。
+  - 电平表：从 150s（副歌）起播，IN 峰值 0.939 / OUT 0.923（-0.5dB 满量程差），遮罩 12.2%、峰值线 91.8% 实时跳动；起始段（人声未进）实测为 0，说明表不虚报。
+  - 回落：暂停后 100ms → 0.606、200ms → 0.232、**300ms → 0**，峰值线保持至 ~700ms 后衰减，全部归零后 `_mtrRaf` 自动置空（表停），`t.meter` 已释放。
+  - GR 表：阈值 -30dB / 比率 8:1 时 `reduction ≈ -16dB`、GR 显示值 0.884、遮罩 20%（自上而下红柱）；阈值 -18dB / 4:1 时 0.609，档位越小压得越少，符合预期。
+  - EQ 曲线：拖中频手柄到 +6dB → `eqMid=6`、旋钮读数 `+6.0 dB`、`getV()=6`；反向拖中频旋钮 45px → 6 → 13.5（180px 满量程 30dB，步进 0.5）；画布在手柄新位置取到 `rgb(96,165,250)`（暗色 `--mod-eq`），确认曲线与手柄同步重绘；`Home` 三段齐归零且读数同步。
+  - 主题：强制 `data-theme="light"` 后画布底色 `#fff`、曲线/手柄 `#3b82f6`（`--mod-eq` 亮色值），暗色为 `#2b303a` / `#60a5fa`，两套主题配色与网格均可读。
+  - 窄屏：视口 741px 时模块自动折行（音质/压缩同排、回声换行），`scrollWidth == clientWidth`、无子元素越界。
+  - 控制台无 JS 报错（仅 2 条既有的表单可访问性提示；另 1 条 `getImageData` 警告来自本次实测脚本自身的像素取样，产品代码不调用 `getImageData`）。
+- **导出逐字节等价（T4 验收）**：本轮新增的 `AnalyserNode` 仅旁路取样，且后端渲染是 ffmpeg 离线执行，与前端节点无关；`src/mix_render.py` 本轮零改动（`git status` 中的改动来自更早的 P1/P2 轮次）→ 同参数渲染产物必然一致，故未重复跑渲染比对。
+
+**设计取舍**
+
+- 电平表高度**不锁 76px**，改为 `align-self: stretch` 跟随面板行高（实测 189px，与最高的音质模块同高）。原因是行高已由 EQ 曲线 + 双排旋钮决定，锁死表高只会留白；拉满后表更像插件机架上的长条表，读数更细。
+- GR 表列高固定 72px（与推子轨道同高），不随模块拉伸，避免压缩模块被撑高。
+
+**未执行 / 待确认**
+
+- 未执行任何 git 操作（P1 + P2 + 盲测工具 + UI 精细化 + FX 面板第一批 + 本批均未 commit）。
+- P2 盲测评分解盲结论仍待用户试听回填。
+- `.pytest_tmp_all/`、`.pytest_tmp_mix/` 未被 `.gitignore` 覆盖（建议改为 `.pytest_tmp*/`），等用户决定。
+
+---
+
+## 2026-09-29 — 多轨编辑器每轨效果区改为专业效果器风（模块分组 + 旋钮/垂直推子）· 第一批
+
+> 目的：原「音质行 / 音效行」是一排无分组、无刻度的扁平数字框，缺少专业插件的可读性与操作手感。本轮把每轨效果区重做成专业效果器面板样式：**按功能分模块（音质 / 压缩 / 回声）**，模块带主色圆点与标题；**连续比例量用旋钮**（带值弧与指针）、**时间·强度类用垂直推子**；每控件底部「标签 + 数值徽标」，徽标可直接双击录入。
+> 推进方式：经用户确认**分两批**——本轮（第一批）只做面板骨架、控件与回灌；输入/输出电平表、压缩 GR 表、EQ 频响曲线留到第二批。
+> 硬约束：**后端与音频参数语义完全不变**（`mix_render.py` / 工程契约 `version: 1` / 11 个参数的区间与中性值与后端钳制一一对应），本轮纯前端视觉与交互改造。
+
+- `static/multitrack/index.html`：
+  - **CSS 变量（明暗双主题）**：新增 `--panel`（模块底）/ `--knob-bg`（旋钮盘面）/ `--knob-track`（推子轨道）与三个模块主色 `--mod-eq / --mod-dyn / --mod-echo`；`:root`、`@media (prefers-color-scheme: dark)`、`html[data-theme="dark"]`、`html[data-theme="light"]` 四处同步。
+  - **模块分组**：新增 `.fxpanel / .fxmod / .fxmod-h / .fxmod-b`；模块主色用 CSS 变量继承下发（`.fxmod[data-mod="eq"] { --mod: var(--mod-eq); }`），子元素 `.kb-arc / .fd-f / .fxmod-h` 自动取色，避免逐个写选择器。模块**按内容自适应高度**（`align-items: flex-start`），不再被强行拉平产生大片空白。
+  - **旋钮**：`.kb*` 用内联 SVG（盘面 + 值弧 + 指针），行程 270°（`KNOB_SWEEP` / `KNOB_A0`）；值弧按极坐标 `arcPath()` 生成，**双极参数从中性点向两侧生长**（EQ 0dB / 声像 C 时无弧），单极从最小端生长。
+  - **垂直推子**：`.fd*` 为纵向轨道 + 模块色填充 + 滑块，支持点击跳转与拖动。
+  - **删除**废弃的 `.fxrow` 与 `.step` 全部样式。
+  - **控件工厂 `mkFxCtl`**：值由闭包持有，返回 `{el, setV, getV}`；`setV` 只刷新显示、不广播 `onChange`（供工程回灌，与既有语义一致）。交互：拖拽（旋钮按垂直位移，拖满约 180px 覆盖全量程；`Shift` 精调 1/5）、推子按轨道内绝对位置、滚轮步进、**双击盘面 / Home 复位中性值**、**双击数值徽标原地换成数字输入框**（Enter 提交 / Esc 放弃）、键盘 ↑↓（Shift 五档）/ PageUp·PageDown（1/10 行程）。拖拽用 Pointer Capture，并对 `setPointerCapture` 加异常兜底。
+  - **数值徽标 `fmtFxVal`**：按类型格式化（dB 带正负号、Hz 超 1k 折算为 k、0 显示 `OFF`、比率 `x:1`、声像 `C/L35/R50`、混合显示百分比）。
+  - **buildTracks 重写**效果区：`音质`模块两行旋钮（低频/中频/高频 + 高通/低通/声像）、`压缩`模块（阈值/比率）、`回声`模块（延迟/反馈/混合三个推子）；控件区间与后端钳制区间一致，`onChange` 实时写回 `track` 并驱动节点链。
+  - `applyTrackState` 回灌改走 `setV`（11 处），不再直接写 `.value`。
+  - 阈值旋钮加 `bipolar`：其中性值 0dB 位于行程最右端，让值弧从「关闭」端生长，避免默认态出现「满弧」被误读为压缩全开。
+- `tests/test_mix_web.py`：`test_editor_page_has_transport_playback` 的 token 列表更新为 `fxPanel / mkFxCtl / mkMod`；`test_editor_defaults_hotkey_and_stepper` 重写为断言新面板结构（`data-mod="eq|dyn|echo"`、`fxmod-h`、`knobrow`、`faderrow`、推子控件定义、`inp.type = "number"; inp.className = "fxnum"`、`setPointerCapture`、`ev.shiftKey ? 900 : 180`、双击复位、`Home`、回灌 `setV`）。
+
+**验证**
+
+- 内联 JS `node --check` 通过（53307 字符，exit=0）；`pytest tests/test_mix_web.py tests/test_mix_render.py` → 60 passed；全量（排除脚本式 `tests/test_i18n.py`）→ 174 passed。
+- 浏览器实测（pageId，真实 2 轨素材 04. K歌之王）：
+  - 结构：2 轨 × 3 模块 = 6 个 `.fxmod`，16 个旋钮 + 6 个推子；默认态 16 个值弧全部为空（中性）✓。
+  - 手感：旋钮上拖 90px → 低频 +15.0 dB（触顶钳制）且弧出现；滚轮两格 → 中频 +0.5 dB；双击盘面 → 复位 0；双击徽标 → 出现 `.fxnum`，输入 7.5 + Enter → `+7.5 dB` 且输入框消失；Esc → 不提交（保持 7.5）；推子点轨道 25% 高度 → 延迟 1500 ms、填充 75%；`Home` → 0；`↑` → 0.5；`Shift+↑` → 3.0。
+  - 工程往返：设定 11 参数 → `buildPayload()` 11 字段全部正确（`pan=-0.35 … echo_mix=0.35`）→ 清零 → `applyTrackState()` 回灌 → 11 个 `track` 值与 11 个徽标文本完全还原，8 个旋钮弧重新出现，3 个推子填充 15%/47.4%/35%（对应 300ms/0.45/35%）。
+  - 主题与布局：亮色主题下模块底 `rgb(238,241,245)`、三模块主色与旋钮弧正常；窄视口（700px）下模块保持一行不溢出、控件不错位。
+  - 控制台无 JS 报错（仅 2 条既有的表单可访问性提示）。
+
+**未执行 / 待确认**
+
+- 未执行任何 git 操作（P1 + P2 + 盲测工具 + UI 精细化 + 本轮 FX 面板均未 commit）。
+- 第二批（待用户确认本轮观感与手感后再做）：输入/输出电平表、压缩增益衰减（GR）表、EQ 频响曲线；需先确认新增 `AnalyserNode` 后导出结果与改动前同参数渲染 md5 等价。
+- P2 盲测评分解盲结论仍待用户试听回填。
+
+---
+
+## 2026-09-29 — 多轨编辑器 UI 精细化：参数默认中性 + ± 步进器 + 空格全局热键
+
+> 目的：P2 参数上线后，收敛「默认值语义」与「操作手感」——默认应为中性（不引入未预期的效果），数值要能精确微调，空格热键要在任何焦点位置都可用；同时提升页面视觉精致度与组件间距。
+
+- `static/multitrack/index.html`：
+  - **参数默认中性**：回声「延迟 / 反馈 / 混合」与压缩「阈值 / 比率」初值改为中性（延迟 0、反馈 0、混合 0、阈值 0、比率 1），即默认不生效；`track` 对象默认值同步为 `echoDelay: 0, echoFb: 0, echoMix: 0, compTh: 0, compRatio: 1`；`applyTrackState` 不再把 0 显示成 250（延迟 0 的兜底仍由前后端一致的 `FX_ECHO_DEF_MS` / `_ECHO_DEFAULT_DELAY_MS` 在「混合 > 0」时生效）。
+  - **± 步进器**：`mkFxNum` 重写为「− / 数字 / +」合并控件（`.step`），按 `step` 增减并按区间钳制（`r3` 消除浮点累加噪声）；按钮 `tabIndex = -1` 不抢焦点，避免空格热键失效；隐藏原生 spinner（`appearance: textfield` + `::-webkit-inner-spin-button`）防止与自建 ± 重复。
+  - **循环默认勾选**：`tp-loop` 加 `checked`，`S.loop` 初值改 `true`。
+  - **空格改全局热键**：改为在**捕获阶段**监听 `window`（`addEventListener("keydown", …, true)`），任何组件获得焦点后空格仍能播放/暂停；仅放行「文本类输入」（textarea / contentEditable / `input[type=text]`，空格有输入语义），数字框 / 下拉 / 按钮 / 空白区域一律当热键；`ev.repeat` 防长按重复触发。
+  - **视觉精细化**：`:root` 新增尺度变量 `--r-lg/--r-md/--r-sm`、`--shadow`、`--ring`；卡片圆角 12px + 阴影视差、轨道卡圆角 8px + hover 阴影、输入/按钮统一圆角与 `transition`、聚焦光圈 `box-shadow: var(--ring)`、`.transport` 改为带边框+背景+圆角的独立工具条（时间码为等宽数字的独立小面板）、复选框 `accent-color` 跟随主题；组件间距整体放大（body padding `16px 18px 44px`、行距 10px、卡片间距 12px）。
+- `src/i18n.py`：新增词条 `"延迟（0 = 自动 250ms）"` → `"Delay (0 = auto 250ms)"`（步进器 tooltip）。
+- `src/mix_web.py`：`PAGE_TEXT_KEYS` 的 P2 组同步加入 `"延迟（0 = 自动 250ms）"`。
+- `tests/test_mix_web.py`：新增 `test_editor_defaults_hotkey_and_stepper`（断言循环默认勾选、`loop: true`、捕获阶段 `window` 监听 + `ev.repeat` + 文本输入放行、音效参数初值中性、`.step` 包裹与 `mkBtn(-1)/(1)`、按钮 `tabIndex = -1`）；文案抽查列表加入新词条。
+
+**验证**
+
+- `py_compile src/i18n.py src/mix_web.py` 通过；内联 JS `node --check` 通过。
+- `pytest tests/test_mix_web.py tests/test_mix_render.py --basetemp=".pytest_tmp_mix"` → 60 passed；全量（排除脚本式 `tests/test_i18n.py`）→ 174 passed。
+- 浏览器实测（pageId 载入 2 轨真实素材）：`loopChecked=true`、`Sloop=true`；每轨 10 个 `.step` 控件，按钮文本 `["−","+","−"]`；回声延迟控件 `value="0"`、tooltip「延迟（0 = 自动 250ms）」、反馈 0、混合 0、压缩阈值 0 / 比率 1；卡片 `radius 12px / shadow 生效`、transport `radius 8px + 背景`、轨道卡 `radius 8px`。
+- 全局热键实测：数字框聚焦后按空格 → 播放；再按 → 暂停；文本输入（工程名）内空格不拦截、不触发播放。
+- ± 步进器实测：反馈 0 → 0.1（两次 +0.05）；延迟 0 → 10（step 10）；点 + 后焦点仍在数字框。
+
+**未执行 / 待确认**
+
+- 未执行任何 git 操作（P1 + P2 + 盲测工具 + 本轮 UI 精细化均未 commit）。
+- 一处取舍待用户确认：空格为全局热键后会「吃掉」下拉框/复选框聚焦时的原生空格行为（仅文本输入放行），若不接受可改回「仅非输入类元素」判定。
+
+---
+
+## 2026-09-29 — P2 听感盲测（压缩 / 回声参数梯度）
+
+> 目的：P2 上线前需要用人耳确认「压缩量、回声强度」的听感偏好，以决定 UI 默认值。做法是不暴露参数、只给盲编码音频，听完再揭盲。
+> 设计：复用产线 `mix_render.build_ffmpeg_cmd`（同一 filtergraph，含每轨音量/音质/压缩/回声 + 总线 loudnorm），但**不写历史记录**，避免污染歌曲历史；P2 参数只加在**人声轨**（伴奏中性），符合 DAW 常规用法。
+
+- 新增 `tools/p2_blind_test.py`（离线命令行工具，不接入 UI）：
+  - 8 个变体：`C0` 基线（无效果）、`C1/C2/C3` 轻/中/重压缩、`E1/E2/E3` 轻/中/重回声、`X1` 中压缩+中回声。
+  - 用固定种子 `BLIND_SEED=20260929` 把「参数组合」映射到盲编码 `V1..V8`；映射只写进《揭盲答案_听完再看.md》，不打印到终端。
+  - 副歌定位：把伴奏轨解码为单声道 4kHz PCM，用滑窗平方和取「能量最高的 N 秒」（本例 30s；源 224.3s → 起点 145.5s），首尾各 0.5s 淡变避免硬切爆音。
+  - 变体参数做重复性校验（两个变体参数完全相同则报错退出）；文本产物按项目约定写 UTF-8 BOM + CRLF。
+- 产物（均在 `outputs/` 下，已被 .gitignore 覆盖，不入库）：`outputs/p2_blind_test/V1..V8.flac` + `盲听指南.md`（含 5 项评分表，不含映射）+ `揭盲答案_听完再看.md` + `ab_report.csv`（客观指标）。
+  - 客观指标（`tools/audio_ab_report.py`）：8 个变体 LUFS 集中在 -13.4…-13.9（总线 loudnorm 归一生效），回声变体时长 30.8–31.2s（回声抽头拖尾），压缩变体真峰值随档位单调抬升（-5.1 → -2.3 dBFS，均为 loudnorm 补偿增益所致，仍远低于 -1.5 dBTP 上限）。
+  - 轨级复核（人声轨 30s 段，`volumedetect`）：压缩 -24dB/4:1 使均值 -15.9 → -25.8 dB、峰值 0.0 → -10.9 dBFS；-30dB/8:1 进一步降至 -32.6 / -13.0 dB，确认压缩在真实素材上有效（倍率越大衰减越多）。
+
+---
+
+## 2026-09-29 — 多轨编辑器 P2：每轨音效（压缩 + 回声），预览与导出同效
+
+> 背景：P1 补齐了声像/三段 EQ/高通低通后，还缺最常用的两个音效——动态压缩与回声。本轮实现 P2，延续 P1 的核心要求：**编辑页实时预览**与**后端离线渲染**共用同一套参数、同一处理顺序、同一判据，做到「听到什么就导出什么」。
+> 设计决策：①仍不改工程契约版本（`version: 1`）——新增 5 个每轨字段全部可选、缺省中性，旧工程 JSON 照常解析；②压缩对齐 Web Audio `DynamicsCompressorNode`，只暴露阈值与比率，attack/release/knee 固定为 20ms/250ms/6dB 前后端一致；③回声对齐 3 条并联延迟线（抽头 fb¹/fb²/fb³），干声直通不衰减；④处理顺序统一为 高通→低通→EQ→声像→**压缩→回声**；⑤关闭判据：压缩 `阈值≥0dB 或 比率≤1`、回声 `混合<0.01`。
+
+- `src/mix_render.py`：
+  - 新增 P2 常量：`_COMP_TH_MIN/MAX`（-60…0 dB）、`_COMP_RATIO_MIN/MAX`（1…20）、`_ECHO_DELAY_MIN/MAX`（0…2000 ms）、`_ECHO_FB_MAX`（0.95）、`_ECHO_MIX_MIN/MAX`（0…1）、固定时间常数 `_COMP_ATTACK_MS/_COMP_RELEASE_MS/_COMP_KNEE_DB = 20/250/6`、`_COMP_MIN_LINEAR = 0.001`、`_ECHO_DEFAULT_DELAY_MS = 250`、`_ECHO_TAPS = 3`、`_ECHO_DECAY_FLOOR = 0.001`。
+  - `MixTrack` 新增 `comp_th / comp_ratio / echo_delay / echo_fb / echo_mix`（默认全中性 0/1/0/0/0），`_parse_track` 解析并钳制（非法类型回退中性，越界钳制）。
+  - 新增 `_comp_filter(track)`：生成 `acompressor=...`。**ffmpeg 的 threshold 是线性幅度而非 dB**，故换算 `10^(dB/20)` 并用 `_COMP_MIN_LINEAR` 兜底（ffmpeg 不接受 0）；阈值 ≥ -0.05dB 或比率 ≤ 1.05 视为关闭（返回空串）。
+  - 新增 `_echo_filter(track)`：生成 `aecho=1:1:<延迟×1|×2|×3>:<混合×fb^k>`。实测 ffmpeg `aecho` 的 `out_gain` 会连干声一起缩放，故固定 `in_gain=out_gain=1`，只用 decays 表达回声强度（干声电平不变）；`decay` 取值范围为 (0, 1]，用 `_ECHO_DECAY_FLOOR` 兜底；混合 < 0.01 视为关闭。
+  - `_fx_filters` 在声像之后追加压缩、回声，形成「声像→压缩→回声」的完整链路。
+- `src/mix_web.py`：`_project_to_json` 输出 5 个音效字段（保证 保存→载入→再保存 幂等）；`PAGE_TEXT_KEYS` 新增 7 个文案键。
+- `src/i18n.py`：新增「压缩/阈值/比率/回声/延迟/反馈/混合」英文译文（Compress/Threshold/Ratio/Echo/Delay/Feedback/Mix）。
+- `static/multitrack/index.html`：
+  - 每轨新增「音效行」（`.fxrow`，第 2 行）：压缩（阈值/比率）+ 回声（延迟/反馈/混合），共 5 个数值输入；首格用 `.fxlab`（与 P1 行同宽 76px）保证两行左对齐。
+  - `buildFxChain` 扩展为 `highpass→lowpass→lowshelf→peaking→highshelf→StereoPanner→DynamicsCompressor→回声子图`；回声子图为 `echoIn` 分出干声直通 + 3 条「DelayNode→GainNode」支路汇入 `echoOut`，默认增益 0（等同旁通）。
+  - `applyFxParams` 追加压缩（阈值/比率，关闭时回到 0dB/1）与回声（3 抽头延迟 `延迟×k`、增益 `混合×fb^k`）的 `setTargetAtTime` 平滑写入；`stopNodes` 支持 `taps` 数组的逐节点断开。
+  - 单轨试听（▶）与统一播放共用同一条音效链；`buildPayload` 输出 5 个音效字段；`applyTrackState` 载入工程后钳制回灌、同步控件显示并刷新节点链。
+- `tests/test_mix_render.py`：新增 `test_fx_effect_params_default_and_clamped`、`test_comp_filter_linear_threshold_and_off`、`test_echo_filter_taps_default_delay_and_decay_floor`、`test_fx_filters_p2_order_after_pan`；`test_build_cmd_includes_fx_after_volume` 扩展为覆盖「音量→音质→压缩→回声→adelay」的完整顺序。
+- `tests/test_mix_web.py`：`test_save_project_persists_fx_params` 扩展为 P1+P2 往返幂等；文案抽查加 7 键；编辑页源码断言加 `createDynamicsCompressor`/`createDelay`/`fxRow2`/`comp_th`/`echo_mix` 等 10 个 token。
+- 验证：`py_compile` 通过；编辑器内联 JS `node --check` 通过；`pytest tests/test_mix_web.py tests/test_mix_render.py` 59 项、全量（排除脚本式 `tests/test_i18n.py`）173 项通过。
+  - **ffmpeg 语义实测**（源：200ms 幅度 0.8 正弦 + 0.8s 静音）：压缩 `-24dB/8:1` 使整段峰值 -1.9 → -8.0 dBFS、持续段均值 -11.9 → -29.9 dB（约 18dB 压缩量，符合阈值/比率预期，-8.0 峰值来自 20ms attack 的起音瞬态）；回声 `混合0.5/反馈0.5/延迟200ms` 在源静音窗（0.3–0.8s）由 -91.0 dB 提升至 -14.0 dB，抽头确实出现；串联链路中静音窗为 -26.0 dB（= 压缩后的信号再入回声），印证「压缩→回声」顺序。
+  - **浏览器实测**（真实 171.6s 素材，2 轨）：音效行 5 控件渲染正常并显示「压缩/阈值/比率/回声/延迟/反馈/混合」；设 -24dB/8:1/300ms/0.5/0.4 后节点参数为 threshold=-24、ratio=8、knee=6、attack=0.02、release=0.25，回声抽头 delay=0.3/0.6/0.9s、gain=0.2/0.1/0.05（= 混合×fb^k，与后端公式一致），P1 节点未受影响（hpf=20 关闭、lpf=22050 关闭、pan=0）；`buildPayload` 携带 5 字段；保存工程→载入工程后控件与参数原样恢复。
+  - **端到端渲染实测**：带 P2 参数走页面「渲染」成功产出 `mix_..._mix.flac`，成品 **-14.21 LUFS / 真峰值 -1.50 dBTP**，符合母带目标（压缩+回声未破坏响度归一化）。测试产物（混音记录与目录、工程文件、临时素材、pytest 临时目录）已全部移入系统回收站。
+
+---
+
+## 2026-09-29 — 多轨编辑器 P1：每轨音质控制（声像 + 三段 EQ + 高通/低通），预览与导出同效
+
+> 背景：此前每轨只有音量/静音/独奏，缺少常用 DAW 的单轨音质控制。本轮实现 P1（声像、三段 EQ、高通/低通），要求**编辑页实时预览**与**后端离线渲染**使用同一套参数，做到「听到什么就导出什么」。P2（Echo/压缩）后续再做。
+> 设计决策：①不改工程契约版本（仍 `version: 1`）——新增 6 个每轨字段均为**可选、缺省中性**，旧工程 JSON 仍可解析；②声像前后端统一采用 Web Audio `StereoPannerNode` 的等功率立体声算法；③三段 EQ 频率对齐 Web Audio 节点（低架 200Hz / 峰值 1kHz Q=1 / 高架 4kHz），高通/低通为 12dB/oct Butterworth；④参数全部钳制，脏数据不中断渲染。
+
+- `src/mix_render.py`：
+  - `MixTrack` 新增 `pan / eq_low / eq_mid / eq_high / hpf / lpf`（默认全中性 0），`_parse_track` 解析并钳制（pan ±1、EQ ±15dB、高通 0–2000Hz、低通 0–20000Hz，非法回退 0）。
+  - 新增 `_pan_filters(pan)`：按 StereoPannerNode 规格算法生成 `aformat=channel_layouts=stereo` + `pan=stereo|...`（pan≤0：`outL=L+gL*R, outR=gR*R`；pan>0：`outL=gL*L, outR=R+gR*L`；gL=cos x、gR=sin x），居中（|pan|<0.005）不产生滤镜。
+  - 新增 `_fx_filters(track)`：顺序为 高通 → 低通 → 低频架(`bass`) → 中频峰(`equalizer`) → 高频架(`treble`) → 声像；各参数中性时不产生滤镜。
+  - `build_ffmpeg_cmd` 把音质滤镜排在 `volume` 之后、`adelay` 之前（无切片轨走 `volume`+fx；有切片轨逐 clip 追加 fx）。
+- `src/mix_web.py`：`_project_to_json` 输出 6 个音质字段（保证 保存→载入→再保存 幂等）；`PAGE_TEXT_KEYS` 新增 9 个文案键。
+- `src/i18n.py`：新增「音质/声像/低频/中频/高频/高通/低通/分贝/Hz（0 = 关闭）」英文译文（Tone/Pan/Low/Mid/High/HPF/LPF/dB/Hz (0 = off)）。
+- `static/multitrack/index.html`：
+  - 每轨新增「音质行」（`.fxrow`）：声像滑块（读数 C / L60 / R60）+ 低频/中频/高频/高通/低通数值输入；改动即时写入节点链，**播放中即可听出变化**。
+  - 新增 `buildFxChain`（highpass→lowpass→lowshelf→peaking→highshelf→StereoPanner 固定链）、`applyFxParams`（`setTargetAtTime` 平滑，避免爆音）、`applyTrackFx`；`playFrom` 时每轨建链并接到轨增益之前，`stopNodes` 一并断开节点避免堆积。
+  - 单轨试听（▶）同样串入该轨音质链（此前只套增益）；`buildPayload` 输出 6 个音质字段；`applyTrackState` 载入工程后回灌参数与控件显示。
+- `tests/test_mix_render.py`：新增 `test_fx_params_default_and_clamped`、`test_pan_filters_follow_stereo_law`、`test_fx_filters_neutral_skips_and_active_orders`、`test_build_cmd_includes_fx_after_volume`。
+- `tests/test_mix_web.py`：新增 `test_save_project_persists_fx_params`（含往返幂等）；文案抽查加 9 键；编辑页源码断言加 `buildFxChain`/`applyFxParams`/`fxRow`/`lowshelf`/`peaking`/`highshelf` 等。
+- 验证：`py_compile` 通过；`pytest tests/test_mix_web.py tests/test_mix_render.py` 55 项、全量（排除脚本式 `tests/test_i18n.py`）169 项通过；ffmpeg 对新增滤镜链（highpass/lowpass/bass/equalizer/treble/aformat/pan）单独校验全部支持。浏览器 + 真实渲染实测（171.6s 素材）：音质行 7 个控件渲染正常；设声像 -0.6 / 低频 +4.5dB / 高通 120Hz 后，播放节点参数为 pan=-0.6、low=4.5、hpf=120、lpf=22050（关闭），工程 JSON 同步携带该 6 字段；走页面「渲染」得到成品，实测**左声道 -13.8dB、右声道 -18.2dB**（声像左偏生效），真峰值 -1.5dBTP 符合母带目标。测试期间产生的混音记录已通过「删除记录」接口移入系统回收站。
+
+---
+
 ## 2026-09-29 — 多轨编辑器：主控 transport 加 label + 选区读数与取消选择区
 
 - `static/multitrack/index.html`：

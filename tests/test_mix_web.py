@@ -8,7 +8,7 @@
 - save_project / list_projects / load_project 工程持久化（M3）
 - rename_mix / delete_mix 混音记录管理（M3，删除走桩函数不污染回收站）
 - page_texts 文案完整性（含英文翻译）
-- app.py 路由注册、分离页编辑入口/内嵌 iframe（源码级断言）
+- app.py 路由注册、「多轨编辑」Tab 内嵌 iframe（源码级断言）
 
 运行方式：pytest tests/test_mix_web.py
 """
@@ -310,6 +310,28 @@ def test_save_and_load_project_roundtrip(webui_root: Path):
     assert proj["tracks"][0]["src"].startswith("outputs/separations_")
 
 
+def test_save_project_persists_fx_params(webui_root: Path):
+    """P1 音质 + P2 音效参数随工程落盘并可原样载入（保存→载入→再保存 幂等）。"""
+    payload = _payload(webui_root)
+    payload["tracks"][0].update(
+        {"pan": -0.4, "eq_low": 3.5, "eq_mid": -2.0, "eq_high": 1.0, "hpf": 90, "lpf": 14000,
+         "comp_th": -18.0, "comp_ratio": 3.0,
+         "echo_delay": 300.0, "echo_fb": 0.4, "echo_mix": 0.35})
+    saved = mix_web.save_project(payload, webui_root, "fx")
+    assert saved["ok"] is True
+
+    track = mix_web.load_project(webui_root, saved["path"])["project"]["tracks"][0]
+    assert (track["pan"], track["eq_low"], track["eq_mid"], track["eq_high"],
+            track["hpf"], track["lpf"]) == (-0.4, 3.5, -2.0, 1.0, 90.0, 14000.0)
+    assert (track["comp_th"], track["comp_ratio"], track["echo_delay"],
+            track["echo_fb"], track["echo_mix"]) == (-18.0, 3.0, 300.0, 0.4, 0.35)
+    # 往返：载入后再保存，音质/音效字段都不丢
+    again = mix_web.save_project(mix_web.load_project(webui_root, saved["path"])["project"],
+                                 webui_root, "fx2")
+    t2 = mix_web.load_project(webui_root, again["path"])["project"]["tracks"][0]
+    assert t2["pan"] == -0.4 and t2["comp_th"] == -18.0 and t2["echo_mix"] == 0.35
+
+
 def test_save_project_rejects_invalid_and_sanitizes_name(webui_root: Path):
     """非法工程不落盘；工程名清洗非法字符、空名回退时间戳。"""
     bad = _payload(webui_root)
@@ -399,24 +421,33 @@ def test_page_texts_complete():
     for key in ("多轨编辑器", "静音", "下载", "混音记录", "渲染成品",
                 "保存工程", "打开", "改名", "试听本轨",
                 "播放", "暂停", "停止", "循环", "正在解码音频",
-                "播放控制", "取消选择区", "起始", "时长"):
+                "播放控制", "取消选择区", "起始", "时长",
+                "音质", "声像", "低频", "中频", "高频", "高通", "低通",
+                "分贝", "Hz（0 = 关闭）",
+                "压缩", "阈值", "比率", "回声", "延迟", "延迟（0 = 自动 250ms）", "反馈", "混合"):
         assert en[key] != zh[key], key
+    # 电平表 / GR 表标签为音频术语，中英一致（不参与「译文不同」抽查）
+    for key in ("IN", "OUT", "GR"):
+        assert key in mix_web.PAGE_TEXT_KEYS
+        assert zh[key] == en[key] == key
 
 
 # ------------------------------------------------------------------ 8. 源码接线
 def test_app_registers_mix_routes_and_entry():
-    """app.py 必须注册静态页/接口路由，并在分离页提供编辑入口与内嵌 iframe。"""
+    """app.py 必须注册静态页/接口路由，并以独立「多轨编辑」Tab 内嵌编辑页。"""
     app_src = (WEBUI_DIR / "app.py").read_text(encoding="utf-8")
     for path in ("/static/multitrack/", "/api/mix/sources", "/api/mix/peaks",
                  "/api/mix/audio", "/api/mix/render", "/api/mix/status",
                  "/api/mix/cancel", "/api/mix/projects", "/api/mix/project",
                  "/api/mix/record"):
         assert f'"{path}"' in app_src, path
-    assert 'gr.Button(_t("多轨编辑")' in app_src
-    assert "window.open('/static/multitrack/'" in app_src
-    # M3：分离页内嵌同一编辑页（embed=1 + 主题跟随）
+    # 独立 Tab「多轨编辑」：同一编辑页以 iframe 内嵌（embed=1 + 主题跟随）
+    assert 'gr.Tab(_t("多轨编辑")) as tab_mix' in app_src
     assert '/static/multitrack/?embed=1' in app_src
-    assert 'elem_id="sep-mix-embed"' in app_src
+    assert 'elem_id="mix-editor-embed"' in app_src
+    # 分离页旧入口（内嵌 iframe + 新窗口按钮）已移除，入口统一到新 Tab
+    assert "sep_mix_btn" not in app_src
+    assert "sep-mix-embed" not in app_src
 
 
 def test_editor_page_calls_expected_endpoints():
@@ -464,6 +495,81 @@ def test_editor_page_has_transport_playback():
     assert "seekTo" in page                   # 单击波形定位播放头
     assert "isAudible" in page                # Solo > Mute > 默认发声，与渲染一致
     assert "togglePlay" in page and "keydown" in page and 'ev.code !== "Space"' in page
+    # 每轨音质（P1）：声像 + 三段 EQ + 高通/低通，实时预览与导出同一套参数
+    for token in ("buildFxChain", "applyFxParams", "applyTrackFx", "fxPanel", "mkFxCtl",
+                  "createStereoPanner", "lowshelf", "peaking", "highshelf",
+                  "eq_low", "eq_mid", "eq_high", "hpf", "lpf"):
+        assert token in page, token
+    # 每轨音效（P2）：压缩 + 回声（3 抽头延迟线），同样实时预览与导出同一套参数
+    for token in ("createDynamicsCompressor", "createDelay", "mkMod",
+                  "comp_th", "comp_ratio", "echo_delay", "echo_fb", "echo_mix",
+                  "FX_ECHO_TAPS", "FX_COMP_ATTACK"):
+        assert token in page, token
+    # 第二批：输入/输出电平表 + 压缩 GR 表 + EQ 频响曲线（可视化与旋钮双向联动）
+    for token in ("mkMeterBlock", "mkMtrCol", "mkMeterTap", "disposeMeterTap", "meterLoop",
+                  "getFloatTimeDomainData", "createChannelSplitter",
+                  "drawEqCurve", "attachEqCurve", "setEqGain", "EQ_HANDLES",
+                  "getFrequencyResponse", "OfflineAudioContext",
+                  'className = "eqc"', "fxmeter", "mt-col", "fxside", "fxknobs"):
+        assert token in page, token
+
+
+def test_editor_defaults_hotkey_and_stepper():
+    """交互细化：循环默认勾选、空格为全局热键、音效参数默认中性、旋钮/推子控件齐全。"""
+    page = (WEBUI_DIR / "static" / "multitrack" / "index.html").read_text(encoding="utf-8")
+    # 循环默认勾选，且状态初值与复选框一致
+    assert 'id="tp-loop" type="checkbox" checked' in page
+    assert "loop: true" in page
+    # 空格 = 全局热键：捕获阶段监听 window（点过任何组件后仍生效），长按不重复触发
+    assert 'window.addEventListener("keydown"' in page
+    assert "}, true);" in page
+    assert "ev.repeat" in page
+    assert "isTextInput" in page                    # 仅文本类输入放行空格
+    # FX 面板：三个模块分组框（音质/压缩/回声），旋钮与推子两种形态
+    for token in ('data-mod="eq"', 'data-mod="dyn"', 'data-mod="echo"',
+                  "fxmod-h", "knobrow", "faderrow"):
+        assert token in page, token
+    # 音效参数默认中性：延迟/反馈初值与轨道默认值均为 0（混合 0 即关闭）
+    assert 'label: "延迟", tip: "延迟（0 = 自动 250ms）", kind: "ms", shape: "fader"' in page
+    assert 'label: "反馈", tip: "反馈", kind: "fb", shape: "fader"' in page
+    assert "echoDelay: 0, echoFb: 0" in page
+    # 控件形态：常态为只读数值徽标，双击原地换成 number 输入精确录入
+    assert 'inp.type = "number"; inp.className = "fxnum"' in page
+    assert "beginEdit" in page
+    # 交互：拖拽（Shift 精调）、滚轮、双击复位、键盘 Home 复位
+    assert "setPointerCapture" in page
+    assert "ev.shiftKey ? 900 : 180" in page        # 拖满 ≈180px；Shift 精调 1/5
+    assert 'addEventListener("dblclick", () => set(neutral, true))' in page
+    assert 'ev.code === "Home"' in page
+    # 工程回灌：控件走 setV（不再直接写 .value）
+    assert ".panEl.setV(t.pan)" in page
+    assert ".echoMixEl.setV(t.echoMix)" in page
+    # 第二批：曲线与旋钮双向联动，工程回灌后也要重绘曲线
+    assert ".eqLowEl.setV(t.eqLow)" in page
+    assert "drawEqCurve(t);" in page                 # applyTrackState 回灌后重绘
+    assert "drawEqCurve(track);" in page             # 旋钮 onChange 驱动重绘
+
+
+def test_editor_meters_wiring_is_bypass_only():
+    """电平表/GR 表接线：取样链必须旁路（不串进音频链路），播放后启动刷新、停止后释放。"""
+    page = (WEBUI_DIR / "static" / "multitrack" / "index.html").read_text(encoding="utf-8")
+    # 旁路取样：分析器挂在 ChannelSplitter 上，源节点额外 connect 一路，不改动主链路
+    assert "split.connect(anL, 0, 0)" in page and "split.connect(anR, 1, 0)" in page
+    assert "g.connect(t.meter.out.split)" in page            # OUT 取轨增益之后
+    assert "env.connect(t.meter.in.split)" in page           # IN 取音质链之前（含淡变包络）
+    # 播放时建链、停止时释放（保留残值给回落动画）
+    assert "t.meter = { in: mkMeterTap(ctx), out: mkMeterTap(ctx), fx: t.fx }" in page
+    assert "disposeMeterTap(t.meter.in); disposeMeterTap(t.meter.out);" in page
+    assert "if (!t.mtr) t.mtr = newMtrState();" in page
+    # rAF 刷新循环：播放中持续、停止后归零并自终止（不空转）
+    assert "meterLoop();" in page
+    assert "if (S.playing || live)" in page and "_mtrRaf = requestAnimationFrame(step)" in page
+    # GR 读压缩节点的增益衰减量（Chrome 为只读 number，规范为 AudioParam，两种形态都兼容）
+    assert "comp.reduction" in page and 'typeof rr === "number"' in page
+    # EQ 曲线：3 个手柄按 x 就近吸附后纵向改 gain（频率固定），与旋钮共用同一套区间
+    assert "EQ_GAIN_MAX" in page and "Math.round(v / 0.5) * 0.5" in page
+    # 主题切换（内嵌跟随父页）后波形与曲线一并重绘
+    assert "S.tracks.forEach((t) => { drawTrack(t); drawEqCurve(t); });" in page
 
 
 def test_history_recycles_mix_dir():

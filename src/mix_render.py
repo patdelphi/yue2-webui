@@ -41,6 +41,26 @@ _LRA = 11.0
 _GAIN_MIN, _GAIN_MAX = -30.0, 12.0
 _LOUD_MIN, _LOUD_MAX = -30.0, -5.0
 _TP_MIN, _TP_MAX = -6.0, -0.1
+# 每轨音质参数（P1）：声像 [-] / 低中高 EQ [dB] / 高通·低通 [Hz]（0 = 关闭）
+_PAN_MIN, _PAN_MAX = -1.0, 1.0
+_EQ_DB_MIN, _EQ_DB_MAX = -15.0, 15.0
+_HPF_MIN, _HPF_MAX = 0.0, 2000.0
+_LPF_MIN, _LPF_MAX = 0.0, 20000.0
+# 三段 EQ 中心/转折频率（与前端 Web Audio 节点保持一致）
+_EQ_LOW_F, _EQ_MID_F, _EQ_HIGH_F = 200.0, 1000.0, 4000.0
+
+# 每轨音效参数（P2）：压缩（阈值 dB / 比率）+ 回声（延迟 ms / 反馈 / 混合）
+_COMP_TH_MIN, _COMP_TH_MAX = -60.0, 0.0        # 0 dB = 阈值顶到上限，等同不压缩
+_COMP_RATIO_MIN, _COMP_RATIO_MAX = 1.0, 20.0   # 1 = 不压缩
+_ECHO_DELAY_MIN, _ECHO_DELAY_MAX = 0.0, 2000.0
+_ECHO_FB_MAX = 0.95                            # 反馈上限，避免无限堆积
+_ECHO_MIX_MIN, _ECHO_MIX_MAX = 0.0, 1.0
+# 压缩器固定时间常数（与前端 Web Audio 节点保持一致）；attack/release 是毫秒
+_COMP_ATTACK_MS, _COMP_RELEASE_MS, _COMP_KNEE_DB = 20.0, 250.0, 6.0
+_COMP_MIN_LINEAR = 0.001                       # ffmpeg acompressor threshold 下限（约 -60dB）
+_ECHO_DEFAULT_DELAY_MS = 250.0                 # 混合 > 0 但未填延迟时的兜底值
+_ECHO_TAPS = 3                                  # 回声抽头数（前后端一致：fb^1 / fb^2 / fb^3）
+_ECHO_DECAY_FLOOR = 0.001                       # ffmpeg 要求 decay ∈ (0, 1]
 # 时长未知（clip 未给 out）时淡入的保守上限（秒）
 _MAX_FADE = 60.0
 
@@ -64,13 +84,32 @@ class MixClip:
 
 @dataclass
 class MixTrack:
-    """一条轨道（src 已解析为绝对路径）。clips 为空表示整轨。"""
+    """一条轨道（src 已解析为绝对路径）。clips 为空表示整轨。
+
+    音质参数（P1）默认全部中性，此时不产生任何额外滤镜：
+        pan  声像 [-1 左, 1 右]；eq_low/eq_mid/eq_high 低中高增益 dB；
+        hpf/lpf 高通/低通截止频率 Hz（0 = 关闭）。
+    音效参数（P2）默认同样中性：
+        comp_th/comp_ratio 压缩阈值 dB 与比率（0dB / 1 = 不压缩）；
+        echo_delay/echo_fb/echo_mix 回声延迟 ms、反馈、混合（混合 0 = 关闭）。
+    """
     id: str
     name: str
     src: Path
     gain_db: float = 0.0
     mute: bool = False
     clips: list = field(default_factory=list)
+    pan: float = 0.0
+    eq_low: float = 0.0
+    eq_mid: float = 0.0
+    eq_high: float = 0.0
+    hpf: float = 0.0
+    lpf: float = 0.0
+    comp_th: float = 0.0
+    comp_ratio: float = 1.0
+    echo_delay: float = 0.0
+    echo_fb: float = 0.0
+    echo_mix: float = 0.0
 
 
 @dataclass
@@ -160,7 +199,25 @@ def _parse_track(raw, idx: int, outputs_root: Path) -> MixTrack:
     # 给了切片但全部非法：静音轨无害，非静音轨静默变空会让人误以为渲染成功
     if clips_raw and not clips and not mute:
         raise MixProjectError(f"轨道 {name} 的切片全部非法")
-    return MixTrack(id=tid, name=name, src=src, gain_db=gain, mute=mute, clips=clips)
+    # 音质参数（P1）：缺省/非法一律回退中性值，越界钳制，脏数据不中断渲染
+    fx = {
+        "pan": _clamp(_as_float(raw.get("pan"), 0.0), _PAN_MIN, _PAN_MAX),
+        "eq_low": _clamp(_as_float(raw.get("eq_low"), 0.0), _EQ_DB_MIN, _EQ_DB_MAX),
+        "eq_mid": _clamp(_as_float(raw.get("eq_mid"), 0.0), _EQ_DB_MIN, _EQ_DB_MAX),
+        "eq_high": _clamp(_as_float(raw.get("eq_high"), 0.0), _EQ_DB_MIN, _EQ_DB_MAX),
+        "hpf": _clamp(_as_float(raw.get("hpf"), 0.0), _HPF_MIN, _HPF_MAX),
+        "lpf": _clamp(_as_float(raw.get("lpf"), 0.0), _LPF_MIN, _LPF_MAX),
+        # 音效参数（P2）：压缩阈值/比率、回声延迟/反馈/混合
+        "comp_th": _clamp(_as_float(raw.get("comp_th"), 0.0), _COMP_TH_MIN, _COMP_TH_MAX),
+        "comp_ratio": _clamp(_as_float(raw.get("comp_ratio"), 1.0),
+                             _COMP_RATIO_MIN, _COMP_RATIO_MAX),
+        "echo_delay": _clamp(_as_float(raw.get("echo_delay"), 0.0),
+                             _ECHO_DELAY_MIN, _ECHO_DELAY_MAX),
+        "echo_fb": _clamp(_as_float(raw.get("echo_fb"), 0.0), 0.0, _ECHO_FB_MAX),
+        "echo_mix": _clamp(_as_float(raw.get("echo_mix"), 0.0),
+                           _ECHO_MIX_MIN, _ECHO_MIX_MAX),
+    }
+    return MixTrack(id=tid, name=name, src=src, gain_db=gain, mute=mute, clips=clips, **fx)
 
 
 def parse_mix_project(payload, webui_root) -> MixProject:
@@ -203,13 +260,95 @@ def parse_mix_project(payload, webui_root) -> MixProject:
 
 
 # ------------------------------------------------------------------ filtergraph
+def _pan_filters(pan: float) -> list:
+    """声像滤镜：按 Web Audio StereoPannerNode 的立体声算法生成等功率 pan。
+
+    规格算法（pan <= 0 时 x=(pan+1)*π/2，否则 x=pan*π/2；gL=cos(x)、gR=sin(x)）：
+        pan <= 0:  outL = L + gL*R ; outR = gR*R
+        pan >  0:  outL = gL*L     ; outR = R + gR*L
+    先 aformat 归一为立体声，保证单声道素材也能与前端预览行为一致。
+    """
+    if abs(pan) < 0.005:
+        return []
+    if pan <= 0:
+        x = (pan + 1) * math.pi / 2
+        gl, gr = math.cos(x), math.sin(x)
+        return [
+            "aformat=channel_layouts=stereo",
+            f"pan=stereo|c0=c0+{gl:.4f}*c1|c1={gr:.4f}*c1",
+        ]
+    x = pan * math.pi / 2
+    gl, gr = math.cos(x), math.sin(x)
+    return [
+        "aformat=channel_layouts=stereo",
+        f"pan=stereo|c0={gl:.4f}*c0|c1=c1+{gr:.4f}*c0",
+    ]
+
+
+def _comp_filter(track) -> str:
+    """压缩滤镜：Web Audio DynamicsCompressorNode 的 ffmpeg 对应实现。
+
+    ffmpeg acompressor 的 threshold 是**线性幅度**（非 dB），故换算 10^(dB/20)；
+    attack/release/knee 与前端固定时间常数一致；makeup=1、mix=1（不做自动补偿与并联）。
+    阈值 >= 0dB 或比率 <= 1 视为关闭（返回空串）。
+    """
+    if track.comp_th >= -0.05 or track.comp_ratio <= 1.05:
+        return ""
+    lin = max(_COMP_MIN_LINEAR, min(1.0, 10 ** (track.comp_th / 20.0)))
+    return (f"acompressor=threshold={lin:.6f}:ratio={track.comp_ratio:.2f}"
+            f":attack={_num(_COMP_ATTACK_MS)}:release={_num(_COMP_RELEASE_MS)}"
+            f":knee={_num(_COMP_KNEE_DB)}:makeup=1:mix=1")
+
+
+def _echo_filter(track) -> str:
+    """回声滤镜：3 个抽头（fb¹/fb²/fb³）与前端 3 条并联延迟线一一对应。
+
+    ffmpeg aecho 实测语义为 out = out_gain * (in_gain*in + Σ decay_j*in[n-d_j])，
+    干声也要经过 out_gain，因此固定 in_gain=out_gain=1，靠 decays 表达「混合×反馈^k」，
+    这样干声电平不变、回声强度由混合控制，与前端边听边导出保持一致。
+    混合 < 0.01 视为关闭（返回空串）；延迟未填时用兜底 250ms。
+    """
+    if track.echo_mix < 0.01:
+        return ""
+    delay = track.echo_delay if track.echo_delay > 0 else _ECHO_DEFAULT_DELAY_MS
+    delays = "|".join(_num(delay * k) for k in range(1, _ECHO_TAPS + 1))
+    decays = "|".join(
+        f"{max(_ECHO_DECAY_FLOOR, min(1.0, track.echo_mix * (track.echo_fb ** k))):.4f}"
+        for k in range(1, _ECHO_TAPS + 1))
+    return f"aecho=1:1:{delays}:{decays}"
+
+
+def _fx_filters(track) -> list:
+    """每轨音质/音效滤镜：高通→低通→低中高 EQ→声像→压缩→回声；中性参数不产生滤镜。"""
+    out = []
+    if track.hpf > 0:
+        out.append(f"highpass=f={_num(track.hpf)}:width_type=q:width=0.707")
+    if track.lpf > 0:
+        out.append(f"lowpass=f={_num(track.lpf)}:width_type=q:width=0.707")
+    if abs(track.eq_low) >= 0.05:                   # 低架滤波（lowshelf 200Hz）
+        out.append(f"bass=g={track.eq_low:.1f}:f={_num(_EQ_LOW_F)}")
+    if abs(track.eq_mid) >= 0.05:                   # 峰值滤波（peaking 1kHz / Q=1）
+        out.append(f"equalizer=f={_num(_EQ_MID_F)}:width_type=q:width=1:g={track.eq_mid:.1f}")
+    if abs(track.eq_high) >= 0.05:                  # 高架滤波（highshelf 4kHz）
+        out.append(f"treble=g={track.eq_high:.1f}:f={_num(_EQ_HIGH_F)}")
+    out.extend(_pan_filters(track.pan))
+    comp = _comp_filter(track)
+    if comp:
+        out.append(comp)
+    echo = _echo_filter(track)
+    if echo:
+        out.append(echo)
+    return out
+
+
 def build_ffmpeg_cmd(project: MixProject, out_path) -> list:
     """根据工程生成 ffmpeg 命令（纯函数，不做 IO）。
 
     每轨处理链：atrim 裁剪 → asetpts 归零 → afade 淡入/淡出 → volume 增益
-    → adelay 时间线偏移；同一素材多切片时用 asplit 展开（一个输入 pad 只能被
-    消费一次）。所有段落统一 amix（normalize=0，避免电平被平均压低）后接
-    loudnorm 归一化到母带目标。输出编码按扩展名选择无损编码器。
+    → 音质与音效（高通/低通/EQ/声像/压缩/回声）→ adelay 时间线偏移；同一素材多切片时用 asplit
+    展开（一个输入 pad 只能被消费一次）。所有段落统一 amix（normalize=0，
+    避免电平被平均压低）后接 loudnorm 归一化到母带目标。输出编码按扩展名选择
+    无损编码器。
     """
     out_path = Path(out_path)
     codec = _CODEC_BY_SUFFIX.get(out_path.suffix.lower())
@@ -224,10 +363,11 @@ def build_ffmpeg_cmd(project: MixProject, out_path) -> list:
             continue                                  # 静音轨既不进 -i，也不进图
         idx = len(inputs)
         inputs.append(str(track.src))
-        gain = f"volume={track.gain_db:.1f}dB"
+        fx = _fx_filters(track)                       # 每轨音质滤镜（中性时为 []）
 
         if not track.clips:                           # 空 clips = 整轨
-            graph.append(f"[{idx}:a]{gain}[t{len(labels)}]")
+            parts = [f"volume={track.gain_db:.1f}dB"] + fx
+            graph.append(f"[{idx}:a]" + ",".join(parts) + f"[t{len(labels)}]")
             labels.append(f"[t{len(labels)}]")
             continue
 
@@ -248,7 +388,8 @@ def build_ffmpeg_cmd(project: MixProject, out_path) -> list:
             if clip.fade_out > 0 and clip.out is not None:
                 st = max(0.0, (clip.out - clip.in_) - clip.fade_out)
                 parts.append(f"afade=t=out:st={_num(st)}:d={_num(clip.fade_out)}")
-            parts.append(gain)
+            parts.append(f"volume={track.gain_db:.1f}dB")
+            parts.extend(fx)
             delay_ms = int(round(clip.start * 1000))
             if delay_ms > 0:
                 parts.append(f"adelay={delay_ms}:all=1")

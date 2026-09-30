@@ -66,7 +66,9 @@
 | **C2 生产接入（推荐）** | 独立页面预载分轨 → 编辑 → **回传结构参数** → 后端 ffmpeg 渲染 → 写历史 | 中高 | 主要工作量在后端渲染接口 + 数据契约 |
 | **C3 完全内嵌 Tab** | 不用 iframe，直接嵌进 Gradio Tab | 中 | 需处理 Gradio 重渲染冲突（可复用现有 `MutationObserver` 重绑先例），收益有限 |
 
-> **M3 实际落地方式**：采用「iframe 内嵌分离 Tab」——复用同一静态编辑页（`?embed=1`），避免 Gradio 重渲染与组件生命周期耦合；内嵌页定时读取父窗口背景亮度跟随明暗主题。原「多轨编辑」按钮（新窗口打开）保留，两种入口并存。未新增 Tab（集成进现有分离流程）。
+> **M3 实际落地方式**：采用「iframe 内嵌」——复用同一静态编辑页（`?embed=1`），避免 Gradio 重渲染与组件生命周期耦合；内嵌页定时读取父窗口背景亮度跟随明暗主题。
+>
+> **更新（2026-09-29）**：编辑入口已提升为独立 Tab「多轨编辑」（`app.py` 中位于「音色翻唱」之后、「系统设置」之前，`elem_id="mix-editor-embed"`）；分离 Tab 内的内嵌 iframe 与「多轨编辑」新窗口按钮两个旧入口已全部移除。
 
 ### 为什么 C2 回传"参数"而不是"浏览器渲染的成品"
 
@@ -145,7 +147,7 @@
 - **M3｜打磨**：Tab 内嵌、进度与取消接入现有机制、中英文案（`src/i18n.py`）、`changelog.md` 更新。进度/取消、i18n、changelog 随 M2 落地。✅ 已完成（2026-09-28）：
   - **工程持久化**：`mix_web.save_project / list_projects / load_project` + `GET /api/mix/projects`、`GET|POST /api/mix/project`；工程落 `outputs/mix_projects/<工程名>.json`（同名覆盖、工程名清洗、空名回退时间戳），载入路径白名单限定在该目录下，`src` 归一为相对路径可回灌编辑器。
   - **混音记录管理**：`mix_web.rename_mix / delete_mix` + `POST /api/mix/record`（`action=rename|delete`），编辑页「混音记录」列表每项可改名（`prompt`）/删除（`confirm`，整目录入回收站）。**未进入歌曲历史页**——该页按既有约定仅展示生成记录，分离/翻唱记录同样在各自 Tab 管理。
-  - **Tab 内嵌**：分离 Tab 末尾 `gr.HTML` iframe（`/static/multitrack/?embed=1`，`elem_id="sep-mix-embed"`），内嵌页收紧内边距并跟随父页面明暗主题。
+  - **Tab 内嵌**（2026-09-29 已升级为独立 Tab）：`gr.HTML` iframe（`/static/multitrack/?embed=1`，`elem_id="mix-editor-embed"`）放在独立 Tab「多轨编辑」内，内嵌页收紧内边距并跟随父页面明暗主题。
   - 测试：`tests/test_mix_web.py` 22 → 27 项；`pytest tests/test_mix_web.py tests/test_mix_render.py` 49 项通过、全量 163 项通过。
 
 ---

@@ -266,6 +266,12 @@ def _project_to_json(project, webui_root) -> dict:
             "src": _rel_to_root(root, t.src) or str(t.src),
             "gain_db": t.gain_db,
             "mute": bool(t.mute),
+            # 音质参数（P1）：与编辑页 buildPayload 字段名一致，保证「保存→载入→再保存」幂等
+            "pan": t.pan, "eq_low": t.eq_low, "eq_mid": t.eq_mid, "eq_high": t.eq_high,
+            "hpf": t.hpf, "lpf": t.lpf,
+            # 音效参数（P2）：压缩（阈值/比率）+ 回声（延迟/反馈/混合）
+            "comp_th": t.comp_th, "comp_ratio": t.comp_ratio,
+            "echo_delay": t.echo_delay, "echo_fb": t.echo_fb, "echo_mix": t.echo_mix,
             "clips": [{
                 "start": c.start, "in": c.in_, "out": c.out,
                 "fade_in": c.fade_in, "fade_out": c.fade_out,
@@ -391,7 +397,7 @@ PAGE_TEXT_KEYS = (
     "裁为选区", "恢复整轨", "淡入(秒)", "淡出(秒)", "在波形上拖拽选择区间",
     "母带", "响度目标(LUFS)", "真峰值(dBTP)", "项目名", "项目名(可选)",
     "渲染成品", "取消渲染", "渲染中", "排队中", "渲染完成", "渲染失败", "已取消",
-    "试听", "下载", "混音记录", "请先选择素材", "正在载入波形", "区间无效",
+    "试听", "下载", "混音记录", "暂无混音记录", "请先选择素材", "正在载入波形", "区间无效",
     "无可用素材，请先执行一次音轨分离",
     # —— M3：工程持久化 + 混音记录管理 ——
     "工程", "已保存工程", "保存工程", "打开", "工程已保存", "工程已载入",
@@ -401,6 +407,12 @@ PAGE_TEXT_KEYS = (
     # —— 统一播放（DAW transport） ——
     "播放", "暂停", "停止", "循环", "正在解码音频", "解码失败", "播放失败",
     "播放控制", "取消选择区", "起始", "时长",
+    # —— 每轨音质（P1：声像 + 三段 EQ + 高通/低通） ——
+    "音质", "声像", "低频", "中频", "高频", "高通", "低通", "分贝", "Hz（0 = 关闭）",
+    # —— 每轨音效（P2：压缩 + 回声） ——
+    "压缩", "阈值", "比率", "回声", "延迟", "延迟（0 = 自动 250ms）", "反馈", "混合",
+    # —— 电平表 / GR 表（音频术语，中英一致） ——
+    "IN", "OUT", "GR",
 )
 
 

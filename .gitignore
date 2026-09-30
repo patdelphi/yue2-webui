@@ -72,7 +72,7 @@ voice-tools/venv-as/
 voice-tools/requirements-lock-*.txt
 # few-shot 微调用的切片训练数据（音频二进制），不进主仓
 voice-tools/ft_data/
-.pytest_tmp/
+.pytest_tmp*/
 
 # Misc temporary
 =1.47

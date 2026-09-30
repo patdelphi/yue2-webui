@@ -24,115 +24,438 @@
 <style>
   :root {
     --bg: #ffffff; --fg: #1f2328; --muted: #6b7280; --line: #d8dee4;
-    --card: #f7f8fa; --accent: #3b82f6; --accent-fg: #ffffff; --wave: #3b82f6;
-    --sel: rgba(59,130,246,.18); --sec: #eef2f7; --danger: #ef4444; --ok: #16a34a;
+    --card: #f7f8fa; --card-2: #ffffff; --accent: #3b82f6; --accent-fg: #ffffff;
+    --wave: #3b82f6; --sel: rgba(59,130,246,.18); --sec: #eef2f7;
+    --danger: #ef4444; --ok: #16a34a;
+    /* —— 设计令牌：间距 / 圆角 / 控件高度 / 分层阴影 / 聚焦光圈 —— */
+    --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 18px; --sp-5: 24px;
+    --r-lg: 14px; --r-md: 10px; --r-sm: 7px;
+    --h-ctl: 28px;
+    --shadow-sm: 0 1px 2px rgba(16,24,40,.06);
+    --shadow: 0 1px 2px rgba(16,24,40,.05), 0 4px 12px -6px rgba(16,24,40,.14);
+    --shadow-lg: 0 16px 32px -16px rgba(16,24,40,.30);
+    --ring: 0 0 0 3px rgba(59,130,246,.22);
+    --accent-soft: rgba(59,130,246,.10);
+    /* FX 面板（专业效果器风）：面板底/描边/旋钮盘面/推子轨道 + 三个模块主色 */
+    --panel: #eef1f5; --panel-line: #dde3ea; --knob-bg: #ffffff; --knob-track: #cfd8e3;
+    --mod-eq: #3b82f6; --mod-dyn: #d97706; --mod-echo: #7c3aed;
+    /* 轨道色板（按轨索引循环）+ 波形网格线 */
+    --trk-1: #3b82f6; --trk-2: #8b5cf6; --trk-3: #0ea5e9;
+    --trk-4: #f59e0b; --trk-5: #ec4899; --trk-6: #10b981;
+    --grid: rgba(16,24,40,.10);
   }
   /* 深色变量：系统偏好（父页面未指定主题时生效）+ 父页面显式指定 data-theme="dark" */
   @media (prefers-color-scheme: dark) {
     html:not([data-theme="light"]) {
-      --bg: #16181d; --fg: #e6e8eb; --muted: #9aa4b2; --line: #2c3038;
-      --card: #1d2026; --accent: #3b82f6; --accent-fg: #ffffff; --wave: #60a5fa;
-      --sel: rgba(96,165,250,.22); --sec: #262a32;
+      --bg: #16181d; --fg: #e6e8eb; --muted: #9aa4b2; --line: #3a414c;
+      --card: #1d2026; --card-2: #22262e; --accent: #3b82f6; --accent-fg: #ffffff;
+      --wave: #60a5fa; --sel: rgba(96,165,250,.22); --sec: #262a32;
+      --panel: #22262e; --panel-line: #343a45; --knob-bg: #2b303a; --knob-track: #414857;
+      --mod-eq: #60a5fa; --mod-dyn: #f59e0b; --mod-echo: #a855f7;
+      --trk-1: #60a5fa; --trk-2: #a78bfa; --trk-3: #38bdf8;
+      --trk-4: #fbbf24; --trk-5: #f472b6; --trk-6: #34d399;
+      --grid: rgba(255,255,255,.10);
+      --accent-soft: rgba(96,165,250,.14);
+      --shadow: 0 1px 2px rgba(0,0,0,.35), 0 6px 18px -8px rgba(0,0,0,.55);
+      --shadow-lg: 0 18px 36px -18px rgba(0,0,0,.75);
     }
   }
   /* 内嵌进 Gradio 时由父页面主题驱动（见 syncParentTheme） */
   html[data-theme="dark"] {
-    --bg: #16181d; --fg: #e6e8eb; --muted: #9aa4b2; --line: #2c3038;
-    --card: #1d2026; --accent: #3b82f6; --accent-fg: #ffffff; --wave: #60a5fa;
-    --sel: rgba(96,165,250,.22); --sec: #262a32;
+    --bg: #16181d; --fg: #e6e8eb; --muted: #9aa4b2; --line: #3a414c;
+    --card: #1d2026; --card-2: #22262e; --accent: #3b82f6; --accent-fg: #ffffff;
+    --wave: #60a5fa; --sel: rgba(96,165,250,.22); --sec: #262a32;
+    --panel: #22262e; --panel-line: #343a45; --knob-bg: #2b303a; --knob-track: #414857;
+    --mod-eq: #60a5fa; --mod-dyn: #f59e0b; --mod-echo: #a855f7;
+    --trk-1: #60a5fa; --trk-2: #a78bfa; --trk-3: #38bdf8;
+    --trk-4: #fbbf24; --trk-5: #f472b6; --trk-6: #34d399;
+    --grid: rgba(255,255,255,.10);
+    --accent-soft: rgba(96,165,250,.14);
+    --shadow: 0 1px 2px rgba(0,0,0,.35), 0 6px 18px -8px rgba(0,0,0,.55);
+    --shadow-lg: 0 18px 36px -18px rgba(0,0,0,.75);
   }
   html[data-theme="light"] {
     --bg: #ffffff; --fg: #1f2328; --muted: #6b7280; --line: #d8dee4;
-    --card: #f7f8fa; --accent: #3b82f6; --accent-fg: #ffffff; --wave: #3b82f6;
-    --sel: rgba(59,130,246,.18); --sec: #eef2f7; --danger: #ef4444; --ok: #16a34a;
+    --card: #f7f8fa; --card-2: #ffffff; --accent: #3b82f6; --accent-fg: #ffffff;
+    --wave: #3b82f6; --sel: rgba(59,130,246,.18); --sec: #eef2f7;
+    --danger: #ef4444; --ok: #16a34a;
+    --panel: #eef1f5; --panel-line: #dde3ea; --knob-bg: #ffffff; --knob-track: #cfd8e3;
+    --mod-eq: #3b82f6; --mod-dyn: #d97706; --mod-echo: #7c3aed;
+    --trk-1: #3b82f6; --trk-2: #8b5cf6; --trk-3: #0ea5e9;
+    --trk-4: #f59e0b; --trk-5: #ec4899; --trk-6: #10b981;
+    --grid: rgba(16,24,40,.10);
+    --accent-soft: rgba(59,130,246,.10);
+    --shadow: 0 1px 2px rgba(16,24,40,.05), 0 4px 12px -6px rgba(16,24,40,.14);
+    --shadow-lg: 0 16px 32px -16px rgba(16,24,40,.30);
   }
   * { box-sizing: border-box; }
   body {
-    margin: 0; padding: 14px 16px 40px; background: var(--bg); color: var(--fg);
+    margin: 0; padding: var(--sp-4) var(--sp-4) 48px; background: var(--bg); color: var(--fg);
     font: 13px/1.5 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
   }
   /* 内嵌模式：收紧内边距，避免与外层 Tab 的留白叠加 */
-  html[data-embed="1"] body { padding: 6px 8px 24px; }
-  html[data-embed="1"] h1 { font-size: 14px; }
-  html[data-embed="1"] .hint { margin-bottom: 6px; }
-  h1 { font-size: 16px; margin: 0 0 4px; }
-  .hint { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+  html[data-embed="1"] body { padding: var(--sp-2) var(--sp-3) 28px; }
+  html[data-embed="1"] h1 { font-size: 15px; }
+  html[data-embed="1"] .hint { margin-bottom: var(--sp-2); }
+  /* 页头：标题 + 说明，一条分隔线与下方卡片区分层级 */
+  .pagehead { margin-bottom: var(--sp-3); }
+  h1 { font-size: 18px; font-weight: 650; letter-spacing: .01em; margin: 0 0 4px; }
+  .hint { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 0; }
+  /* 卡片：外层容器底色，内部控件用 --card-2（更亮）形成层次 */
   .card {
-    border: 1px solid var(--line); border-radius: 10px; background: var(--card);
-    padding: 10px 12px; margin-bottom: 10px;
+    border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--card);
+    padding: var(--sp-3) var(--sp-4); margin-bottom: var(--sp-3); box-shadow: var(--shadow-sm);
   }
-  .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .row + .row { margin-top: 8px; }
-  label.lb { color: var(--muted); font-size: 12px; min-width: 76px; }
+  /* 并排卡片组：素材 / 工程同排，避免两块窄卡片叠出大片空白 */
+  .cardgrid {
+    display: grid; grid-template-columns: minmax(300px, 1fr) minmax(300px, 1fr);
+    gap: var(--sp-3); margin-bottom: var(--sp-3);
+  }
+  .cardgrid > .card { margin-bottom: 0; }
+  @media (max-width: 720px) { .cardgrid { grid-template-columns: 1fr; } }
+  .row { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+  .row + .row { margin-top: var(--sp-3); }
+  label.lb { color: var(--muted); font-size: 12px; min-width: 76px; font-weight: 500; }
+  /* —— 表单控件：统一高度与圆角，聚焦时主题色描边 + 光圈 —— */
   select, input[type=text], input[type=number] {
-    background: var(--bg); color: var(--fg); border: 1px solid var(--line);
-    border-radius: 6px; padding: 4px 6px; font-size: 12px; min-width: 0;
+    background: var(--card-2); color: var(--fg); border: 1px solid var(--line);
+    border-radius: var(--r-sm); padding: 0 8px; height: var(--h-ctl); font-size: 12px;
+    min-width: 0; font-family: inherit;
+    transition: border-color .15s, box-shadow .15s, background .15s;
   }
-  select { max-width: 420px; }
+  select { max-width: 420px; cursor: pointer; }
   input[type=number] { width: 88px; }
-  button {
-    background: var(--bg); color: var(--fg); border: 1px solid var(--line);
-    border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer;
+  input[type=text] { background: var(--card-2); }
+  select:focus, input[type=text]:focus, input[type=number]:focus {
+    outline: none; border-color: var(--accent); box-shadow: var(--ring);
   }
-  button:hover { border-color: var(--accent); }
-  button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
-  button:disabled { opacity: .5; cursor: default; }
+  /* —— 按钮：默认次级（幽灵），.primary 为主操作，.ghost/.danger 为变体 —— */
+  button {
+    display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+    /* 控件底比卡片底略亮一层（color-mix），避免按钮/芯片与所在卡片糊成一片 */
+    background: color-mix(in srgb, var(--fg) 8%, var(--card-2));
+    color: var(--fg); border: 1px solid var(--line);
+    border-radius: var(--r-sm); padding: 0 12px; height: var(--h-ctl); font-size: 12px;
+    font-family: inherit; cursor: pointer; white-space: nowrap;
+    transition: background .15s, border-color .15s, box-shadow .15s, filter .15s, transform .1s;
+  }
+  button:hover { border-color: var(--accent); background: var(--accent-soft); }
+  button:active { transform: translateY(.5px); }
+  button:focus-visible { outline: none; box-shadow: var(--ring); }
+  button.primary {
+    background: var(--accent); color: var(--accent-fg); border-color: var(--accent);
+    box-shadow: 0 1px 2px rgba(16,24,40,.16);
+  }
+  button.primary:hover { background: var(--accent); filter: brightness(1.08); }
+  button.ghost { background: transparent; border-color: transparent; color: var(--muted); }
+  button.ghost:hover { color: var(--fg); background: var(--accent-soft); border-color: transparent; }
+  button.danger { color: var(--danger); }
+  button.danger:hover { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, transparent); }
+  button:disabled { opacity: .45; cursor: default; transform: none; }
   .msg { font-size: 12px; color: var(--muted); }
   .msg.err { color: var(--danger); }
   .msg.ok { color: var(--ok); }
-  .track { border: 1px solid var(--line); border-radius: 8px; padding: 8px; margin-bottom: 8px; background: var(--bg); }
-  .thead { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
-  .tname { font-size: 12px; min-width: 64px; }
-  .tstate { font-size: 12px; color: var(--muted); }
-  .wave { display: block; width: 100%; height: 76px; cursor: crosshair; touch-action: none; }
+  /* 空状态：列表无内容时的占位提示 */
+  .empty { color: var(--muted); font-size: 12px; padding: 10px 2px; }
+  /* ===== 轨道卡片：左侧轨色条（--trk）+ 头部控制分组 + 波形区 ===== */
+  .track {
+    position: relative; border: 1px solid var(--line); border-radius: var(--r-md);
+    padding: var(--sp-2) var(--sp-3) var(--sp-3) calc(var(--sp-3) + 4px);
+    margin-bottom: var(--sp-2); background: var(--card-2); overflow: hidden;
+    transition: box-shadow .18s, border-color .18s;
+  }
+  .track::before {                                 /* 轨色条：标识本轨身份 */
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+    background: var(--trk, var(--accent));
+  }
+  .track:hover { box-shadow: var(--shadow); border-color: color-mix(in srgb, var(--trk) 45%, var(--line)); }
+  .thead { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin-bottom: var(--sp-2); }
+  .tgrp { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+  .tgrp.right { margin-left: auto; }              /* 右侧控制组：靠行尾对齐 */
+  .tname { font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
+  .tname::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--trk, var(--accent)); }
+  .tstate { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .sep { width: 1px; height: 18px; background: var(--line); }
+  /* 波形区：加共享时间刻度尺，网格线与刻度对齐（见 drawTrack / renderRuler）
+     左右内缩量与 .track 的边框+内边距一致，保证刻度尺与下方波形严格对齐 */
+  .ruler {
+    position: relative; height: 20px;
+    margin: 0 calc(var(--sp-3) + 1px) var(--sp-1) calc(var(--sp-3) + 5px);
+  }
+  .ruler .tk {
+    position: absolute; bottom: 0; height: 7px; border-left: 1px solid var(--grid);
+  }
+  .ruler .tk span {
+    position: absolute; left: 3px; bottom: 9px; font-size: 9px; line-height: 1;
+    color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums;
+  }
+  .ruler .tk.last span { left: auto; right: 2px; }
+  .wave {
+    display: block; width: 100%; height: 78px; cursor: crosshair; touch-action: none;
+    border-radius: var(--r-sm); background: var(--sec);
+    box-shadow: inset 0 0 0 1px var(--line);
+  }
   /* 波形外层：承载播放头覆盖层（绝对定位，避免每帧整幅重绘 canvas） */
   .wave-wrap { position: relative; }
   .playhead {
     position: absolute; top: 0; bottom: 0; left: 0; width: 2px; margin-left: -1px;
-    background: var(--danger); pointer-events: none;
+    background: var(--danger); pointer-events: none; box-shadow: 0 0 6px color-mix(in srgb, var(--danger) 55%, transparent);
   }
-  .gain { width: 130px; }
-  .gain-val { font-size: 12px; color: var(--muted); width: 58px; display: inline-block; }
-  .chk { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 3px; }
-  .fades input { width: 66px; }
+  /* —— 增益推子：细轨道 + 主题色填充 + 圆形滑块；数值徽标两侧配 ± 步进按钮 —— */
+  .gain {
+    -webkit-appearance: none; appearance: none; width: 140px; height: 18px;
+    background: transparent; cursor: pointer; margin: 0;
+  }
+  .gain::-webkit-slider-runnable-track {
+    height: 5px; border-radius: 3px; border: 1px solid var(--line); background: var(--sec);
+  }
+  .gain::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; width: 14px; height: 14px; border-radius: 50%;
+    background: var(--card-2); border: 2px solid var(--trk, var(--accent)); margin-top: -5.5px;
+    box-shadow: var(--shadow-sm); transition: transform .12s;
+  }
+  .gain:hover::-webkit-slider-thumb { transform: scale(1.1); }
+  .gain:focus-visible { outline: none; }
+  .gain:focus-visible::-webkit-slider-thumb { box-shadow: var(--ring); }
+  .gain::-moz-range-track { height: 5px; border-radius: 3px; background: var(--sec); border: 1px solid var(--line); }
+  .gain::-moz-range-thumb { width: 12px; height: 12px; border-radius: 50%; background: var(--card-2); border: 2px solid var(--trk, var(--accent)); }
+  .gstep { display: inline-flex; align-items: center; gap: 3px; }
+  .gain-val {
+    font-size: 11px; color: var(--fg); width: 58px; text-align: center;
+    font-variant-numeric: tabular-nums;
+    background: color-mix(in srgb, var(--fg) 8%, var(--card-2)); border: 1px solid var(--line);
+    border-radius: var(--r-sm); padding: 2px 0;
+  }
+  .stp {
+    width: 22px; height: 22px; padding: 0; font-size: 13px; line-height: 1;
+    border-radius: var(--r-sm); color: var(--muted);
+    background: color-mix(in srgb, var(--fg) 8%, var(--card-2));
+  }
+  .stp:hover { color: var(--accent); }
+  /* —— 复选框：原生框隐藏，label 变成芯片按钮（选中时主题色高亮） —— */
+  .chk {
+    font-size: 12px; color: var(--muted); display: inline-flex; align-items: center;
+    gap: 4px; cursor: pointer; user-select: none;
+  }
+  .chk input[type=checkbox] { accent-color: var(--accent); width: 14px; height: 14px; cursor: pointer; }
+  .chk.pill {
+    height: 22px; padding: 0 9px; border-radius: 11px; gap: 0;
+    border: 1px solid var(--line); background: color-mix(in srgb, var(--fg) 8%, var(--card-2));
+    color: var(--muted);
+    font-weight: 600; letter-spacing: .04em; transition: all .15s;
+  }
+  .chk.pill input[type=checkbox] { display: none; }
+  .chk.pill:hover { color: var(--fg); border-color: var(--accent); }
+  .chk.pill:has(input:checked) { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+  .chk.pill.mute:has(input:checked) { background: var(--danger); border-color: var(--danger); }
+  /* —— 淡入/淡出：标签 + 等宽数字输入，紧凑成组 —— */
+  .fades { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; }
+  .fades input { width: 62px; height: 22px; padding: 0 6px; font-size: 11px; text-align: center; }
+  .tbtn { height: 22px; padding: 0 9px; font-size: 11px; }
   audio { height: 30px; vertical-align: middle; }
-  .mixitem { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 6px 0; border-top: 1px solid var(--line); }
+  .mixitem {
+    display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; padding: 9px 0;
+    border-top: 1px solid var(--line);
+  }
   .mixitem:first-child { border-top: none; }
-  .mixname { min-width: 200px; font-size: 12px; }
-  a.dl { font-size: 12px; color: var(--accent); }
+  .mixname { min-width: 200px; font-size: 12px; font-weight: 500; }
+  a.dl { font-size: 12px; color: var(--accent); text-decoration: none; }
+  a.dl:hover { text-decoration: underline; }
   /* 单轨试听按钮：仅显示 ▶/⏸ 符号，紧凑排版 */
-  button.pl { padding: 2px 8px; font-size: 12px; line-height: 1.2; }
-  /* 统一播放行：所有轨共用一套 transport（播放/暂停、停止、循环、时间码） */
-  .transport { border-top: 1px solid var(--line); padding-top: 8px; gap: 10px; }
-  .transport .tstate { font-variant-numeric: tabular-nums; min-width: 104px; }
+  button.pl { padding: 0 10px; height: 24px; font-size: 12px; line-height: 1; }
+  /* 自定义滚动条（内容区超长时与主题一致） */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: var(--knob-track); border-radius: 5px; border: 2px solid transparent; background-clip: padding-box; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: padding-box; }
+  /* 统一 transport 工具条：左侧「播放/停止/循环」控制簇，中部时钟读数，右侧状态消息 */
+  .transport {
+    border: 1px solid var(--line); border-radius: var(--r-md); background: var(--card-2);
+    padding: var(--sp-2) var(--sp-3); gap: var(--sp-3); margin-top: var(--sp-1);
+    box-shadow: var(--shadow-sm);
+  }
+  .transport label.lb { min-width: auto; }
+  /* 控制簇：三件套共用相邻边框（负间距合并），仅两端圆角，形似硬件运输键 */
+  .tp-grp { display: inline-flex; align-items: center; }
+  .tp-grp > * { height: 26px; }
+  .tp-grp > * + * { margin-left: -1px; }
+  .tp-grp > button, .tp-grp > .chk.pill { border-radius: 0; }
+  .tp-grp > :first-child { border-radius: var(--r-sm) 0 0 var(--r-sm); }
+  .tp-grp > :last-child { border-radius: 0 var(--r-sm) var(--r-sm) 0; }
+  .tp-grp > #tp-play { width: 40px; font-size: 14px; }
+  .tp-grp > #tp-stop { width: 40px; font-size: 12px; }
+  .tp-grp > .chk.pill { padding: 0 11px; }
+  /* 时钟读数：当前位置大写强调 + 「/」分隔 + 总时长弱化，等宽数字避免跳动 */
+  .tp-clock {
+    display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px;
+    border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--sec);
+    font-size: 13px; font-weight: 600; color: var(--fg);
+    font-variant-numeric: tabular-nums;
+  }
+  .tp-clock .tp-sep { color: var(--muted); font-weight: 400; }
+  .tp-clock #tp-dur { font-size: 12px; font-weight: 500; color: var(--muted); }
+  /* 播放中：当前时间码转主题色，一眼看出走带状态 */
+  .transport.on .tp-clock #tp-time { color: var(--accent); }
+  .tp-msg { margin-left: auto; }
   /* 选区读数：起始时间码 + 选区时长（等宽数字，避免数值变化时抖动） */
   .selinfo { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  /* ===== FX 面板（专业效果器风）：模块分组框 + 彩色标题 + 旋钮 + 垂直推子 =====
+     设计参照硬件/插件惯例：左侧模块色圆点 + 同色标题，旋钮盘面带行程弧·值弧·刻度·指针，
+     双极参数的值弧从中性点向两侧生长；推子为纵向轨道 + 模块色填充。
+     每个控件为「盘面 → 标签 → 数值徽标」三段，模块按内容自适应高度。 */
+  .fxpanel { display: flex; align-items: flex-start; gap: var(--sp-2); flex-wrap: wrap; margin: 0 0 var(--sp-2) 12px; }
+  .fxmod {
+    display: flex; flex-direction: column; padding: 8px 11px 9px;
+    border: 1px solid var(--panel-line); border-radius: var(--r-md); background: var(--panel);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.05);
+  }
+  .fxmod[data-mod="eq"] { --mod: var(--mod-eq); }
+  .fxmod[data-mod="dyn"] { --mod: var(--mod-dyn); }
+  .fxmod[data-mod="echo"] { --mod: var(--mod-echo); }
+  /* 模块标题条：左侧色点 + 着色标题 + 底部分隔线 */
+  .fxmod-h {
+    display: flex; align-items: center; gap: 6px; margin-bottom: 9px; padding-bottom: 5px;
+    border-bottom: 1px solid var(--panel-line);
+    font-size: 11px; font-weight: 600; letter-spacing: .06em; color: var(--mod);
+  }
+  .fxmod-h::before {
+    content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--mod);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--mod) 70%, transparent);
+  }
+  .fxmod-b { display: flex; flex-direction: column; }
+  .knobrow { display: flex; align-items: flex-start; gap: 6px; }
+  /* —— 旋钮：SVG 盘面（行程弧 + 值弧 + 刻度 + 指针）+ 标签 + 可编辑数值徽标 —— */
+  .kb { width: 50px; display: flex; flex-direction: column; align-items: center; gap: 2px; outline: none; }
+  .kb-d {
+    position: relative; width: 40px; height: 40px; cursor: ns-resize; touch-action: none;
+    border-radius: 50%; filter: drop-shadow(0 1px 1px rgba(16,24,40,.18));
+  }
+  .kb-d svg { display: block; width: 40px; height: 40px; }
+  .kb-ring { fill: url(#kbFill); stroke: var(--panel-line); stroke-width: 1; }
+  .kb-track { fill: none; stroke: var(--knob-track); stroke-width: 2.5; stroke-linecap: round; opacity: .9; }
+  .kb-tk { stroke: var(--muted); stroke-width: 1; opacity: .55; }
+  .kb-arc { fill: none; stroke: var(--mod); stroke-width: 3.5; stroke-linecap: round; }
+  .kb-ptr { stroke: var(--fg); stroke-width: 2.2; stroke-linecap: round; }
+  .kb-cap { fill: var(--fg); opacity: .85; }
+  .kb:focus-visible .kb-d, .kb:focus-visible .fd-t { box-shadow: var(--ring); }
+  .kb-l, .fd-l { font-size: 10px; line-height: 1.2; color: var(--muted); white-space: nowrap; }
+  /* 数值徽标：常态为只读文本，双击原地换成输入框 */
+  .kb-v, .fd-v {
+    width: 100%; padding: 0 1px; border-radius: 3px; text-align: center; cursor: text;
+    font-size: 11px; line-height: 1.35; color: var(--fg); font-variant-numeric: tabular-nums;
+    white-space: nowrap; overflow: hidden;
+  }
+  .kb-v:hover, .fd-v:hover { background: var(--sec); box-shadow: inset 0 0 0 1px var(--panel-line); }
+  .fxnum {
+    width: 100%; padding: 0 1px; border: none; border-radius: 3px; background: var(--knob-bg);
+    text-align: center; font-size: 11px; line-height: 1.35; color: var(--fg);
+    font-variant-numeric: tabular-nums; outline: none;
+    box-shadow: inset 0 0 0 1px var(--mod);
+    -moz-appearance: textfield; appearance: textfield;
+  }
+  .fxnum::-webkit-outer-spin-button, .fxnum::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  /* —— 垂直推子：纵向轨道 + 模块色填充 + 带纹理的滑块（拖拽/点击跳转） —— */
+  .faderrow { display: flex; align-items: flex-start; gap: 10px; }
+  .fd { width: 40px; display: flex; flex-direction: column; align-items: center; gap: 2px; outline: none; }
+  .fd-t {
+    position: relative; width: 8px; height: 76px; border-radius: 4px;
+    background: var(--knob-track); cursor: ns-resize; touch-action: none;
+    box-shadow: inset 0 0 0 1px var(--panel-line);
+  }
+  .fd-f { position: absolute; left: 0; right: 0; bottom: 0; height: 0; border-radius: 4px; background: var(--mod); }
+  /* 滑块按「轨道高 - 滑块高」定位（--pos 由 JS 写入 0..1），两端都不越出轨道，不会压住下方标签 */
+  .fd-k {
+    --kd: 12px;
+    position: absolute; left: -5px; right: -5px; height: var(--kd);
+    top: calc((1 - var(--pos, 1)) * (100% - var(--kd)));
+    border-radius: 3px;
+    background: linear-gradient(var(--fg), color-mix(in srgb, var(--fg) 82%, #000));
+    box-shadow: 0 1px 3px rgba(0,0,0,.4);
+  }
+  .fd-k::after {                          /* 滑块中部手柄线，提升质感 */
+    content: ""; position: absolute; left: 3px; right: 3px; top: 50%; height: 1px;
+    margin-top: -.5px; background: var(--bg); opacity: .55;
+  }
+  /* —— 电平表（IN/OUT）与 GR 表 ——
+     列底即为「填充色」（电平为绿→黄→红渐变、GR 为 danger 红），用自上而下的遮罩盖住未点亮部分，
+     这样渐变的色标固定在整列上，不会随电平高低被拉伸；
+     GR 表填充自上而下（压缩越深越长），故遮罩改为从底部往上盖。 */
+  .fxmeter {
+    display: flex; flex-direction: column; align-items: center; gap: 4px;
+    align-self: stretch; min-height: 76px; padding: 8px 7px 8px;
+    border: 1px solid var(--panel-line); border-radius: var(--r-md); background: var(--panel);
+  }
+  .mt-bars { display: flex; gap: 2px; flex: 1; min-height: 76px; position: relative; }
+  .mt-col { position: relative; width: 11px; border-radius: 2px; background: var(--knob-track); overflow: hidden; }
+  .mt-col.lv { background: linear-gradient(to top, #22c55e 0%, #22c55e 52%, #eab308 76%, #ef4444 94%); }
+  .mt-col.gr { background: linear-gradient(to bottom, #f59e0b 0%, var(--danger) 70%); }
+  .mt-mask { position: absolute; left: 0; right: 0; top: 0; height: 100%; background: var(--knob-track); }
+  .mt-mask.bot { top: auto; bottom: 0; }
+  .mt-peak { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: var(--fg); opacity: .8; }
+  .mt-lab { font-size: 9px; line-height: 1; letter-spacing: .04em; color: var(--muted); }
+  /* 电平刻度：贴在表条上方的参考线（-6/-12/-24/-48 dBFS），不再需要读数字即可判断量级 */
+  .mt-tick {
+    position: absolute; left: 0; right: 0; height: 1px; background: var(--panel-line);
+    z-index: 2; pointer-events: none;
+  }
+  /* 压缩模块内的 GR 表：与旋钮同高，占据一列 */
+  .mt-gr { display: flex; flex-direction: column; align-items: center; gap: 4px; width: 20px; }
+  .mt-gr .mt-col { height: 76px; flex: none; }
+  /* —— 「可视化 + 旋钮」并排：音质模块（左 EQ 频响曲线 / 右 6 旋钮）、压缩模块（左 GR 表 / 右 2 旋钮） —— */
+  .fxside { display: flex; align-items: center; gap: 9px; }
+  .fxknobs { display: flex; flex-direction: column; gap: 6px; }
+  .eqc {
+    display: block; width: 186px; height: 88px; flex: none; border: 1px solid var(--panel-line);
+    border-radius: var(--r-sm); background: var(--knob-bg); cursor: ns-resize; touch-action: none;
+  }
+  .eqc:focus-visible { box-shadow: var(--ring); }
+  /* —— 母带行：参数成组，渲染按钮与状态同排 —— */
+  .master { gap: var(--sp-3); }
+  .master .mg { display: inline-flex; align-items: center; gap: 5px; }
+  .master .mg input[type=number] { width: 76px; }
+  .master .mg input[type=text] { width: 180px; }
 </style>
 </head>
 <body>
-  <h1 id="t-title"></h1>
-  <div class="hint" id="t-hint"></div>
+  <!-- 旋钮盘面的径向渐变（供全部旋钮引用，集中定义避免重复 id） -->
+  <svg width="0" height="0" aria-hidden="true" style="position:absolute">
+    <defs>
+      <radialGradient id="kbFill" cx="35%" cy="28%" r="78%">
+        <stop offset="0%" stop-color="#ffffff" stop-opacity=".95"></stop>
+        <stop offset="55%" stop-color="#ffffff" stop-opacity=".18"></stop>
+        <stop offset="100%" stop-color="#ffffff" stop-opacity="0"></stop>
+      </radialGradient>
+    </defs>
+  </svg>
 
-  <section class="card">
-    <div class="row">
-      <label class="lb" id="t-src"></label>
-      <select id="source"></select>
-      <button id="load"></button>
-      <button id="refresh"></button>
-      <span id="msg" class="msg"></span>
-    </div>
-  </section>
+  <header class="pagehead">
+    <h1 id="t-title"></h1>
+    <p class="hint" id="t-hint"></p>
+  </header>
 
-  <!-- 工程持久化：保存当前编辑状态 / 载入已保存工程（可脱离素材下拉单独使用） -->
-  <section class="card">
-    <div class="row">
-      <label class="lb" id="t-prj"></label>
-      <select id="project"></select>
-      <button id="save-proj"></button>
-      <button id="open-proj"></button>
-      <span id="prj-msg" class="msg"></span>
-    </div>
-  </section>
+  <!-- 素材与工程同排：两块窄卡片并排，避免纵向叠出大片空白 -->
+  <div class="cardgrid">
+    <section class="card">
+      <div class="row">
+        <label class="lb" id="t-src"></label>
+        <select id="source"></select>
+        <button id="load" class="primary"></button>
+        <button id="refresh" class="ghost"></button>
+        <span id="msg" class="msg"></span>
+      </div>
+    </section>
+
+    <!-- 工程持久化：保存当前编辑状态 / 载入已保存工程（可脱离素材下拉单独使用） -->
+    <section class="card">
+      <div class="row">
+        <label class="lb" id="t-prj"></label>
+        <select id="project"></select>
+        <button id="save-proj"></button>
+        <button id="open-proj"></button>
+        <span id="prj-msg" class="msg"></span>
+      </div>
+    </section>
+  </div>
 
   <section class="card" id="editor" hidden>
     <div class="row">
@@ -140,28 +463,38 @@
       <input id="sel-start" type="number" step="0.01" min="0" value="0">
       <span class="msg">–</span>
       <input id="sel-end" type="number" step="0.01" min="0" value="0">
+      <span class="sep"></span>
       <button id="apply-all"></button>
       <button id="reset-all"></button>
-      <button id="sel-clear"></button>
+      <button id="sel-clear" class="ghost"></button>
       <span id="sel-info" class="selinfo"></span>
     </div>
+    <!-- 共享时间刻度尺：所有轨共用同一时间轴，刻度与波形网格线对齐 -->
+    <div class="ruler" id="ruler"></div>
     <div id="tracks"></div>
-    <!-- 统一 transport：一个播放/暂停、一个停止，所有轨同一时钟同步（标准 DAW 逻辑） -->
-    <div class="row transport">
+    <!-- 统一 transport：播放/停止/循环为一个控制簇，所有轨共用同一时钟（标准 DAW 逻辑） -->
+    <div class="row transport" id="transport">
       <label class="lb" id="t-transport"></label>
-      <button id="tp-play" class="pl"></button>
-      <button id="tp-stop" class="pl"></button>
-      <label class="chk"><input id="tp-loop" type="checkbox"><span id="t-loop"></span></label>
-      <span id="tp-time" class="tstate"></span>
-      <span id="tp-msg" class="msg"></span>
+      <span class="tp-grp">
+        <button id="tp-play" class="pl primary"></button>
+        <button id="tp-stop" class="pl"></button>
+        <label class="chk pill"><input id="tp-loop" type="checkbox" checked><span id="t-loop"></span></label>
+      </span>
+      <span class="tp-clock">
+        <span id="tp-time">0:00.0</span><span class="tp-sep">/</span><span id="tp-dur">0:00.0</span>
+      </span>
+      <span id="tp-msg" class="msg tp-msg"></span>
     </div>
-    <div class="row">
+    <div class="row master">
       <label class="lb" id="t-master"></label>
-      <label class="msg" id="t-loud"></label><input id="loud" type="number" step="0.5" min="-30" max="-5" value="-14">
-      <label class="msg" id="t-tp"></label><input id="tp" type="number" step="0.1" min="-6" max="-0.1" value="-1.5">
-      <label class="msg" id="t-proj"></label><input id="proj" type="text">
+      <span class="mg"><label class="msg" id="t-loud"></label>
+        <input id="loud" type="number" step="0.5" min="-30" max="-5" value="-14"></span>
+      <span class="mg"><label class="msg" id="t-tp"></label>
+        <input id="tp" type="number" step="0.1" min="-6" max="-0.1" value="-1.5"></span>
+      <span class="mg"><label class="msg" id="t-proj"></label>
+        <input id="proj" type="text"></span>
       <button id="render" class="primary"></button>
-      <button id="cancel" hidden></button>
+      <button id="cancel" class="danger" hidden></button>
       <span id="status" class="msg"></span>
     </div>
     <div class="row" id="result" hidden>
@@ -174,7 +507,7 @@
   <section class="card">
     <div class="row">
       <label class="lb" id="t-mixes"></label>
-      <button id="refresh-mixes"></button>
+      <button id="refresh-mixes" class="ghost"></button>
     </div>
     <div id="mix-list"></div>
   </section>
@@ -191,6 +524,7 @@ const S = {
   projects: [],     // 已保存工程清单
   tracks: [],       // 当前载入的轨道
   dur: 0,           // 全局时长（秒）
+  ticks: [],        // 时间刻度（秒）：刻度尺与各轨波形网格线共用同一组刻度
   rootTaskId: "",   // 素材所属分离任务 id（写入工程 derived_from）
   sel: [0, 0],      // 全局选区 [起, 止]
   taskId: null,     // 当前渲染任务 id
@@ -201,7 +535,7 @@ const S = {
   bufs: {},                  // path → AudioBuffer 缓存（首次播放解码）
   nodes: [],                 // 当前已调度的 AudioBufferSourceNode
   playing: false,            // 是否正在播放
-  loop: false,               // 是否循环播放
+  loop: true,                // 是否循环播放（默认循环，与 transport 复选框初值一致）
   pos: 0,                    // 播放头位置（时间轴秒）
   t0: 0,                     // 本轮播放的在音频时钟上的起点
   playStart: 0, playEnd: 0,  // 本轮播放的时间轴区间
@@ -308,7 +642,7 @@ function drawTrack(t) {
   if (!cv) return;
   const dpr = window.devicePixelRatio || 1;
   const w = Math.max(120, cv.clientWidth || 600);
-  const h = 76;
+  const h = 78;
   if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
     cv.width = Math.round(w * dpr);
     cv.height = Math.round(h * dpr);
@@ -316,19 +650,41 @@ function drawTrack(t) {
   const ctx = cv.getContext("2d");
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = getComputedStyle(document.body).getPropertyValue("--sec");
+  // 颜色一律取 CSS 变量：轨色 / 网格 / 选区随明暗主题与轨序自动切换
+  const cs = getComputedStyle(cv);
+  const cvar = (name, fb) => cs.getPropertyValue(name).trim() || fb;
+  const line = cvar("--line", "#d8dee4"), grid = cvar("--grid", "rgba(0,0,0,.1)");
+  const trk = cvar("--trk", cvar("--wave", "#3b82f6"));
+  ctx.fillStyle = cvar("--sec", "#eef2f7");
   ctx.fillRect(0, 0, w, h);
-  ctx.strokeStyle = getComputedStyle(document.body).getPropertyValue("--line");
-  ctx.beginPath(); ctx.moveTo(0, h / 2); ctx.lineTo(w, h / 2); ctx.stroke();
+  // 时间网格：与顶部刻度尺同一组刻度（S.ticks），便于横向读数
+  if (S.dur > 0 && S.ticks.length) {
+    ctx.strokeStyle = grid; ctx.lineWidth = 1; ctx.beginPath();
+    S.ticks.forEach((sec) => {
+      const x = Math.round((sec / S.dur) * w) + .5;
+      ctx.moveTo(x, 0); ctx.lineTo(x, h);
+    });
+    ctx.stroke();
+  }
+  ctx.strokeStyle = line;
+  ctx.beginPath(); ctx.moveTo(0, h / 2 + .5); ctx.lineTo(w, h / 2 + .5); ctx.stroke();
 
   // 包络：peaks[i] = [min,max]（-1..1）
   const mid = h / 2, amp = (h - 10) / 2;
-  ctx.strokeStyle = getComputedStyle(document.body).getPropertyValue("--wave");
-  ctx.beginPath();
   const n = t.peaks.length;
+  const px = (i) => (n > 1 ? (i / (n - 1)) * w : 0);
+  if (n > 1) {
+    // 先铺一层淡淡的包络填充，波形更饱满（纯线条在大屏上偏空）
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) ctx.lineTo(px(i), mid - t.peaks[i][1] * amp);
+    for (let i = n - 1; i >= 0; i--) ctx.lineTo(px(i), mid - t.peaks[i][0] * amp);
+    ctx.closePath();
+    ctx.save(); ctx.globalAlpha = .16; ctx.fillStyle = trk; ctx.fill(); ctx.restore();
+  }
+  ctx.strokeStyle = trk; ctx.lineWidth = 1;
+  ctx.beginPath();
   for (let i = 0; i < n; i++) {
-    const x = n > 1 ? (i / (n - 1)) * w : 0;
-    const mn = t.peaks[i][0], mx = t.peaks[i][1];
+    const x = px(i), mn = t.peaks[i][0], mx = t.peaks[i][1];
     ctx.moveTo(x, mid - mx * amp);
     ctx.lineTo(x, mid - mn * amp);
   }
@@ -353,7 +709,45 @@ function drawTrack(t) {
     ctx.moveTo(xe, 0); ctx.lineTo(xe, h); ctx.stroke();
   }
 }
-function redrawAll() { S.tracks.forEach(drawTrack); updateSelInfo(); }
+/* 刻度尺跨度选择：从候选档位里取「刻度数 ≤ 12」的最小档，保证任何时长都不过密 */
+function rulerStep(dur) {
+  const steps = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
+  for (const s of steps) if (dur / s <= 12) return s;
+  return 900;
+}
+/* 秒 → m:ss（刻度尺与播放头共用，短于 1 分钟也补前导 0 分，列对齐更好读） */
+function fmtClock(sec) {
+  const s = Math.max(0, sec);
+  const m = Math.floor(s / 60);
+  return m + ":" + String(Math.floor(s - m * 60)).padStart(2, "0");
+}
+/* 渲染顶部共享刻度尺：生成 .tk 元素并按百分比定位，同时把刻度秒数组写回 S.ticks */
+function renderRuler() {
+  const box = $("ruler");
+  if (!box) return;
+  box.textContent = "";
+  S.ticks = [];
+  const dur = S.dur;
+  if (!(dur > 0)) return;
+  const step = rulerStep(dur);
+  for (let sec = 0; sec <= dur + 1e-6; sec += step) {
+    const tk = document.createElement("div");
+    tk.className = "tk";
+    tk.style.left = ((sec / dur) * 100).toFixed(4) + "%";
+    const lb = document.createElement("span");
+    lb.textContent = fmtClock(sec);
+    tk.appendChild(lb);
+    // 最后一个刻度若离右端过近，标签改为右对齐，避免溢出容器
+    if (dur - sec < step * 0.5) tk.classList.add("last");
+    box.appendChild(tk);
+    S.ticks.push(r3(sec));
+  }
+}
+function redrawAll() {
+  // 波形与 EQ 曲线颜色均取自 CSS 变量，主题变化后需一并重绘
+  S.tracks.forEach((t) => { drawTrack(t); drawEqCurve(t); });
+  updateSelInfo();
+}
 
 /* 选区读数：起始时间码 + 选区总时长；无有效选区时显示整曲范围（与播放区间一致） */
 function updateSelInfo() {
@@ -389,13 +783,18 @@ function buildTracks(items) {
   items.forEach((item, i) => {
     const wrap = document.createElement("div");
     wrap.className = "track";
+    // 轨色：按轨序循环取色板，供色条 / 波形 / 推子滑块共用
+    wrap.style.setProperty("--trk", "var(--trk-" + ((i % 6) + 1) + ")");
 
     const head = document.createElement("div");
     head.className = "thead";
+    // 左组：轨名 + 单轨试听
+    const gName = document.createElement("span");
+    gName.className = "tgrp";
     const name = document.createElement("span");
     name.className = "tname";
     name.textContent = item.label || item.name;
-    head.appendChild(name);
+    gName.appendChild(name);
 
     // 单轨试听：▶ 按钮，共享 #solo-audio 播放本轨原文件（本地套用该轨增益）
     const playBtn = document.createElement("button");
@@ -404,44 +803,148 @@ function buildTracks(items) {
     playBtn.title = T("试听本轨");
     playBtn.dataset.path = enc(item.path);   // 用于判定"当前播放的是哪一轨"
     playBtn.addEventListener("click", () => previewTrack(track));
-    head.appendChild(playBtn);
+    gName.appendChild(playBtn);
+    head.appendChild(gName);
+
+    // 右组：M/S 芯片 + 增益推子（带 ± 步进）+ 淡入淡出 + 裁切按钮 + 状态
+    const gCtl = document.createElement("span");
+    gCtl.className = "tgrp right";
+
+    const muteLab = document.createElement("label"); muteLab.className = "chk pill mute";
+    muteLab.title = T("静音");
+    const mute = document.createElement("input"); mute.type = "checkbox";
+    muteLab.appendChild(mute); muteLab.appendChild(document.createTextNode("M"));
+    gCtl.appendChild(muteLab);
+
+    const soloLab = document.createElement("label"); soloLab.className = "chk pill";
+    soloLab.title = T("独奏");
+    const solo = document.createElement("input"); solo.type = "checkbox";
+    soloLab.appendChild(solo); soloLab.appendChild(document.createTextNode("S"));
+    gCtl.appendChild(soloLab);
 
     const gain = document.createElement("input");
     gain.type = "range"; gain.min = "-30"; gain.max = "12"; gain.step = "0.5"; gain.value = "0";
     gain.className = "gain";
-    head.appendChild(gain);
+    gCtl.appendChild(gain);
+    // 数值徽标两侧配 ± 步进按钮（数值参数统一支持步进微调）
+    const gainBox = document.createElement("span");
+    gainBox.className = "gstep";
+    const gDown = document.createElement("button");
+    gDown.className = "stp"; gDown.textContent = "−";
+    const gUp = document.createElement("button");
+    gUp.className = "stp"; gUp.textContent = "+";
     const gainVal = document.createElement("span");
     gainVal.className = "gain-val"; gainVal.textContent = "0.0 dB";
-    head.appendChild(gainVal);
-
-    const muteLab = document.createElement("label"); muteLab.className = "chk";
-    const mute = document.createElement("input"); mute.type = "checkbox";
-    muteLab.appendChild(mute); muteLab.appendChild(document.createTextNode(T("静音")));
-    head.appendChild(muteLab);
-
-    const soloLab = document.createElement("label"); soloLab.className = "chk";
-    const solo = document.createElement("input"); solo.type = "checkbox";
-    soloLab.appendChild(solo); soloLab.appendChild(document.createTextNode(T("独奏")));
-    head.appendChild(soloLab);
+    gainBox.append(gDown, gainVal, gUp);
+    gCtl.appendChild(gainBox);
 
     const fades = document.createElement("span");
-    fades.className = "chk fades";
+    fades.className = "fades";
     const fin = document.createElement("input"); fin.type = "number"; fin.min = "0"; fin.step = "0.1"; fin.value = "0";
     const fout = document.createElement("input"); fout.type = "number"; fout.min = "0"; fout.step = "0.1"; fout.value = "0";
-    fades.appendChild(document.createTextNode(T("淡入(秒)"))); fades.appendChild(fin);
-    fades.appendChild(document.createTextNode(T("淡出(秒)"))); fades.appendChild(fout);
-    head.appendChild(fades);
+    const finLab = document.createElement("span"); finLab.textContent = T("淡入(秒)");
+    const foutLab = document.createElement("span"); foutLab.textContent = T("淡出(秒)");
+    fades.append(finLab, fin, foutLab, fout);
+    gCtl.appendChild(fades);
 
     const trimBtn = document.createElement("button");
-    trimBtn.textContent = T("裁为选区");
-    head.appendChild(trimBtn);
+    trimBtn.className = "tbtn"; trimBtn.textContent = T("裁为选区");
+    gCtl.appendChild(trimBtn);
     const resetBtn = document.createElement("button");
-    resetBtn.textContent = T("恢复整轨");
-    head.appendChild(resetBtn);
+    resetBtn.className = "tbtn ghost"; resetBtn.textContent = T("恢复整轨");
+    gCtl.appendChild(resetBtn);
 
     const stateEl = document.createElement("span");
     stateEl.className = "tstate";
-    head.appendChild(stateEl);
+    gCtl.appendChild(stateEl);
+    head.appendChild(gCtl);
+
+    // ---- FX 面板：音质（声像 / 三段 EQ / 高通 / 低通）+ 压缩 + 回声 ----
+    // 参照专业效果器惯例：连续比例量用旋钮，时间·强度类用垂直推子。
+    // 控件值实时写回 track 并驱动节点链，保证「听到什么就导出什么」。
+    const fxPanel = document.createElement("div");
+    fxPanel.className = "fxpanel";
+    const mkMod = (key, titleKey) => {
+      const mod = document.createElement("section");
+      mod.className = "fxmod"; mod.dataset.mod = key;
+      const h = document.createElement("div");
+      h.className = "fxmod-h"; h.textContent = T(titleKey);
+      const b = document.createElement("div");
+      b.className = "fxmod-b";
+      mod.append(h, b);
+      fxPanel.appendChild(mod);
+      return b;
+    };
+    const mkRow = (body, cls) => {
+      const r = document.createElement("div");
+      r.className = cls; body.appendChild(r);
+      return r;
+    };
+    // 音质模块：左侧 EQ 频响曲线（可拖手柄），右侧两行旋钮（上行三段 EQ，下行滤波与声像）
+    const eqWrap = document.createElement("div"); eqWrap.className = "fxside";
+    const eqCv = document.createElement("canvas"); eqCv.className = "eqc";
+    const eqKnobs = document.createElement("div"); eqKnobs.className = "fxknobs";
+    const eqRowA = mkRow(eqKnobs, "knobrow");
+    const eqRowB = mkRow(eqKnobs, "knobrow");
+    eqWrap.append(eqCv, eqKnobs);
+    mkMod("eq", "音质").appendChild(eqWrap);
+    // 压缩模块：左侧 GR 表（自上而下填充，压缩越深越长），右侧阈值/比率两个旋钮
+    const dynWrap = document.createElement("div"); dynWrap.className = "fxside";
+    const grWrap = document.createElement("div"); grWrap.className = "mt-gr";
+    const grCol = mkMtrCol("gr", false);
+    const grLab = document.createElement("div"); grLab.className = "mt-lab"; grLab.textContent = T("GR");
+    grWrap.append(grCol.col, grLab);
+    const dynKnobs = document.createElement("div"); dynKnobs.className = "knobrow";
+    dynWrap.append(grWrap, dynKnobs);
+    mkMod("dyn", "压缩").appendChild(dynWrap);
+    const echoRow = mkRow(mkMod("echo", "回声"), "faderrow");
+
+    // 控件区间与后端钳制区间一致；中性值 = 双击盘面 / Home 的复位目标
+    const panEl = mkFxCtl({ label: "声像", tip: "声像", kind: "pan", bipolar: true,
+      min: -1, max: 1, step: 0.05, init: 0,
+      onChange: (v) => { track.pan = v; applyTrackFx(track); } });
+    const eqLowEl = mkFxCtl({ label: "低频", tip: "低频架 200Hz", kind: "db", bipolar: true,
+      min: -15, max: 15, step: 0.5, init: 0,
+      onChange: (v) => { track.eqLow = v; applyTrackFx(track); drawEqCurve(track); } });
+    const eqMidEl = mkFxCtl({ label: "中频", tip: "中频峰 1kHz", kind: "db", bipolar: true,
+      min: -15, max: 15, step: 0.5, init: 0,
+      onChange: (v) => { track.eqMid = v; applyTrackFx(track); drawEqCurve(track); } });
+    const eqHighEl = mkFxCtl({ label: "高频", tip: "高频架 4kHz", kind: "db", bipolar: true,
+      min: -15, max: 15, step: 0.5, init: 0,
+      onChange: (v) => { track.eqHigh = v; applyTrackFx(track); drawEqCurve(track); } });
+    const hpfEl = mkFxCtl({ label: "高通", tip: "高通（0 = 关闭）", kind: "hz",
+      min: 0, max: 2000, step: 10, init: 0,
+      onChange: (v) => { track.hpf = v; applyTrackFx(track); drawEqCurve(track); } });
+    const lpfEl = mkFxCtl({ label: "低通", tip: "低通（0 = 关闭）", kind: "hz",
+      min: 0, max: 20000, step: 100, init: 0,
+      onChange: (v) => { track.lpf = v; applyTrackFx(track); drawEqCurve(track); } });
+    // 压缩：阈值 0dB（顶到上限）或比率 1 即等同关闭（与后端 _comp_filter 判据一致）
+    // 阈值的中性点在行程最右端，故用 bipolar 让值弧从「关闭」端向做深压缩的方向生长
+    const compThEl = mkFxCtl({ label: "阈值", tip: "压缩阈值", kind: "db", bipolar: true,
+      min: -60, max: 0, step: 1, init: 0,
+      onChange: (v) => { track.compTh = v; applyTrackFx(track); } });
+    const compRatioEl = mkFxCtl({ label: "比率", tip: "压缩比率", kind: "ratio",
+      min: 1, max: 20, step: 0.5, init: 1,
+      onChange: (v) => { track.compRatio = v; applyTrackFx(track); } });
+    // 回声：默认全中性（混合 0 即关闭）；延迟 0 = 自动用 FX_ECHO_DEF_MS（与后端兜底一致）；
+    // 反馈上限 0.95（避免无限堆积）
+    const echoDelayEl = mkFxCtl({ label: "延迟", tip: "延迟（0 = 自动 250ms）", kind: "ms", shape: "fader",
+      min: 0, max: 2000, step: 10, init: 0,
+      onChange: (v) => { track.echoDelay = v; applyTrackFx(track); } });
+    const echoFbEl = mkFxCtl({ label: "反馈", tip: "反馈", kind: "fb", shape: "fader",
+      min: 0, max: 0.95, step: 0.05, init: 0,
+      onChange: (v) => { track.echoFb = v; applyTrackFx(track); } });
+    const echoMixEl = mkFxCtl({ label: "混合", tip: "回声混合比例", kind: "pct", shape: "fader",
+      min: 0, max: 1, step: 0.05, init: 0,
+      onChange: (v) => { track.echoMix = v; applyTrackFx(track); } });
+    eqRowA.append(eqLowEl.el, eqMidEl.el, eqHighEl.el);
+    eqRowB.append(hpfEl.el, lpfEl.el, panEl.el);
+    dynKnobs.append(compThEl.el, compRatioEl.el);
+    echoRow.append(echoDelayEl.el, echoFbEl.el, echoMixEl.el);
+    // 面板两端各挂一块表：IN 在音质模块左侧，OUT 在回声模块右侧
+    const mtrIn = mkMeterBlock("IN"), mtrOut = mkMeterBlock("OUT");
+    fxPanel.prepend(mtrIn.wrap);
+    fxPanel.appendChild(mtrOut.wrap);
 
     const cv = document.createElement("canvas");
     cv.className = "wave";
@@ -453,6 +956,7 @@ function buildTracks(items) {
     waveWrap.appendChild(cv);
     waveWrap.appendChild(ph);
     wrap.appendChild(head);
+    wrap.appendChild(fxPanel);
     wrap.appendChild(waveWrap);
     box.appendChild(wrap);
 
@@ -462,14 +966,34 @@ function buildTracks(items) {
       fadeIn: 0, fadeOut: 0, clips: [], peaks: [], canvas: cv, stateEl: stateEl,
       gainEl: gain, gainValEl: gainVal, muteEl: mute, soloEl: solo,
       finEl: fin, foutEl: fout, playheadEl: ph, node: null,
+      // 音质（P1）/音效（P2）：参数值 + 对应控件；fx 为播放时建立的节点链（未播放时为 null）
+      pan: 0, eqLow: 0, eqMid: 0, eqHigh: 0, hpf: 0, lpf: 0, fx: null,
+      compTh: 0, compRatio: 1, echoDelay: 0, echoFb: 0, echoMix: 0,
+      // FX 控件（工程回灌时调用其 setV，见 applyTrackState）
+      panEl: panEl, eqLowEl: eqLowEl, eqMidEl: eqMidEl,
+      eqHighEl: eqHighEl, hpfEl: hpfEl, lpfEl: lpfEl,
+      compThEl: compThEl, compRatioEl: compRatioEl,
+      echoDelayEl: echoDelayEl, echoFbEl: echoFbEl, echoMixEl: echoMixEl,
+      // 可视化：EQ 曲线画布、四张表 + GR 表的 DOM 与显示状态；meter 为播放时建立的取样链（未播放时为 null）
+      eqCanvas: eqCv,
+      mtrEl: { inL: mtrIn.L, inR: mtrIn.R, outL: mtrOut.L, outR: mtrOut.R, gr: grCol },
+      mtr: null, meter: null,
     };
     S.tracks.push(track);
+    // 曲线：绑定手柄拖拽（改 gain）并首次绘制
+    attachEqCurve(track, eqCv);
+    drawEqCurve(track);
 
-    gain.addEventListener("input", () => {
-      track.gain = parseFloat(gain.value) || 0;
+    // 增益：滑块、± 步进按钮、数值徽标三者共用同一写值入口，始终保持一致
+    const setGain = (v) => {
+      track.gain = clampNum(r3(Number(v) || 0), -30, 12);
+      gain.value = String(track.gain);
       gainVal.textContent = track.gain.toFixed(1) + " dB";
       applyTrackGain(track);                    // 播放中调增益即时生效
-    });
+    };
+    gain.addEventListener("input", () => setGain(gain.value));
+    gDown.addEventListener("click", () => setGain(track.gain - 0.5));
+    gUp.addEventListener("click", () => setGain(track.gain + 0.5));
     mute.addEventListener("change", () => { track.mute = mute.checked; applyTrackGain(track); });
     solo.addEventListener("change", () => {
       track.solo = solo.checked;
@@ -496,7 +1020,7 @@ function buildTracks(items) {
    AudioContext 延迟到首次点击才创建，以满足浏览器"必须用户手势"的限制。
    按钮符号由播放器事件统一刷新（按 currentSrc 匹配归属轨）：切换轨道时改 src
    会异步触发 pause 事件，若靠手工维护按钮标记会导致两个按钮同时显示 ⏸。 */
-let _pvCtx = null, _pvGain = null;
+let _pvCtx = null, _pvGain = null, _pvFx = null;
 function syncPreviewButtons() {
   const el = $("solo-audio");
   const cur = el.paused ? "" : (el.currentSrc || "");
@@ -516,13 +1040,197 @@ function previewTrack(t) {
     if (!_pvCtx) {                                            // 首次点击才建上下文
       _pvCtx = new (window.AudioContext || window.webkitAudioContext)();
       _pvGain = _pvCtx.createGain();
-      _pvCtx.createMediaElementSource(el).connect(_pvGain).connect(_pvCtx.destination);
+      _pvFx = buildFxChain(_pvCtx);                           // 试听同样套用该轨音质
+      _pvCtx.createMediaElementSource(el).connect(_pvFx.head);
+      _pvFx.tail.connect(_pvGain).connect(_pvCtx.destination);
     }
     _pvCtx.resume();
     _pvGain.gain.value = Math.pow(10, (Number(t.gain) || 0) / 20);  // dB → 线性增益
+    applyFxParams(_pvCtx, _pvFx.nodes, t);
     el.src = "/api/mix/audio?path=" + enc(t.path);
     el.play().catch(() => syncPreviewButtons());
   } catch (e) { /* 播放失败静默处理：不阻断编辑 */ }
+}
+
+/* ================================================ FX 控件（旋钮 / 推子 / 数值徽标） */
+/* 专业效果器风格的参数控件。设计要点：
+   - 值由闭包持有，皮肤（SVG 旋钮 / CSS 推子）与只读数值徽标由 paint() 统一刷新；
+   - 数值徽标双击原地换成 <input type="number"> 精确录入（Enter/失焦提交，Esc 取消）；
+   - 交互：上下拖拽（Shift 精调 1/5）、滚轮 1 档、双击盘面复位中性值、聚焦后 ↑↓/PageUp/Home；
+   - 一律量化到 step，与「步进」语义一致，避免连续浮点漂移导致数值不可读。
+   形态：shape="knob"（默认，连续比例量）/ shape="fader"（时间·强度类，纵向推子）。 */
+const KNOB_SWEEP = 270, KNOB_A0 = -135, KNOB_C = 20, KNOB_R = 15.5;  // 行程 -135°…+135°（12 点方向为 0°）
+/* 旋钮极坐标 → SVG 坐标（viewBox 40×40，圆心 20,20） */
+function knobXY(r, deg) {
+  const rad = (deg - 90) * Math.PI / 180;
+  return [KNOB_C + r * Math.cos(rad), KNOB_C + r * Math.sin(rad)];
+}
+/* 值弧 path：从 a0 到 a1（度）；两角重合时返回空串（不画弧） */
+function arcPath(r, a0, a1) {
+  if (Math.abs(a1 - a0) < 0.6) return "";
+  const p0 = knobXY(r, a0), p1 = knobXY(r, a1);
+  const large = Math.abs(a1 - a0) > 180 ? 1 : 0;
+  return "M" + p0[0].toFixed(2) + " " + p0[1].toFixed(2) + "A" + r + " " + r + " 0 " +
+    large + " " + (a1 > a0 ? 1 : 0) + " " + p1[0].toFixed(2) + " " + p1[1].toFixed(2);
+}
+/* 数值徽标文案：按类型给单位与精度（Hz 超 1k 折成 k；0 = 关闭的显示 OFF） */
+function fmtFxVal(v, kind) {
+  switch (kind) {
+    case "db": return (v > 0 ? "+" : "") + v.toFixed(1) + " dB";
+    case "hz": return v <= 0 ? "OFF" : (v >= 1000 ? (v / 1000).toFixed(1) + "k" : String(Math.round(v))) + " Hz";
+    case "ratio": return v.toFixed(1) + ":1";
+    case "ms": return Math.round(v) + " ms";
+    case "fb": return v.toFixed(2);
+    case "pct": return Math.round(v * 100) + "%";
+    case "pan": return fmtPan(v);
+    default: return String(v);
+  }
+}
+/* 建一个 FX 参数控件。
+   opt = {label, min, max, step, init, neutral, kind, tip, bipolar, shape, onChange}
+   返回 {el, setV, getV}：setV 供工程回灌（只刷新显示，不广播 onChange）。 */
+function mkFxCtl(opt) {
+  const min = opt.min, max = opt.max, step = opt.step;
+  const neutral = opt.neutral === undefined ? opt.init : opt.neutral;
+  const isFader = opt.shape === "fader";
+  let cur = clampNum(opt.init, min, max);
+
+  const box = document.createElement("div");
+  box.className = isFader ? "fd" : "kb";
+  box.tabIndex = 0;                              // 可聚焦 → 键盘可调值（空格仍是全局热键）
+  box.title = T(opt.tip || opt.label);
+
+  const skin = document.createElement("div");
+  skin.className = isFader ? "fd-t" : "kb-d";
+  let arc = null, ptr = null, fill = null, knob = null;
+  if (isFader) {
+    fill = document.createElement("div"); fill.className = "fd-f";
+    knob = document.createElement("div"); knob.className = "fd-k";
+    skin.append(fill, knob);
+  } else {
+    // 盘面 = 刻度（±135°/±90°/0° 三档标记）+ 行程弧（暗）+ 值弧（模块色）+ 指针 + 中心盖
+    const ticks = [-135, -90, 0, 90, 135].map((deg) => {
+      const p0 = knobXY(17.6, deg), p1 = knobXY(19.6, deg);
+      return '<line class="kb-tk" x1="' + p0[0].toFixed(2) + '" y1="' + p0[1].toFixed(2) +
+        '" x2="' + p1[0].toFixed(2) + '" y2="' + p1[1].toFixed(2) + '"></line>';
+    }).join("");
+    skin.innerHTML = '<svg viewBox="0 0 40 40" aria-hidden="true">' + ticks +
+      '<circle class="kb-ring" cx="' + KNOB_C + '" cy="' + KNOB_C + '" r="' + KNOB_R + '"></circle>' +
+      '<path class="kb-track"></path>' +
+      '<path class="kb-arc"></path>' +
+      '<line class="kb-ptr" x1="' + KNOB_C + '" y1="' + KNOB_C + '" x2="' + KNOB_C +
+      '" y2="' + (KNOB_C - KNOB_R + 2.5) + '"></line>' +
+      '<circle class="kb-cap" cx="' + KNOB_C + '" cy="' + KNOB_C + '" r="2.4"></circle></svg>';
+    arc = skin.querySelector(".kb-arc"); ptr = skin.querySelector(".kb-ptr");
+    // 行程弧固定画满整程（中性值时也能看出可调范围）
+    skin.querySelector(".kb-track").setAttribute("d", arcPath(KNOB_R, KNOB_A0, KNOB_A0 + KNOB_SWEEP));
+  }
+  const lab = document.createElement("div");
+  lab.className = isFader ? "fd-l" : "kb-l"; lab.textContent = T(opt.label);
+  // 数值徽标：常态只读文本（不占焦点），双击换成输入框
+  const val = document.createElement("div");
+  val.className = isFader ? "fd-v" : "kb-v";
+  box.append(skin, lab, val);
+
+  const t0 = (neutral - min) / (max - min);      // 中性值在行程上的比例
+  const angle = (ratio) => KNOB_A0 + ratio * KNOB_SWEEP;
+  const ratio = () => (cur - min) / (max - min);
+  const snap = (v) => clampNum(r3(Math.round(v / step) * step), min, max);
+
+  /* 刷新皮肤与徽标（不广播 onChange） */
+  function paint() {
+    val.textContent = fmtFxVal(cur, opt.kind);
+    if (isFader) {
+      fill.style.height = (ratio() * 100) + "%";
+      knob.style.setProperty("--pos", ratio().toFixed(4));
+    } else {
+      ptr.setAttribute("transform", "rotate(" + angle(ratio()).toFixed(2) + " " + KNOB_C + " " + KNOB_C + ")");
+      // 双极参数从中性点向两侧生长，单极从最小端生长
+      const base = opt.bipolar ? t0 : 0;
+      const a0 = Math.min(base, ratio()), a1 = Math.max(base, ratio());
+      arc.setAttribute("d", arcPath(KNOB_R, angle(a0), angle(a1)));
+    }
+  }
+  /* 写值：量化 → 刷新 → 值真变化且 notify 时广播（实时预览 / 写回 track） */
+  function set(v, notify) {
+    const nv = snap(Number(v) || 0);
+    const changed = nv !== cur;
+    cur = nv; paint();
+    if (changed && notify) opt.onChange(cur);
+    return changed;
+  }
+  /* 数值徽标双击 → 原地精确录入 */
+  function beginEdit() {
+    const inp = document.createElement("input");
+    inp.type = "number"; inp.className = "fxnum";
+    inp.min = String(min); inp.max = String(max); inp.step = String(step);
+    inp.value = String(r3(cur));
+    let settled = false;
+    const finish = (commit) => {
+      if (settled) return;
+      settled = true;
+      if (commit) set(parseFloat(inp.value) || 0, true);
+      inp.replaceWith(val);                     // 无论提交与否都还原为文本徽标
+    };
+    inp.addEventListener("blur", () => finish(true));
+    inp.addEventListener("keydown", (ev) => {
+      if (ev.code === "Enter") { ev.preventDefault(); finish(true); }
+      else if (ev.code === "Escape") { ev.preventDefault(); finish(false); }
+    });
+    val.replaceWith(inp);
+    inp.focus(); inp.select();
+  }
+
+  // —— 拖拽：旋钮按垂直位移换算（拖满约 180px），推子按轨道内绝对位置（点击跳转 + 拖动） ——
+  let drag = null;
+  skin.addEventListener("pointerdown", (ev) => {
+    if (ev.button !== 0) return;
+    ev.preventDefault();
+    try { skin.setPointerCapture(ev.pointerId); } catch (e) { /* 指针不可捕获时退化为普通拖拽 */ }
+    if (isFader) {
+      const rect = skin.getBoundingClientRect();
+      const at = (cy) => min + clampNum(1 - (cy - rect.top) / rect.height, 0, 1) * (max - min);
+      drag = { y: ev.clientY, at: at };
+      set(at(ev.clientY), true);
+    } else {
+      drag = { y: ev.clientY, v: cur };
+    }
+  });
+  skin.addEventListener("pointermove", (ev) => {
+    if (!drag) return;
+    if (drag.at) { set(drag.at(ev.clientY), true); return; }
+    const span = (max - min) / (ev.shiftKey ? 900 : 180);
+    set(drag.v + (drag.y - ev.clientY) * span, true);
+  });
+  const endDrag = (ev) => {
+    if (!drag) return;
+    drag = null;
+    try { skin.releasePointerCapture(ev.pointerId); } catch (e) { /* 指针已释放 */ }
+  };
+  skin.addEventListener("pointerup", endDrag);
+  skin.addEventListener("pointercancel", endDrag);
+  skin.addEventListener("dblclick", () => set(neutral, true));
+  skin.addEventListener("wheel", (ev) => {
+    ev.preventDefault();
+    set(cur + (ev.deltaY < 0 ? step : -step), true);
+  }, { passive: false });
+  val.addEventListener("dblclick", beginEdit);
+  // 键盘：↑↓ 一档、Shift 五档、PageUp/Down 十分之一行程、Home 复位
+  box.addEventListener("keydown", (ev) => {
+    const big = ev.shiftKey ? 5 : 1;
+    let d = 0;
+    if (ev.code === "ArrowUp" || ev.code === "ArrowRight") d = step * big;
+    else if (ev.code === "ArrowDown" || ev.code === "ArrowLeft") d = -step * big;
+    else if (ev.code === "PageUp") d = (max - min) / 10;
+    else if (ev.code === "PageDown") d = -(max - min) / 10;
+    else if (ev.code === "Home") { ev.preventDefault(); set(neutral, true); return; }
+    else return;
+    ev.preventDefault();
+    set(cur + d, true);
+  });
+
+  paint();
+  return { el: box, setV: (v) => set(v, false), getV: () => cur };
 }
 
 /* ========================================================== 统一播放（transport） */
@@ -542,6 +1250,397 @@ function audioCtx() {
   return S.ctx;
 }
 function linGain(db) { return Math.pow(10, (Number(db) || 0) / 20); }
+
+/* —— 每轨音质（P1）+ 音效（P2）：声像 / 三段 EQ / 高通·低通 / 压缩 / 回声 ——
+   与后端 mix_render._fx_filters 一一对应，保证「听到什么就导出什么」：
+   声像用 Web Audio StereoPannerNode 的等功率算法（后端用同公式生成 pan 滤镜），
+   高通/低通为 12dB/oct Butterworth（后端 width=0.707），EQ 节点频率与后端一致；
+   压缩对应后端 acompressor（阈值/比率/固定 attack-release-knee）；
+   回声对应后端 aecho：3 条并联延迟线（fb¹/fb²/fb³），干声直通不衰减。
+   后端处理顺序为 高通→低通→EQ→声像→压缩→回声，前端链顺序保持一致。 */
+const FX_HPF_OFF = 20;        // 高通"关闭"时的等效频率（<20Hz 不可闻，等同旁通）
+const FX_LPF_OFF = 22050;     // 低通"关闭"时的等效频率（超出可听带，等同旁通）
+const FX_Q = 0.7071;          // 12dB/oct Butterworth
+const FX_ECHO_TAPS = 3;       // 回声抽头数（与后端 _ECHO_TAPS 一致）
+const FX_DELAY_MAX = 2.0;     // 单条延迟线上限（秒），覆盖后端 0~2000ms
+const FX_ECHO_DEF_MS = 250;   // 混合 > 0 但延迟未填时的兜底（与后端一致）
+const FX_COMP_ATTACK = 0.02;  // 压缩启动（秒）= 后端 attack 20ms
+const FX_COMP_RELEASE = 0.25; // 压缩释放（秒）= 后端 release 250ms
+const FX_COMP_KNEE = 6;       // 压缩拐点（dB）= 后端 knee
+/* 建一条固定的音质+音效节点链（参数为中性时等同旁通），返回 {head, tail, nodes} */
+function buildFxChain(ctx) {
+  const mk = (type, freq, q) => {
+    const n = ctx.createBiquadFilter();
+    n.type = type; n.frequency.value = freq;
+    if (q !== undefined) n.Q.value = q;
+    return n;
+  };
+  const hpf = mk("highpass", FX_HPF_OFF, FX_Q);
+  const lpf = mk("lowpass", FX_LPF_OFF, FX_Q);
+  const low = mk("lowshelf", 200);          // 低频架 200Hz（后端 bass f=200）
+  const mid = mk("peaking", 1000, 1);       // 中频峰 1kHz Q=1（后端 equalizer f=1000）
+  const high = mk("highshelf", 4000);       // 高频架 4kHz（后端 treble f=4000）
+  const pan = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
+  const comp = ctx.createDynamicsCompressor ? ctx.createDynamicsCompressor() : null;
+  if (comp) {                               // 固定时间常数，只暴露阈值与比率
+    comp.knee.value = FX_COMP_KNEE;
+    comp.attack.value = FX_COMP_ATTACK;
+    comp.release.value = FX_COMP_RELEASE;
+  }
+  // 回声子图：echoIn 分为干声直通 + 3 条 延迟→增益 支路，全部汇入 echoOut
+  const echoIn = ctx.createGain();
+  const echoOut = ctx.createGain();
+  const taps = [];
+  for (let k = 1; k <= FX_ECHO_TAPS; k++) {
+    const d = ctx.createDelay(FX_DELAY_MAX);
+    const g = ctx.createGain();
+    g.gain.value = 0;                       // 默认全关（等同旁通）
+    echoIn.connect(d); d.connect(g); g.connect(echoOut);
+    taps.push({ d: d, g: g });
+  }
+  const chain = [hpf, lpf, low, mid, high];
+  if (pan) chain.push(pan);
+  if (comp) chain.push(comp);
+  chain.push(echoIn, echoOut);               // echoIn→echoOut 即干声直通
+  for (let i = 0; i < chain.length - 1; i++) chain[i].connect(chain[i + 1]);
+  return {
+    head: hpf, tail: echoOut,
+    nodes: { hpf, lpf, low, mid, high, pan, comp, echoIn, echoOut, taps },
+  };
+}
+/* 把音质/音效参数写入节点链（短时间常数平滑，播放中改动即时生效且不爆音） */
+function applyFxParams(ctx, nodes, s) {
+  if (!nodes) return;
+  const now = ctx.currentTime, tc = 0.02;
+  nodes.hpf.frequency.setTargetAtTime(s.hpf > 0 ? s.hpf : FX_HPF_OFF, now, tc);
+  nodes.lpf.frequency.setTargetAtTime(s.lpf > 0 ? s.lpf : FX_LPF_OFF, now, tc);
+  nodes.low.gain.setTargetAtTime(s.eqLow, now, tc);
+  nodes.mid.gain.setTargetAtTime(s.eqMid, now, tc);
+  nodes.high.gain.setTargetAtTime(s.eqHigh, now, tc);
+  if (nodes.pan) nodes.pan.pan.setTargetAtTime(s.pan, now, tc);
+  if (nodes.comp) {
+    // 阈值 >= 0dB 或比率 <= 1 视为关闭（与后端 _comp_filter 判据一致）
+    const on = s.compTh < -0.05 && s.compRatio > 1.05;
+    nodes.comp.threshold.setTargetAtTime(on ? s.compTh : 0, now, tc);
+    nodes.comp.ratio.setTargetAtTime(on ? s.compRatio : 1, now, tc);
+  }
+  const echoOn = s.echoMix >= 0.01;
+  const dsec = (s.echoDelay > 0 ? s.echoDelay : FX_ECHO_DEF_MS) / 1000;
+  nodes.taps.forEach((t, i) => {
+    const k = i + 1;
+    t.d.delayTime.setTargetAtTime(dsec * k, now, tc);
+    t.g.gain.setTargetAtTime(echoOn ? s.echoMix * Math.pow(s.echoFb, k) : 0, now, tc);
+  });
+}
+function applyTrackFx(t) {
+  if (t.fx && S.ctx) applyFxParams(S.ctx, t.fx.nodes, t);
+}
+
+/* ==================== 电平表（IN/OUT）+ 压缩 GR 表 ====================
+   取样节点只做旁路：prev.connect(tap.split)，不串进音频链路，
+   因此加表前后的播放声音完全一致（导出的成品由后端 ffmpeg 离线渲染，与本页无关）。
+   IN 取 env 之后（含裁切/淡变）、OUT 取轨增益之后（含 Mute/Solo 门控），与 todo 的链路约定一致。 */
+const MTR_FFT = 1024;       // 时域窗（1024 点，约 21ms @48k，够跟手）
+const MTR_FALL = 3.2;       // 显示回落速度（满量程/秒）→ 停止播放后约 0.3s 归零
+const MTR_HOLD = 800;       // 峰值保持时长（毫秒）
+const MTR_DB_FLOOR = 60;    // 表底：-60dBFS 以下视为静音
+function dbToFrac(db) { return clampNum(1 + db / MTR_DB_FLOOR, 0, 1); }
+function newMtrState() {
+  const one = () => ({ v: 0, p: 0, t: 0 });
+  return { inL: one(), inR: one(), outL: one(), outR: one(), gr: one() };
+}
+/* 一路分析器取样：分左右两条（声像会让两声道不同），返回 {split, anL, anR, buf} */
+function mkMeterTap(ctx) {
+  const split = ctx.createChannelSplitter(2);
+  const anL = ctx.createAnalyser(), anR = ctx.createAnalyser();
+  anL.fftSize = anR.fftSize = MTR_FFT;
+  split.connect(anL, 0, 0);
+  split.connect(anR, 1, 0);
+  return { split: split, anL: anL, anR: anR, buf: new Float32Array(MTR_FFT) };
+}
+function disposeMeterTap(tap) {
+  if (!tap) return;
+  [tap.split, tap.anL, tap.anR].forEach((n) => {
+    try { n.disconnect(); } catch (e) { /* 忽略 */ }
+  });
+}
+/* 建一列电平条：返回 {col, mask, peak}（peak 仅电平表用，GR 表无峰值线） */
+function mkMtrCol(cls, withPeak) {
+  const col = document.createElement("div");
+  col.className = "mt-col " + cls;
+  const mask = document.createElement("div");
+  mask.className = "mt-mask" + (cls === "gr" ? " bot" : "");
+  col.appendChild(mask);
+  let peak = null;
+  if (withPeak) {
+    peak = document.createElement("div");
+    peak.className = "mt-peak";
+    col.appendChild(peak);
+  }
+  return { col: col, mask: mask, peak: peak };
+}
+/* 建一块表（IN/OUT）：立体声左右两条 + 底部标签 */
+function mkMeterBlock(labelKey) {
+  const wrap = document.createElement("div");
+  wrap.className = "fxmeter";
+  const bars = document.createElement("div");
+  bars.className = "mt-bars";
+  // 参考刻度线：-6/-12/-24/-48 dBFS，贴在表条上（与 dbToFrac 的映射一致）
+  [-6, -12, -24, -48].forEach((db) => {
+    const tk = document.createElement("div");
+    tk.className = "mt-tick";
+    tk.style.bottom = (dbToFrac(db) * 100).toFixed(1) + "%";
+    bars.appendChild(tk);
+  });
+  const L = mkMtrCol("lv", true), R = mkMtrCol("lv", true);
+  bars.append(L.col, R.col);
+  const lab = document.createElement("div");
+  lab.className = "mt-lab"; lab.textContent = T(labelKey);
+  wrap.append(bars, lab);
+  return { wrap: wrap, L: L, R: R };
+}
+/* 读一路分析器的时域峰值（0~1 幅度） */
+function tapPeak(tap, an) {
+  an.getFloatTimeDomainData(tap.buf);
+  let p = 0;
+  for (let i = 0; i < tap.buf.length; i++) {
+    const a = Math.abs(tap.buf[i]);
+    if (a > p) p = a;
+  }
+  return p;
+}
+/* 单条表走一步：目标高于当前则立即跟上，否则按 MTR_FALL 回落；
+   峰值保持 MTR_HOLD 后回落。返回该条是否仍有可见显示（用于判断动画何时可停）。 */
+function stepMeter(s, target, dt, now) {
+  s.v = target > s.v ? target : Math.max(0, s.v - MTR_FALL * dt);
+  if (s.v >= s.p) { s.p = s.v; s.t = now; }
+  else if (now - s.t > MTR_HOLD) s.p = Math.max(s.v, s.p - MTR_FALL * dt);
+  return Math.max(s.v, s.p) > 0.002;
+}
+/* 把状态画到 DOM：遮罩高度 = 未点亮比例；峰值线定位到保持值 */
+function paintMeter(t) {
+  const el = t.mtrEl, m = t.mtr;
+  if (!el || !m) return;
+  const put = (o, s) => {
+    o.mask.style.height = ((1 - s.v) * 100).toFixed(1) + "%";
+    if (o.peak) o.peak.style.bottom = (s.p * 100).toFixed(1) + "%";
+  };
+  put(el.inL, m.inL); put(el.inR, m.inR);
+  put(el.outL, m.outL); put(el.outR, m.outR);
+  put(el.gr, m.gr);
+}
+/* 刷新所有轨的表；返回是否仍需继续（有非零显示） */
+function updateMeters(dt, now) {
+  let live = false;
+  S.tracks.forEach((t) => {
+    const m = t.mtr;
+    if (!m) return;
+    const tap = S.playing ? t.meter : null;             // 未播放时一律给 0 → 表自然回落
+    const lvl = (tp, an) => (tp ? dbToFrac(20 * Math.log10(Math.max(tapPeak(tp, an), 1e-4))) : 0);
+    if (stepMeter(m.inL, tap && tap.in ? lvl(tap.in, tap.in.anL) : 0, dt, now)) live = true;
+    if (stepMeter(m.inR, tap && tap.in ? lvl(tap.in, tap.in.anR) : 0, dt, now)) live = true;
+    if (stepMeter(m.outL, tap && tap.out ? lvl(tap.out, tap.out.anL) : 0, dt, now)) live = true;
+    if (stepMeter(m.outR, tap && tap.out ? lvl(tap.out, tap.out.anR) : 0, dt, now)) live = true;
+    // GR 直接读压缩节点的增益衰减量（≤0 dB）。规范里 reduction 是只读 AudioParam，
+    // 但 Chrome 实现为只读 number，故两种形态都兼容；按 -20dB 满档映射到 0~1
+    const comp = tap && tap.fx ? tap.fx.nodes.comp : null;
+    const rr = comp ? comp.reduction : 0;
+    const red = typeof rr === "number" ? rr : ((rr && rr.value) || 0);
+    const gr = comp ? clampNum(-red / 20, 0, 1) : 0;
+    if (stepMeter(m.gr, gr, dt, now)) live = true;
+    paintMeter(t);
+  });
+  return live;
+}
+/* 表刷新循环：播放中持续跑；停止后把残值回落归零再自动停掉（不空转占 CPU） */
+let _mtrRaf = 0, _mtrLast = 0;
+function meterLoop() {
+  if (_mtrRaf) return;
+  _mtrLast = performance.now();
+  const step = () => {
+    const now = performance.now();
+    const dt = Math.min(0.1, (now - _mtrLast) / 1000);
+    _mtrLast = now;
+    const live = updateMeters(dt, now);
+    if (S.playing || live) {
+      _mtrRaf = requestAnimationFrame(step);
+    } else {
+      _mtrRaf = 0;
+      updateMeters(1, now);              // 收尾：一次性归零并落笔
+    }
+  };
+  _mtrRaf = requestAnimationFrame(step);
+}
+
+/* ==================== EQ 频响曲线 ====================
+   5 个 biquad 与 buildFxChain 的参数完全一致（高通/低通/低频架 200Hz/中频峰 1kHz Q=1/高频架 4kHz），
+   在 OfflineAudioContext 上调用 getFrequencyResponse 取各频点幅度，串联合计（dB 相加）后绘制。
+   3 个手柄（200Hz / 1kHz / 4kHz）只能上下拖拽改 gain —— 频率后端未暴露，固定不动。 */
+const EQ_W = 186, EQ_H = 88;      // 画布 CSS 尺寸（与 .eqc 一致）
+const EQ_PTS = 200;               // 对数采样点数
+const EQ_DB_RANGE = 18;           // 纵轴 ±18dB（略大于参数 ±15dB，避免贴边）
+const EQ_GAIN_MAX = 15;           // 手柄增益上限，与旋钮区间一致
+const EQ_HANDLES = [
+  { hz: 200, key: "eqLow", ctl: "eqLowEl" },
+  { hz: 1000, key: "eqMid", ctl: "eqMidEl" },
+  { hz: 4000, key: "eqHigh", ctl: "eqHighEl" },
+];
+const EQ_FREQS = (() => {          // 20Hz → 20kHz 对数等分
+  const a = new Float32Array(EQ_PTS);
+  for (let i = 0; i < EQ_PTS; i++) a[i] = 20 * Math.pow(1000, i / (EQ_PTS - 1));
+  return a;
+})();
+let _eqCtx = null, _eqNodes = null, _eqMag = null, _eqPh = null;
+function eqResponseNodes() {
+  if (_eqNodes) return _eqNodes;
+  _eqCtx = new (window.OfflineAudioContext || window.webkitOfflineAudioContext)(1, 128, 48000);
+  const mk = (type, freq, q) => {
+    const n = _eqCtx.createBiquadFilter();
+    n.type = type; n.frequency.value = freq;
+    if (q !== undefined) n.Q.value = q;
+    return n;
+  };
+  _eqNodes = {
+    hpf: mk("highpass", FX_HPF_OFF, FX_Q), lpf: mk("lowpass", FX_LPF_OFF, FX_Q),
+    low: mk("lowshelf", 200), mid: mk("peaking", 1000, 1), high: mk("highshelf", 4000),
+  };
+  _eqMag = new Float32Array(EQ_PTS);
+  _eqPh = new Float32Array(EQ_PTS);
+  return _eqNodes;
+}
+function eqX(hz, w) { return (Math.log(hz / 20) / Math.log(1000)) * w; }
+function eqY(db, h) { return h / 2 - (db / EQ_DB_RANGE) * (h / 2); }
+function eqDb(y, h) { return (h / 2 - y) * (2 / h) * EQ_DB_RANGE; }
+/* 重绘该轨的频响曲线（参数变化、工程回灌、主题切换后调用） */
+function drawEqCurve(t) {
+  const cv = t.eqCanvas;
+  if (!cv) return;
+  const dpr = window.devicePixelRatio || 1;
+  if (cv.width !== Math.round(EQ_W * dpr)) {
+    cv.width = Math.round(EQ_W * dpr); cv.height = Math.round(EQ_H * dpr);
+  }
+  const g = cv.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const cs = getComputedStyle(document.documentElement);
+  const cv2 = (name, fb) => cs.getPropertyValue(name).trim() || fb;
+  const line = cv2("--line", "#d8dee4"), muted = cv2("--muted", "#6b7280");
+  const mod = cv2("--mod-eq", "#3b82f6"), base = cv2("--knob-bg", "#fff");
+  g.fillStyle = base; g.fillRect(0, 0, EQ_W, EQ_H);
+  // 网格：±9dB 次级横线 + 0dB 中线 + 100/1k/10k 竖线 + 频率与增益刻度文字
+  const sec = cv2("--sec", "#f5f7fa");
+  g.strokeStyle = line; g.lineWidth = 1; g.beginPath();
+  [9, -9].forEach((db) => {
+    const y = Math.round(eqY(db, EQ_H)) + .5;
+    g.moveTo(0, y); g.lineTo(EQ_W, y);
+  });
+  g.moveTo(0, EQ_H / 2 + .5); g.lineTo(EQ_W, EQ_H / 2 + .5);
+  [100, 1000, 10000].forEach((f) => {
+    const x = Math.round(eqX(f, EQ_W)) + .5;
+    g.moveTo(x, 0); g.lineTo(x, EQ_H);
+  });
+  g.stroke();
+  // 频率标注：画在半透明底条上，避免与曲线重叠时看不清
+  g.font = "9px system-ui, sans-serif";
+  g.fillStyle = sec; g.globalAlpha = .72;
+  g.fillRect(0, EQ_H - 11, EQ_W, 11); g.globalAlpha = 1;
+  g.fillStyle = muted;
+  g.fillText("100", Math.round(eqX(100, EQ_W)) + 2, EQ_H - 3);
+  g.fillText("1k", Math.round(eqX(1000, EQ_W)) + 2, EQ_H - 3);
+  g.textAlign = "right";
+  g.fillText("10k", Math.round(eqX(10000, EQ_W)) - 2, EQ_H - 3);
+  g.textAlign = "left";
+  g.fillText("+15", 3, 10); g.fillText("-15", 3, EQ_H - 14);
+  // 频响：5 个 biquad 幅度取 dB 后相加
+  const n = eqResponseNodes();
+  n.hpf.frequency.value = t.hpf > 0 ? t.hpf : FX_HPF_OFF;
+  n.lpf.frequency.value = t.lpf > 0 ? t.lpf : FX_LPF_OFF;
+  n.low.gain.value = t.eqLow; n.mid.gain.value = t.eqMid; n.high.gain.value = t.eqHigh;
+  const sum = new Float32Array(EQ_PTS);
+  [n.hpf, n.lpf, n.low, n.mid, n.high].forEach((f) => {
+    f.getFrequencyResponse(EQ_FREQS, _eqMag, _eqPh);
+    for (let i = 0; i < EQ_PTS; i++) sum[i] += 20 * Math.log10(Math.max(_eqMag[i], 1e-6));
+  });
+  g.beginPath();
+  for (let i = 0; i < EQ_PTS; i++) {
+    const x = (i / (EQ_PTS - 1)) * EQ_W;
+    const y = clampNum(eqY(sum[i], EQ_H), 0, EQ_H);
+    if (i) g.lineTo(x, y); else g.moveTo(x, y);
+  }
+  g.save();
+  g.lineTo(EQ_W, EQ_H / 2); g.lineTo(0, EQ_H / 2); g.closePath();
+  g.globalAlpha = .16; g.fillStyle = mod; g.fill();
+  g.restore();
+  g.strokeStyle = mod; g.lineWidth = 1.6;
+  g.save();
+  g.shadowColor = mod; g.shadowBlur = 6;   // 曲线外发光，让频响在深色主题下更醒目
+  g.stroke();
+  g.restore();
+  // 3 个可拖手柄（低/中/高）
+  EQ_HANDLES.forEach((hd) => {
+    const x = eqX(hd.hz, EQ_W), y = eqY(t[hd.key], EQ_H);
+    g.beginPath(); g.arc(x, y, 3.5, 0, Math.PI * 2);
+    g.fillStyle = mod; g.fill();
+    g.strokeStyle = base; g.lineWidth = 1.2; g.stroke();
+  });
+}
+/* 手柄 → 参数：写 track + 同步对应旋钮显示 + 刷新节点链与曲线（与旋钮双向联动） */
+function setEqGain(t, hd, v) {
+  const val = clampNum(r3(Math.round(v / 0.5) * 0.5), -EQ_GAIN_MAX, EQ_GAIN_MAX);
+  if (val === t[hd.key]) return;
+  t[hd.key] = val;
+  t[hd.ctl].setV(val);
+  applyTrackFx(t);
+  drawEqCurve(t);
+}
+/* 曲线拖拽：按 x 就近吸附到某个手柄，纵向拖动改该段增益 */
+function attachEqCurve(t, cv) {
+  cv.tabIndex = 0;
+  let drag = null;
+  const gainAt = (ev) => {
+    const r = cv.getBoundingClientRect();
+    return eqDb(clampNum(ev.clientY - r.top, 0, r.height), r.height);
+  };
+  cv.addEventListener("pointerdown", (ev) => {
+    if (ev.button !== 0) return;
+    ev.preventDefault();
+    const r = cv.getBoundingClientRect();
+    const px = ev.clientX - r.left;
+    drag = EQ_HANDLES[0];
+    let bd = Infinity;
+    EQ_HANDLES.forEach((hd) => {
+      const d = Math.abs(eqX(hd.hz, r.width) - px);
+      if (d < bd) { bd = d; drag = hd; }
+    });
+    try { cv.setPointerCapture(ev.pointerId); } catch (e) { /* 指针不可捕获时退化为普通拖拽 */ }
+    setEqGain(t, drag, gainAt(ev));
+  });
+  cv.addEventListener("pointermove", (ev) => { if (drag) setEqGain(t, drag, gainAt(ev)); });
+  const end = (ev) => {
+    if (!drag) return;
+    drag = null;
+    try { cv.releasePointerCapture(ev.pointerId); } catch (e) { /* 已释放 */ }
+  };
+  cv.addEventListener("pointerup", end);
+  cv.addEventListener("pointercancel", end);
+  // 键盘：↑↓ 改最近一次操作的手柄（默认中频），Home 复位三段
+  cv.addEventListener("keydown", (ev) => {
+    let d = 0;
+    if (ev.code === "ArrowUp") d = .5; else if (ev.code === "ArrowDown") d = -.5;
+    else if (ev.code === "Home") {
+      ev.preventDefault();
+      EQ_HANDLES.forEach((hd) => setEqGain(t, hd, 0));
+      return;
+    } else return;
+    ev.preventDefault();
+    setEqGain(t, drag || EQ_HANDLES[1], t[(drag || EQ_HANDLES[1]).key] + d);
+  });
+}
+
+/* 声像读数：C（居中）/ L50 / R50 */
+function fmtPan(v) {
+  return Math.abs(v) < 0.005 ? "C" : (v < 0 ? "L" : "R") + Math.round(Math.abs(v) * 100);
+}
+function clampNum(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 function fmtTime(sec) {
   const s = Math.max(0, sec || 0);
   const m = Math.floor(s / 60);
@@ -581,6 +1680,9 @@ function syncTransportLabels() {
   el.title = T(S.playing ? "暂停" : "播放");
   $("tp-stop").textContent = "■";     // 用实心方块，避免 ⏹ 在部分字体下过小/缺字形
   $("tp-stop").title = T("停止");
+  // 走带状态：播放中给工具条挂 .on，让时钟读数转为主题色，一眼看出是否在走带
+  const tb = $("transport");
+  if (tb) tb.classList.toggle("on", !!S.playing);
 }
 /* 顺序解码并缓存全部轨音频；返回 false 表示有轨解码失败 */
 async function ensureBuffers() {
@@ -607,7 +1709,31 @@ function stopNodes() {
     try { n.disconnect(); } catch (e) { /* 忽略 */ }
   });
   S.nodes = [];
-  S.tracks.forEach((t) => { t.node = null; });
+  // 每轨的增益节点与音质/音效节点链一并断开，避免反复重排时节点在 master 上堆积
+  S.tracks.forEach((t) => {
+    if (t.fx) {
+      const nd = t.fx.nodes;
+      Object.keys(nd).forEach((k) => {
+        const n = nd[k];
+        if (!n) return;
+        const list = Array.isArray(n) ? n : [n];        // taps 是 {d, g} 数组
+        list.forEach((x) => {
+          Object.keys(x).forEach((kk) => {
+            const node = x[kk];
+            if (node && node.disconnect) { try { node.disconnect(); } catch (e) { /* 忽略 */ } }
+          });
+        });
+      });
+      t.fx = null;
+    }
+    // 释放电平表取样链；保留 t.mtr 残值，让表回落动画由 meterLoop 收尾
+    if (t.meter) {
+      disposeMeterTap(t.meter.in); disposeMeterTap(t.meter.out);
+      t.meter = null;
+    }
+    if (t.node) { try { t.node.disconnect(); } catch (e) { /* 忽略 */ } }
+    t.node = null;
+  });
 }
 /* 调度一轮播放：时间轴 startTime 对应音频时钟 atCtx；atCtx 可落在未来（循环预调度） */
 function scheduleIteration(startTime, atCtx) {
@@ -627,7 +1753,8 @@ function scheduleIteration(startTime, atCtx) {
       const src = ctx.createBufferSource();
       src.buffer = buf;
       const env = ctx.createGain();
-      src.connect(env); env.connect(t.node);
+      src.connect(env); env.connect(t.fx ? t.fx.head : t.node);   // 音质链在轨增益之前
+      if (t.meter) env.connect(t.meter.in.split);                 // IN 表取音质链之前的信号（含淡变包络）
       // 淡变包络：按片段边界生成折线，起点已在淡入区内则从当前值续接
       const segLen = seg.end - seg.start;
       const gAt = (p) => {                       // p 为片段内相对位置（秒）
@@ -672,7 +1799,8 @@ function updatePlayheads() {
     const w = el.parentElement.clientWidth || 0;
     el.style.transform = "translateX(" + (d > 0 ? (pos / d) * w : 0) + "px)";
   });
-  $("tp-time").textContent = fmtTime(pos) + " / " + fmtTime(d);
+  $("tp-time").textContent = fmtTime(pos);   // 时钟拆分：当前位置单独强调
+  $("tp-dur").textContent = fmtTime(d);      // 总时长弱化显示
 }
 function tick(gen) {
   if (!S.playing || gen !== S.gen) return;      // 已停止/已重排：旧回调直接作废
@@ -705,16 +1833,24 @@ async function playFrom(pos) {
   S.playStart = start; S.playEnd = b;
   S.t0 = ctx.currentTime + 0.05;
   S.nextLoopAt = S.t0 + (b - start);
-  // 每轨一个增益节点：承载轨增益 + Mute/Solo 门控（播放中可实时改）
+  // 每轨：音质节点链 → 增益节点（承载轨增益 + Mute/Solo 门控，播放中可实时改）
   S.tracks.forEach((t) => {
     const g = ctx.createGain();
     g.gain.value = isAudible(t) ? linGain(t.gain) : 0;
     g.connect(S.master);
     t.node = g;
+    t.fx = buildFxChain(ctx);
+    t.fx.tail.connect(g);
+    applyFxParams(ctx, t.fx.nodes, t);
+    // 电平表取样链（旁路，不串进音频链路）：IN 取音质链之前、OUT 取轨增益之后（含 Mute/Solo 门控）
+    t.meter = { in: mkMeterTap(ctx), out: mkMeterTap(ctx), fx: t.fx };
+    g.connect(t.meter.out.split);
+    if (!t.mtr) t.mtr = newMtrState();        // 只建一次：保留上次残值，由 meterLoop 回落收尾
   });
   scheduleIteration(start, S.t0);
   S.playing = true;
   S.pos = start;
+  meterLoop();                               // 启动表刷新（播放中持续，停止后自动收尾归零）
   syncTransportLabels();
   updatePlayheads();
   S.gen++;                                   // 作废旧动画帧，保证只有一个 tick 循环
@@ -815,6 +1951,7 @@ async function loadPeaks() {
   }
   $("sel-end").value = r3(S.dur);
   S.sel = [0, 0];
+  renderRuler();          // 时长确定后重建共享刻度尺（波形网格线依赖 S.ticks）
   redrawAll();
   updatePlayheads();      // 时长确定后复位播放头/时间码
 }
@@ -877,6 +2014,34 @@ function applyTrackState(t, st) {
   t.fadeOut = c0 ? c0.fade_out : 0;
   t.finEl.value = String(t.fadeIn);
   t.foutEl.value = String(t.fadeOut);
+  // 音质参数（P1）：工程回灌后同步控件显示与实时节点链
+  t.pan = clampNum(Number(st.pan) || 0, -1, 1);
+  t.eqLow = clampNum(Number(st.eq_low) || 0, -15, 15);
+  t.eqMid = clampNum(Number(st.eq_mid) || 0, -15, 15);
+  t.eqHigh = clampNum(Number(st.eq_high) || 0, -15, 15);
+  t.hpf = clampNum(Number(st.hpf) || 0, 0, 2000);
+  t.lpf = clampNum(Number(st.lpf) || 0, 0, 20000);
+  // 回灌只刷新控件显示，不广播 onChange（参数值上面已直接写入 track，节点链随后统一同步）
+  t.panEl.setV(t.pan);
+  t.eqLowEl.setV(t.eqLow);
+  t.eqMidEl.setV(t.eqMid);
+  t.eqHighEl.setV(t.eqHigh);
+  t.hpfEl.setV(t.hpf);
+  t.lpfEl.setV(t.lpf);
+  // 音效参数（P2）：压缩（阈值/比率）+ 回声（延迟/反馈/混合），回灌后同步控件与节点链
+  t.compTh = clampNum(Number(st.comp_th) || 0, -60, 0);
+  t.compRatio = clampNum(Number(st.comp_ratio) || 1, 1, 20);
+  // 延迟/反馈默认 0（中性）；延迟为 0 且混合 > 0 时，前后端一致地回退 FX_ECHO_DEF_MS
+  t.echoDelay = clampNum(Number(st.echo_delay) || 0, 0, 2000);
+  t.echoFb = clampNum(Number(st.echo_fb) || 0, 0, 0.95);
+  t.echoMix = clampNum(Number(st.echo_mix) || 0, 0, 1);
+  t.compThEl.setV(t.compTh);
+  t.compRatioEl.setV(t.compRatio);
+  t.echoDelayEl.setV(t.echoDelay);
+  t.echoFbEl.setV(t.echoFb);
+  t.echoMixEl.setV(t.echoMix);
+  applyTrackFx(t);
+  drawEqCurve(t);                            // 三段 EQ / 高通 / 低通回灌后重绘频响曲线
   updateTrackState(t);
   drawTrack(t);
 }
@@ -940,6 +2105,12 @@ function buildPayload() {
     return {
       id: t.key, name: t.label, src: t.path, gain_db: t.gain,
       mute: !!t.mute || (anySolo && !t.solo), clips: clips,
+      // 音质参数（P1）：与 mix_render.parse_mix_project 的字段名/钳制区间一致
+      pan: t.pan, eq_low: t.eqLow, eq_mid: t.eqMid, eq_high: t.eqHigh,
+      hpf: t.hpf, lpf: t.lpf,
+      // 音效参数（P2）：压缩（阈值/比率）+ 回声（延迟/反馈/混合），同样与后端字段名/钳制一致
+      comp_th: t.compTh, comp_ratio: t.compRatio,
+      echo_delay: t.echoDelay, echo_fb: t.echoFb, echo_mix: t.echoMix,
     };
   });
   return {
@@ -1034,6 +2205,13 @@ async function cancelRender() {
 function renderMixList(mixes) {
   const box = $("mix-list");
   box.textContent = "";
+  if (!mixes.length) {
+    const em = document.createElement("div");
+    em.className = "empty";
+    em.textContent = T("暂无混音记录");
+    box.appendChild(em);
+    return;
+  }
   mixes.forEach((m) => {
     const row = document.createElement("div");
     row.className = "mixitem";
@@ -1055,6 +2233,7 @@ function renderMixList(mixes) {
     rn.addEventListener("click", () => renameMix(m));
     row.appendChild(rn);
     const del = document.createElement("button");
+    del.className = "danger";
     del.textContent = T("删除选中");
     del.addEventListener("click", () => deleteMix(m));
     row.appendChild(del);
@@ -1135,16 +2314,25 @@ $("cancel").addEventListener("click", cancelRender);
 $("tp-play").addEventListener("click", togglePlay);
 $("tp-stop").addEventListener("click", stopPlayback);
 $("tp-loop").addEventListener("change", () => { S.loop = $("tp-loop").checked; });
-/* 空格键播放/暂停（焦点在输入类控件时不拦截，避免影响正常输入） */
-document.addEventListener("keydown", (ev) => {
-  if (ev.code !== "Space" && ev.key !== " ") return;
+/* 空格键 = 全局播放/暂停：在捕获阶段监听 window，点过任何组件后仍然生效。
+   仅"文本类输入"（工程名等，空格有输入语义）放行；数字输入框/下拉/按钮/空白区域
+   一律当作热键，避免点过控件后空格失效。长按不重复触发（ev.repeat）。 */
+window.addEventListener("keydown", (ev) => {
+  if (ev.code !== "Space" || ev.repeat) return;
   const el = document.activeElement;
-  const tag = el && el.tagName;
-  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (el && el.isContentEditable)) return;
+  const tag = el ? el.tagName : "";
+  const isTextInput = tag === "TEXTAREA" || (el && el.isContentEditable) ||
+    (tag === "INPUT" && el.type === "text");
+  if (isTextInput) return;
   ev.preventDefault();
   togglePlay();
+}, true);
+/* 窗口尺寸变化：防抖后重绘波形与频响曲线，并重建刻度尺（百分比定位会随宽度变化） */
+let _rszTimer = 0;
+window.addEventListener("resize", () => {
+  clearTimeout(_rszTimer);
+  _rszTimer = setTimeout(() => { renderRuler(); redrawAll(); updatePlayheads(); }, 120);
 });
-window.addEventListener("resize", () => { redrawAll(); updatePlayheads(); });
 /* 单轨试听播放器状态 → 按钮符号统一刷新（播放中该轨 ⏸，其余 ▶） */
 $("solo-audio").addEventListener("play", syncPreviewButtons);
 $("solo-audio").addEventListener("pause", syncPreviewButtons);

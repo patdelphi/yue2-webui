@@ -26,6 +26,10 @@ from mix_render import (  # noqa: E402
     MAX_TRACKS,
     MIX_SCHEMA_VERSION,
     MixProjectError,
+    _comp_filter,
+    _echo_filter,
+    _fx_filters,
+    _pan_filters,
     build_ffmpeg_cmd,
     mix_worker,
     parse_mix_project,
@@ -120,6 +124,26 @@ def test_gain_and_master_clamped(webui_root: Path):
     assert proj.tracks[1].gain_db == 0.0         # 非法类型回退
     assert proj.master["loudness_target"] == -30.0
     assert proj.master["true_peak"] == -0.1
+
+
+def test_fx_params_default_and_clamped(webui_root: Path):
+    """每轨音质参数（P1）：缺省为中性 0，越界钳制，非法类型回退 0。"""
+    src = "outputs/separations_20260927_104930/demo_20260927_104930_vocals.wav"
+    # 缺省：全部中性（此时不产生任何音质滤镜）
+    track0 = parse_mix_project(_payload(tracks=[{"id": "t", "src": src, "clips": []}]),
+                               webui_root).tracks[0]
+    assert (track0.pan, track0.eq_low, track0.eq_mid, track0.eq_high,
+            track0.hpf, track0.lpf) == (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    # 越界钳制 + 非法类型回退
+    track1 = parse_mix_project(_payload(tracks=[{
+        "id": "t", "src": src, "clips": [],
+        "pan": 9, "eq_low": -99, "eq_mid": 99, "eq_high": "abc",
+        "hpf": 99999, "lpf": -5,
+    }]), webui_root).tracks[0]
+    assert track1.pan == 1.0
+    assert track1.eq_low == -15.0 and track1.eq_mid == 15.0
+    assert track1.eq_high == 0.0
+    assert track1.hpf == 2000.0 and track1.lpf == 0.0
 
 
 def test_path_whitelist_rejects_outside_outputs(webui_root: Path):
@@ -258,6 +282,151 @@ def test_build_cmd_loudnorm_targets(webui_root: Path):
                              webui_root)
     f = _filters(build_ffmpeg_cmd(proj, Path("out.flac")))
     assert "I=-16.0" in f and "TP=-2.0" in f
+
+
+# ---------------------------------------------------------- 2b. 每轨音质（P1）
+def test_pan_filters_follow_stereo_law():
+    """声像滤镜遵循 Web Audio StereoPannerNode 等功率立体声算法；居中不产生滤镜。"""
+    assert _pan_filters(0.0) == []
+    assert _pan_filters(0.001) == []                 # 阈值内视为居中
+
+    left = _pan_filters(-1.0)                        # 全左：outL=c0+c1（gL=1），outR=0*c1
+    assert left[0] == "aformat=channel_layouts=stereo"
+    assert left[1] == "pan=stereo|c0=c0+1.0000*c1|c1=0.0000*c1"
+
+    right = _pan_filters(1.0)                        # 全右：outL=0*c0，outR=c1+c0
+    assert right[1] == "pan=stereo|c0=0.0000*c0|c1=c1+1.0000*c0"
+
+    mid = _pan_filters(0.5)                          # 半右：gL=cos(45°)=gR=√2/2
+    assert "c0=0.7071*c0" in mid[1] and "c1=c1+0.7071*c0" in mid[1]
+
+
+def test_fx_filters_neutral_skips_and_active_orders(webui_root: Path):
+    """中性音质参数不产生滤镜；有值时按 高通→低通→低/中/高 EQ→声像 顺序排列。"""
+    src = "outputs/separations_20260927_104930/demo_20260927_104930_vocals.wav"
+    neutral = parse_mix_project(_payload(tracks=[{"id": "t", "src": src, "clips": []}]),
+                                webui_root).tracks[0]
+    assert _fx_filters(neutral) == []
+
+    active = parse_mix_project(_payload(tracks=[{
+        "id": "t", "src": src, "clips": [],
+        "pan": -0.5, "eq_low": 3.0, "eq_mid": -2.0, "eq_high": 1.5,
+        "hpf": 80, "lpf": 12000,
+    }]), webui_root).tracks[0]
+    fx = _fx_filters(active)
+    assert fx[0] == "highpass=f=80.0:width_type=q:width=0.707"
+    assert fx[1] == "lowpass=f=12000.0:width_type=q:width=0.707"
+    assert fx[2] == "bass=g=3.0:f=200.0"
+    assert fx[3] == "equalizer=f=1000.0:width_type=q:width=1:g=-2.0"
+    assert fx[4] == "treble=g=1.5:f=4000.0"
+    assert fx[5] == "aformat=channel_layouts=stereo" and fx[6].startswith("pan=stereo|")
+
+
+# ------------------------------------------------- 2c. 每轨音效（P2：压缩 + 回声）
+def test_fx_effect_params_default_and_clamped(webui_root: Path):
+    """每轨音效参数（P2）：缺省为中性（0dB/1/0/0/0），越界钳制，非法类型回退。"""
+    src = "outputs/separations_20260927_104930/demo_20260927_104930_vocals.wav"
+    track0 = parse_mix_project(_payload(tracks=[{"id": "t", "src": src, "clips": []}]),
+                               webui_root).tracks[0]
+    assert (track0.comp_th, track0.comp_ratio, track0.echo_delay,
+            track0.echo_fb, track0.echo_mix) == (0.0, 1.0, 0.0, 0.0, 0.0)
+    track1 = parse_mix_project(_payload(tracks=[{
+        "id": "t", "src": src, "clips": [],
+        "comp_th": 12, "comp_ratio": 99, "echo_delay": 99999,
+        "echo_fb": 5, "echo_mix": -3,
+    }]), webui_root).tracks[0]
+    assert track1.comp_th == 0.0            # 超过 0dB 上限钳制
+    assert track1.comp_ratio == 20.0        # 比率上限
+    assert track1.echo_delay == 2000.0      # 延迟上限（ms）
+    assert track1.echo_fb == 0.95           # 反馈上限（防无限堆积）
+    assert track1.echo_mix == 0.0           # 负值回退下限
+    track2 = parse_mix_project(_payload(tracks=[{
+        "id": "t", "src": src, "clips": [],
+        "comp_th": -99, "comp_ratio": "abc", "echo_delay": "abc",
+        "echo_fb": None, "echo_mix": None,
+    }]), webui_root).tracks[0]
+    assert track2.comp_th == -60.0          # 阈值下限
+    assert track2.comp_ratio == 1.0         # 非法类型回退中性（不压缩）
+    assert track2.echo_delay == 0.0
+    assert track2.echo_fb == 0.0 and track2.echo_mix == 0.0
+
+
+def test_comp_filter_linear_threshold_and_off(webui_root: Path):
+    """压缩滤镜：阈值按 dB→线性换算；阈值到顶/比率≤1 一律视为关闭（返回空串）。"""
+    src = "outputs/separations_20260927_104930/demo_20260927_104930_vocals.wav"
+
+    def _mk(**kw):
+        return parse_mix_project(_payload(tracks=[dict(
+            {"id": "t", "src": src, "clips": []}, **kw)]), webui_root).tracks[0]
+
+    assert _comp_filter(_mk()) == ""                              # 缺省中性
+    assert _comp_filter(_mk(comp_th=-20, comp_ratio=1.0)) == ""   # 比率 1 = 不压缩
+    assert _comp_filter(_mk(comp_th=0, comp_ratio=4.0)) == ""     # 阈值到顶 = 不压缩
+    # -20dB → 线性 10^(-1) = 0.1；时间常数与前端固定值一致
+    assert _comp_filter(_mk(comp_th=-20, comp_ratio=4.0)) == (
+        "acompressor=threshold=0.100000:ratio=4.00:attack=20.0:release=250.0"
+        ":knee=6.0:makeup=1:mix=1")
+    # 极低阈值仍受 _COMP_MIN_LINEAR 保护（ffmpeg 不接受 0）
+    assert "threshold=0.001000" in _comp_filter(_mk(comp_th=-60, comp_ratio=2.0))
+
+
+def test_echo_filter_taps_default_delay_and_decay_floor(webui_root: Path):
+    """回声滤镜：3 抽头延迟线；延迟为 0 时用兜底 250ms；decay 有下限（ffmpeg 要求 > 0）。"""
+    src = "outputs/separations_20260927_104930/demo_20260927_104930_vocals.wav"
+
+    def _mk(**kw):
+        return parse_mix_project(_payload(tracks=[dict(
+            {"id": "t", "src": src, "clips": []}, **kw)]), webui_root).tracks[0]
+
+    assert _echo_filter(_mk()) == ""                              # 混合 0 = 关闭
+    assert _echo_filter(_mk(echo_mix=0.009)) == ""                # 阈值内视为关闭
+    # 混合 0.5 / 反馈 0.3 / 延迟 200ms → decays = 0.5*fb^k（k=1..3）
+    assert _echo_filter(_mk(echo_mix=0.5, echo_fb=0.3, echo_delay=200)) == (
+        "aecho=1:1:200.0|400.0|600.0:0.1500|0.0450|0.0135")
+    # 延迟留 0 → 用兜底 250ms（与前端 FX_ECHO_DEF_MS 一致）
+    assert _echo_filter(_mk(echo_mix=0.5, echo_fb=0.3, echo_delay=0)).startswith(
+        "aecho=1:1:250.0|500.0|750.0:")
+    # 反馈 0：decay 取到下限 0.001，避免 ffmpeg 报 out of allowed range
+    assert _echo_filter(_mk(echo_mix=0.5, echo_fb=0.0, echo_delay=100)).endswith(
+        ":0.0010|0.0010|0.0010")
+
+
+def test_fx_filters_p2_order_after_pan(webui_root: Path):
+    """音效滤镜顺序：声像 → 压缩 → 回声（与前端节点链、听感一致）。"""
+    src = "outputs/separations_20260927_104930/demo_20260927_104930_vocals.wav"
+    active = parse_mix_project(_payload(tracks=[{
+        "id": "t", "src": src, "clips": [],
+        "pan": -0.5, "eq_low": 3.0, "comp_th": -18, "comp_ratio": 3.0,
+        "echo_mix": 0.4, "echo_fb": 0.4, "echo_delay": 300,
+    }]), webui_root).tracks[0]
+    fx = _fx_filters(active)
+    assert fx[0] == "bass=g=3.0:f=200.0"
+    assert fx[1] == "aformat=channel_layouts=stereo" and fx[2].startswith("pan=stereo|")
+    assert fx[3].startswith("acompressor=threshold=")
+    assert fx[4].startswith("aecho=1:1:300.0|600.0|900.0:")
+    # 中性音效（阈值 0 / 比率 1 / 混合 0）不产生任何滤镜
+    neutral = parse_mix_project(_payload(tracks=[{"id": "t", "src": src, "clips": []}]),
+                               webui_root).tracks[0]
+    assert _fx_filters(neutral) == []
+
+
+def test_build_cmd_includes_fx_after_volume(webui_root: Path):
+    """音质/音效滤镜必须排在 volume 之后、adelay 之前（增益→音质音效→时间线偏移）。"""
+    src = "outputs/separations_20260927_104930/demo_20260927_104930_vocals.wav"
+    tracks = [{
+        "id": "t", "src": src, "gain_db": -1.0,
+        "clips": [{"start": 1.0, "in": 0.0, "out": 0.5}],
+        "eq_low": 4.0, "hpf": 100,
+        "comp_th": -20, "comp_ratio": 3.0, "echo_mix": 0.3, "echo_fb": 0.4,
+    }]
+    proj = parse_mix_project(_payload(tracks=tracks), webui_root)
+    f = _filters(build_ffmpeg_cmd(proj, Path("out.flac")))
+    chain = f.split("[t0]")[0]
+    assert chain.index("volume=-1.0dB") < chain.index("highpass=f=100.0")
+    assert chain.index("highpass=f=100.0") < chain.index("bass=g=4.0")
+    assert chain.index("bass=g=4.0") < chain.index("acompressor=threshold=")
+    assert chain.index("acompressor=threshold=") < chain.index("aecho=1:1:")
+    assert chain.index("aecho=1:1:") < chain.index("adelay=1000")
 
 
 # ------------------------------------------------------------------ 3. 端到端与 worker
