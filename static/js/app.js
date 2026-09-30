@@ -158,7 +158,7 @@
                     card.dataset.name = seg.name;
                     card.dataset.content = seg.content.trim();
                     card.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 10px;' +
-                        'background:rgba(255,255,255,0.05);border-radius:6px;margin:3px 0;' +
+                        'background:var(--background-fill-secondary, rgba(255,255,255,0.05));border-radius:6px;margin:3px 0;' +
                         'border-left:3px solid ' + getSegColor(seg.name) + ';cursor:grab;';
 
                     const handle = document.createElement('span');
@@ -635,7 +635,7 @@
                             if (t >= start && t < end) {
                                 if (!allLines[i].classList.contains('active')) {
                                     allLines.forEach(function(l) { l.style.color = '#999'; l.style.background = 'transparent'; l.style.fontWeight = 'normal'; l.classList.remove('active'); });
-                                    allLines[i].style.color = '#fff';
+                                    allLines[i].style.color = 'var(--body-text-color, #fff)';
                                     allLines[i].style.background = 'rgba(59,130,246,0.3)';
                                     allLines[i].style.fontWeight = 'bold';
                                     allLines[i].classList.add('active');
@@ -713,7 +713,7 @@
                                 var el = document.getElementById(targetId);
                                 if (el && !el.classList.contains('active')) {
                                     document.querySelectorAll('.gen-lyric-line.active').forEach(function(l) { l.style.color = '#999'; l.style.background = 'transparent'; l.style.fontWeight = 'normal'; l.classList.remove('active'); });
-                                    el.style.color = '#fff';
+                                    el.style.color = 'var(--body-text-color, #fff)';
                                     el.style.background = 'rgba(59,130,246,0.3)';
                                     el.style.fontWeight = 'bold';
                                     el.classList.add('active');
@@ -731,13 +731,28 @@
             function initAudioTimeDisplay() {
                 // 覆盖所有波形播放器：主播放器（gen/history）+ 音色工坊播放器组
                 // （分离/翻唱产出 sep-audio-*/cover-audio-* 与任务历史回放 sep/cover-history-audio-*）
-                var SEL = '#gen-audio, #history-audio, [id^="sep-audio-"], [id^="cover-audio-"], [id^="sep-history-audio-"], [id^="cover-history-audio-"]';
+                // 多个选择器必须先用 :is() 包成一个整体再接后代选择器：
+                // 直接写 "a, b, c .timestamps" 时逗号列表只有最后一项带后代限定，
+                // 前几项会命中播放器根节点，把整块播放器染成半透明黑（亮色主题下整条发黑）。
+                // 固定 id 的播放器必须与下方 initPlayerZoom 的 PLAYER_IDS 保持一致，
+                // 漏掉的（如 history-stem-audio）会保留 Gradio 的 3px 近黑内联边框。
+                var PLAYERS = '#gen-audio, #history-audio, #history-stem-audio, ' +
+                    '#lib-stem-preview, #lib-ref-preview, #cover-ref-preview, #cover-acc-preview, ' +
+                    '[id^="sep-audio-"], [id^="cover-audio-"], [id^="sep-history-audio-"], [id^="cover-history-audio-"]';
+                var SEL = ':is(' + PLAYERS + ')';
                 var style = document.createElement('style');
                 style.textContent = SEL + ' { overflow: visible !important; }' +
                     SEL + ' .component-wrapper { overflow: visible !important; }' +
                     SEL + ' .waveform-container { overflow: visible !important; }' +
-                    SEL + ' .timestamps { visibility: visible !important; opacity: 1 !important; font-size: 15px !important; font-weight: bold !important; color: #fff !important; font-family: monospace !important; letter-spacing: 0.5px !important; text-shadow: 0 2px 4px rgba(0,0,0,0.5) !important; padding: 4px 12px !important; background: rgba(0,0,0,0.7) !important; border-radius: 4px !important; display: flex !important; justify-content: space-between !important; align-items: center !important; margin-top: 12px !important; width: 100% !important; box-sizing: border-box !important; }' +
-                    SEL + ' .timestamps time { color: #4ade80 !important; font-size: 15px !important; }';
+                    // 播放器外框：Gradio 给音频块写了内联 border-style: solid 却没给宽度，
+                    // 于是回落到默认 medium(3px) + currentColor —— 亮色主题下就是一圈近黑边框，
+                    // 看着像"整块播放器是暗色的"。统一改回 Gradio 常规块边框（1px 主题边框色）。
+                    SEL + ' { border: 1px solid var(--border-color-primary, transparent) !important; }' +
+                    // 时间码条：底色/文字/描边改用 Gradio 主题变量，明暗主题自动适配
+                    SEL + ' .timestamps { visibility: visible !important; opacity: 1 !important; font-size: 15px !important; font-weight: bold !important; color: var(--body-text-color, #fff) !important; font-family: monospace !important; letter-spacing: 0.5px !important; padding: 4px 12px !important; background: var(--background-fill-secondary, rgba(0,0,0,0.7)) !important; border: 1px solid var(--border-color-primary, transparent) !important; border-radius: 4px !important; display: flex !important; justify-content: space-between !important; align-items: center !important; margin-top: 12px !important; width: 100% !important; box-sizing: border-box !important; }' +
+                    // 当前时间读数：亮色用深绿保证对比度，暗色用亮绿
+                    SEL + ' .timestamps time { color: #15803d !important; font-size: 15px !important; }' +
+                    'body.dark ' + SEL + ' .timestamps time { color: #4ade80 !important; font-size: 15px !important; }';
                 document.head.appendChild(style);
             }
             initAudioTimeDisplay();
@@ -765,11 +780,13 @@
                 style.textContent =
                     '.yz-wave-wrap { margin-top: 10px; }' +
                     '.yz-toolbar { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }' +
-                    '.yz-toolbar button { background: rgba(0,0,0,0.5); color: #fff; border: 1px solid rgba(255,255,255,0.25); border-radius: 4px; padding: 3px 12px; cursor: pointer; font-size: 13px; line-height: 1.5; }' +
-                    '.yz-toolbar button:hover { background: rgba(255,255,255,0.15); }' +
+                    // 工具条按钮/波形底改用 Gradio 主题变量，明暗主题自动适配
+                    '.yz-toolbar button { background: var(--button-secondary-background-fill, rgba(0,0,0,0.5)); color: var(--button-secondary-text-color, #fff); border: 1px solid var(--border-color-primary, rgba(255,255,255,0.25)); border-radius: 4px; padding: 3px 12px; cursor: pointer; font-size: 13px; line-height: 1.5; }' +
+                    '.yz-toolbar button:hover { border-color: var(--color-accent, #3b82f6); }' +
                     '.yz-toolbar button:disabled { opacity: 0.4; cursor: default; }' +
-                    '.yz-zoom-label { color: #4ade80; font-size: 12px; font-family: monospace; margin-left: 6px; min-width: 70px; }' +
-                    '.yz-wave { height: 80px; border-radius: 4px; background: rgba(0,0,0,0.25); }' +
+                    '.yz-zoom-label { color: #15803d; font-size: 12px; font-family: monospace; margin-left: 6px; min-width: 70px; }' +
+                    'body.dark .yz-zoom-label { color: #4ade80; }' +
+                    '.yz-wave { height: 80px; border-radius: 4px; background: var(--background-fill-secondary, rgba(0,0,0,0.25)); }' +
                     '.yz-hidden { display: none !important; }';
                 document.head.appendChild(style);
 
@@ -878,14 +895,17 @@
                         st.btnIn = btnIn;
                         st.btnOut = btnOut;
 
+                        // 波形配色随明暗主题切换：亮色主题下白色光标落在白底上完全不可见，
+                        // 亮绿进度色与白底对比度也不足，需改用深色系。
+                        var isDark = document.body.classList.contains('dark');
                         try {
                             st.ws = WaveSurfer.create({
                                 container: wave,
                                 media: audioEl,
                                 height: 80,
-                                waveColor: '#7f7f7f',
-                                progressColor: '#4ade80',
-                                cursorColor: '#ffffff',
+                                waveColor: isDark ? '#7f7f7f' : '#a1a1aa',
+                                progressColor: isDark ? '#4ade80' : '#15803d',
+                                cursorColor: isDark ? '#ffffff' : '#1f2328',
                                 cursorWidth: 1
                             });
                         } catch (e) {

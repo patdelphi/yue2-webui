@@ -4,6 +4,66 @@
 
 ---
 
+## 2026-09-30 — 亮色主题修复（File 虚线拖拽区 / 多轨编辑被强制亮色时误判为暗色）
+
+> 目的：用户反馈「gr.File 上传区有 3px 虚线框」「多轨编辑仍然是暗色」。
+
+- `app.py`（`_TITLE_ROW_CSS`）新增规则：
+  `div.styler > :not(.absolute)[style*="dashed"] { border-width: 1px !important; border-color: var(--border-color-primary) !important; }`。
+  根因是 Gradio 6 自带的重置规则 `div.styler > :not(.absolute) { border-width: medium; border-style: none; border-color: currentcolor }`：
+  宽度取 `medium`(3px)、颜色取 `currentColor`，本意是配合 `border-style: none` 把边框藏掉；
+  但 File 组件会内联 `border-style: dashed`，于是露出一圈 3px 近黑虚线框。
+  实测两个 File 拖拽区由 `2.857px solid rgb(39,39,42)` → `0.571px(1px) solid rgb(228,228,231)`，与 ABC 预览容器一致。
+- `static/multitrack/index.html`（`syncParentTheme()`）回退分支不再读父页 `body` 的 `background-color`。
+  根因：Windows 处于暗色系统时，用户用 `?__theme=light`（或页脚主题开关）强制亮色，Gradio 会给父页 `body` 留一份暗色背景
+  （`@media (prefers-color-scheme: dark)` 直写，实测 `rgb(15,15,17)`），同时 `body` 上**没有** `dark` 类 →
+  首选判定落空 → 亮度回退读到暗色 → 子页被错锁成暗色。
+  改为读真正跟随主题的 Gradio 变量 `--body-background-fill`（亮 `white` / 暗 `#0f0f11`）；
+  回退顺序：`--body-background-fill` → `--background-fill-primary` → 父页 body 背景 → html 背景。
+  变量值写法不定（`white` / `#rrggbb` / `rgb()` / `color()`），统一用 canvas `fillStyle` 归一化后再算亮度，
+  并用哨兵色 `#010203` 识别解析失败，避免把非法色值当作纯黑。
+- `tests/test_theme_light.py`：新增 `test_file_dropzone_border_is_normalized`；`test_multitrack_theme_detection_is_robust` 改为断言主题变量路径。
+
+**验证**
+
+- `node --check`（提取 index.html 内联脚本）通过；`py_compile app.py` 通过。
+- `pytest tests/ --ignore=tests/test_i18n.py -q --basetemp=".pytest_tmp_all"` → **183 passed**（基线 182 + 新增 1 个用例）。
+- 浏览器实测（本机 Windows 为暗色系统，Chrome DevTools 不施加颜色模拟）：
+  - `?__theme=light`：父页 `body` 无 `dark` 类、`--body-background-fill=white`，但 `body` 背景仍是 `rgb(15,15,17)`；修复后 iframe `data-theme=light`、`--bg=#ffffff`（修复前会被判成 dark）。
+  - `?__theme=dark`：父页 `body.dark`、`--body-background-fill=#0f0f11` → iframe `data-theme=dark`、`--bg=#16181d`（无回归）。
+  - 全页 3 个 dashed 元素（ABC 预览容器 + 两个 File 拖拽区）宽度均 1px、颜色均 `rgb(228,228,231)`。
+- 服务已重启（HTML 下发 `app.js?v=13`）；多轨编辑页响应头为 `Cache-Control: no-store`。
+
+---
+
+## 2026-09-30 — 亮色主题适配修复（播放器/ABC 预览/多轨编辑页）
+
+> 目的：用户反馈「亮色主题下个别组件不适配、多轨编辑全部不适配」。本轮全量排查亮色渲染，逐项修复硬编码深色。
+
+- `static/js/app.js`：
+  - **播放器整块发黑（主因）**：`initAudioTimeDisplay()` 原写法 `SEL + ' .timestamps {...}'` 中，`SEL` 是 6 个播放器 `id` 的逗号列表，拼接后**只有最后一项**带 `.timestamps` 后代限定，前 5 项（`#gen-audio`、`#history-audio`、`[id^="sep-audio-"]`、`[id^="cover-audio-"]`、`[id^="sep-history-audio-"]`）直接命中播放器根节点，把整块播放器染成 `rgba(0,0,0,.7)` + 白字。已改为 `var SEL = ':is(' + PLAYERS + ')';` 整体包裹后再接后代选择器。
+  - **播放器「仍然是暗色」（第二轮反馈的根因）**：Gradio 音频块根节点带内联 `border-style: solid` 却**没有 `border-width`**，宽度回落到 CSS 初始值 `medium`(3px)、颜色为 `currentColor` —— 亮色主题下就是一圈 3px 近黑边框（`rgb(39,39,42)`），整块播放器看着像「暗色」。已加 `SEL + ' { border: 1px solid var(--border-color-primary, transparent) !important; }'` 覆盖为 Gradio 常规 1px 主题边框。
+  - **`PLAYERS` 列表补齐**：原只列 6 项固定 id，漏掉 `#history-stem-audio` / `#lib-stem-preview` / `#lib-ref-preview` / `#cover-ref-preview` / `#cover-acc-preview`，这些播放器（截图中的第二个「音频」块等）仍保留 3px 近黑内联边框。已扩为 11 项，与 `initPlayerZoom()` 的 `PLAYER_IDS` 对齐。实测全页 `borderTopWidth > 1px` 的元素数 = 0。
+  - 时间码条 `.timestamps`：底色/文字/描边改用 `--background-fill-secondary` / `--body-text-color` / `--border-color-primary`；当前时间读数亮色用深绿 `#15803d`、暗色 `#4ade80`（`body.dark` 覆盖）。
+  - 缩放工具条 `.yz-toolbar button` 与波形底 `.yz-wave`：`rgba(0,0,0,.5)` / `rgba(0,0,0,.25)` 改走 `--button-secondary-background-fill` / `--button-secondary-text-color` / `--border-color-primary` / `--background-fill-secondary`。
+  - 歌词段落卡底色 `rgba(255,255,255,0.05)`（亮色下白底白卡、看不见）→ `var(--background-fill-secondary, …)`；逐句高亮不再写死 `#fff` → `var(--body-text-color, #fff)`。
+  - PlayerZoom 波形配色随主题切换：`cursorColor` 亮色 `#1f2328`（原 `#fff` 在白底上完全不可见）、暗色 `#ffffff`；`progressColor` 亮色 `#15803d`、暗色 `#4ade80`；`waveColor` 亮色 `#a1a1aa`、暗色 `#7f7f7f`。
+- `app.py`：三处 ABC 预览容器（生成/历史/转谱）虚线边框 `rgba(255,255,255,0.15)`（亮色下不可见）→ `var(--border-color-primary)`；`app.js?v=12` → `v=13`（脚本内容变更需换版本号，否则浏览器命中旧缓存）。
+- `static/multitrack/index.html`（多轨编辑页加固）：
+  - `syncParentTheme()` 重写——**优先**读父页面 `body.dark` / `html.dark` 类（Gradio 把主题类挂在 `body` 上，是最稳的暗色标识）；回退到背景亮度判定时，兼容 Chrome 可能返回的 `color(srgb 0~1)` 分量格式（按 ×255 折算）与 `transparent` 背景（向上回落 `html`，再取不到就保持现状，不再盲目判暗）。
+  - 四处主题块补 `color-scheme: light/dark`，让原生复选框、滚动条、数字输入框跟随主题。
+- `tests/test_theme_light.py`（新增，5 个用例）：断言 `:is()` 包裹写法、主题变量替换、ABC 边框、PlayerZoom 主题配色、多轨主题判定健壮性。
+
+**验证**
+
+- `node --check "static/js/app.js"` 通过；`pytest tests/test_theme_light.py -q` → 5 passed。
+- `pytest tests/ --ignore=tests/test_i18n.py -q --basetemp=".pytest_tmp_all"` → **182 passed**（基线 177 + 新增 5 个用例）。
+- 浏览器实测（Chrome DevTools MCP，`emulate colorScheme` 切明暗；Gradio 6.28 只跟随 `prefers-color-scheme`，`localStorage.theme` / `?__theme=` 均无效）：亮色下 `#gen-audio` 背景由 `rgba(0,0,0,0.7)` 恢复为 `rgb(255,255,255)`；多轨编辑 iframe 由父页 `body.dark` 驱动，亮/暗切换后 `data-theme` 与 `--bg` 均正确跟随（`#ffffff` ↔ `#16181d`）。
+- 播放器外框二次复核（硬刷新后切「歌曲历史」Tab）：`#history-audio` 边框由 `2.857px solid rgb(39,39,42)` → `0.571px solid rgb(228,228,231)`；全页扫描 `borderTopWidth > 1px` 元素数 = 0；`.timestamps` 底色 `rgb(250,250,250)`、文字 `rgb(39,39,42)`。
+- 说明：多轨编辑页在本机亮色下未能复现「全部不适配」（iframe 主题判定与全部组件渲染均正常），已按最可能的根因（父页背景色值格式敏感导致误判暗色）做加固；请用户 `Ctrl+F5` 后复测确认。
+
+---
+
 ## 2026-09-30 — 多轨编辑器：iframe 随内容长高 + 音质/压缩一键归零 + 「FX 工具」工具栏
 
 > 目的：用户两点诉求——(1) 编辑器锁在固定 760px 的 iframe 里，顶部标题与菜单常驻、不能随页面滚走，浪费顶部空间；(2) 音质、压缩要「一键归零」，并把该行右侧没用上的空白放点别的功能。

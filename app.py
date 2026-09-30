@@ -2105,6 +2105,14 @@ _TITLE_ROW_CSS = """
     .y2-sec .last-btn-row button:focus-visible { outline: none !important; box-shadow: var(--y2-ring) !important; }
     /* —— 历史表格：外框 + 圆角，与卡片层次统一 —— */
     #history-table { border: 1px solid var(--y2-line) !important; border-radius: var(--y2-r-md) !important; overflow: hidden !important; }
+    /* —— Gradio 6 块重置规则踩坑 ——
+       Gradio 自带规则 `div.styler > :not(.absolute)` 把子块写成
+       border-width: medium(3px) + border-color: currentColor（本意是配合 border-style: none 做重置）。
+       但 File 组件会内联 `border-style: dashed`，于是宽度回落到 3px、颜色取 currentColor，
+       亮色主题下露出一圈 3px 近黑虚线框。这里把虚线拖拽区压回 1px 主题边框色。 */
+    div.styler > :not(.absolute)[style*="dashed"] {
+        border-width: 1px !important; border-color: var(--border-color-primary) !important;
+    }
 """
 
 # Gradio 内置文案（上传组件"将音频拖放到此处/点击上传"、页脚等）跟随浏览器 locale，
@@ -2580,7 +2588,7 @@ def build_ui():
                             def _abc_preview_html(container_id, paper_id, audio_id, msg):
                                 return (
                                     f'<div id="{container_id}" style="padding: 20px; border-radius: 8px; min-height: 200px; '
-                                    f'border: 1px dashed rgba(255,255,255,0.15);">'
+                                    f'border: 1px dashed var(--border-color-primary);">'
                                     f'<div style="text-align:center;color:#666;margin-bottom:12px;">{msg}</div>'
                                     f'<div id="{paper_id}"></div><div id="{audio_id}"></div></div>'
                                 )
@@ -2652,9 +2660,9 @@ def build_ui():
                         with gr.Column(scale=1):
                             history_abc_preview = gr.HTML(
                                 label=_t("乐谱预览"),
-                                value=f'<div id="history-abc-preview-container" style="padding: 20px; border-radius: 8px; min-height: 200px; border: 1px dashed rgba(255,255,255,0.15);"><div style="text-align:center;color:#666;margin-bottom:12px;">{_t("点击历史记录后乐谱将在此处渲染")}</div><div id="history-abc-paper"></div><div id="history-abc-audio"></div></div>',
+                                value=f'<div id="history-abc-preview-container" style="padding: 20px; border-radius: 8px; min-height: 200px; border: 1px dashed var(--border-color-primary);"><div style="text-align:center;color:#666;margin-bottom:12px;">{_t("点击历史记录后乐谱将在此处渲染")}</div><div id="history-abc-paper"></div><div id="history-abc-audio"></div></div>',
                             )
-                            _reg(history_abc_preview, lambda lang: gr.update(label=tr(lang, "乐谱预览"), value=f'<div id="history-abc-preview-container" style="padding: 20px; border-radius: 8px; min-height: 200px; border: 1px dashed rgba(255,255,255,0.15);"><div style="text-align:center;color:#666;margin-bottom:12px;">{tr(lang, "点击历史记录后乐谱将在此处渲染")}</div><div id="history-abc-paper"></div><div id="history-abc-audio"></div></div>'))
+                            _reg(history_abc_preview, lambda lang: gr.update(label=tr(lang, "乐谱预览"), value=f'<div id="history-abc-preview-container" style="padding: 20px; border-radius: 8px; min-height: 200px; border: 1px dashed var(--border-color-primary);"><div style="text-align:center;color:#666;margin-bottom:12px;">{tr(lang, "点击历史记录后乐谱将在此处渲染")}</div><div id="history-abc-paper"></div><div id="history-abc-audio"></div></div>'))
                             history_abc = gr.Textbox(label=_t("ABC 乐谱文本"), lines=6, interactive=False, elem_id="history-abc")
                             _reg(history_abc, lambda lang: gr.update(label=tr(lang, "ABC 乐谱文本")))
                     history_lyrics_data = gr.HTML(value="", visible=False)
@@ -2741,9 +2749,9 @@ def build_ui():
                             _reg(transcribe_abc_output, lambda lang: gr.update(label=tr(lang, "ABC 乐谱 (可编辑)"), placeholder=tr(lang, "转谱完成后乐谱将显示在这里...")))
                             transcribe_abc_preview = gr.HTML(
                                 label=_t("乐谱预览"),
-                                value=f'<div id="transcribe-abc-preview-container" style="padding: 20px; border-radius: 8px; min-height: 200px; border: 1px dashed rgba(255,255,255,0.15);"><div style="text-align:center;color:#666;">{_t("转谱后乐谱预览将在此处显示")}</div><div id="transcribe-abc-paper"></div><div id="transcribe-abc-audio"></div></div>',
+                                value=f'<div id="transcribe-abc-preview-container" style="padding: 20px; border-radius: 8px; min-height: 200px; border: 1px dashed var(--border-color-primary);"><div style="text-align:center;color:#666;">{_t("转谱后乐谱预览将在此处显示")}</div><div id="transcribe-abc-paper"></div><div id="transcribe-abc-audio"></div></div>',
                             )
-                            _reg(transcribe_abc_preview, lambda lang: gr.update(label=tr(lang, "乐谱预览"), value=f'<div id="transcribe-abc-preview-container" style="padding: 20px; border-radius: 8px; min-height: 200px; border: 1px dashed rgba(255,255,255,0.15);"><div style="text-align:center;color:#666;">{tr(lang, "转谱后乐谱预览将在此处显示")}</div><div id="transcribe-abc-paper"></div><div id="transcribe-abc-audio"></div></div>'))
+                            _reg(transcribe_abc_preview, lambda lang: gr.update(label=tr(lang, "乐谱预览"), value=f'<div id="transcribe-abc-preview-container" style="padding: 20px; border-radius: 8px; min-height: 200px; border: 1px dashed var(--border-color-primary);"><div style="text-align:center;color:#666;">{tr(lang, "转谱后乐谱预览将在此处显示")}</div><div id="transcribe-abc-paper"></div><div id="transcribe-abc-audio"></div></div>'))
 
                             with gr.Row(elem_classes=["y2-actions"]):
                                 transcribe_abc_download = gr.File(label=_t("下载 ABC"))
@@ -3423,7 +3431,7 @@ if __name__ == "__main__":
 <script src="https://cdnjs.cloudflare.com/ajax/libs/abcjs/6.3.0/abcjs-basic-min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.0/Sortable.min.js"></script>
 <script src="/static/js/vendor/wavesurfer.min.js?v=1"></script>
-<script src="/static/js/app.js?v=12"></script>
+<script src="/static/js/app.js?v=13"></script>
 """
                     html = html.replace("</head>", scripts + "</head>")
                     return HTMLResponse(content=html, status_code=response.status_code)

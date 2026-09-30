@@ -551,3 +551,28 @@
 - **ProvenBraid 隧道**：经用户确认后一并拉起（PID 43612，`--config provenbraid-config.yml`）；因 yue2 实例已占用 cloudflared 默认 metrics 端口 20241，显式指定 `--metrics 127.0.0.1:20242` 避免冲突；日志 `.cloudflared/provenbraid-tunnel-20260930.{stdout,stderr}.log`。
 - **最终状态**：两条隧道同时运行 —— yue2（PID 10508，2026.9.3）+ ProvenBraid（PID 43612）；`https://yue2.patdelphi.xyz/` 与 `https://provenbraid.patdelphi.xyz/` 均返回 **HTTP 200**。未做任何 git 操作。
 
+## 2026-09-30 20:30 — 修复：亮色主题适配（播放器/ABC 预览/多轨编辑页）
+
+- **需求**：用户要求「亮色主题下所有组件都要适配亮色，全部检测一下；目前有个别不适配，多轨编辑全部不适配」。
+- **定位（亮色下逐元素审计 + 源码核查）**：
+  1. **播放器整块发黑（主因）**——`static/js/app.js` 的 `initAudioTimeDisplay()` 里 `SEL + ' .timestamps {...}'`，`SEL` 为 6 个播放器 id 的逗号列表，拼接后只有**最后一项**带 `.timestamps` 后代限定；前 5 项（`#gen-audio`/`#history-audio`/`[id^="sep-audio-"]`/`[id^="cover-audio-"]`/`[id^="sep-history-audio-"]`）直接命中播放器根节点 → 整块被染成 `rgba(0,0,0,.7)` + 白字。浏览器实测 `#gen-audio` 背景确为 `rgba(0, 0, 0, 0.7)`，遍历 `document.styleSheets` 用 `el.matches(selectorText)` 证实命中此规则。
+  2. 缩放工具条按钮 `rgba(0,0,0,.5)`、波形底 `rgba(0,0,0,.25)`、时间码条 `rgba(0,0,0,.7)`、歌词段落卡 `rgba(255,255,255,.05)`、逐句高亮写死 `#fff`。
+  3. PlayerZoom 波形 `cursorColor:'#ffffff'`（亮色白底上不可见）、`progressColor:'#4ade80'`（白底对比度不足）。
+  4. `app.py` 三处 ABC 预览容器虚线边框 `rgba(255,255,255,0.15)`（亮色下不可见）。
+- **改动**：见 `Docs/changelog.md` 当日新增小节。`app.js?v=12 → v=13` 以破缓存。
+- **多轨编辑页**：本机亮色下**未能复现**「全部不适配」（iframe 内全部组件渲染正常、`data-theme` 正确跟随父页亮色）。按最可能根因加固 `syncParentTheme()`：优先读父页 `body.dark`/`html.dark`，回退亮度判定时兼容 Chrome 的 `color(srgb 0~1)` 分量格式与 `transparent` 背景；四处主题块补 `color-scheme`。修复后实测：父页亮色 → iframe `data-theme=light`、`--bg=#ffffff`；父页暗色 → `data-theme=dark`、`--bg=#16181d`。
+- **验证**：`node --check static/js/app.js` 通过；新增 `tests/test_theme_light.py`（5 用例）全过；全量 `pytest tests/ --ignore=tests/test_i18n.py -q` → **182 passed**（基线 177）。
+- **用户二次反馈「播放器仍然是暗色」**：定位到真正的遗留根因——Gradio 音频块根节点带内联 `border-style: solid` 却**无 `border-width`**，宽度回落 CSS 初始值 `medium`(3px)、颜色 `currentColor`；亮色主题下即 3px 近黑边框（`rgb(39,39,42)`），整块看着像「暗色播放器」。修复：在注入 CSS 里加 `SEL + ' { border: 1px solid var(--border-color-primary, transparent) !important; }'`；同时发现 `PLAYERS` 只列了 6 个固定 id，漏掉 `#history-stem-audio`/`#lib-stem-preview`/`#lib-ref-preview`/`#cover-ref-preview`/`#cover-acc-preview`（截图里第二个「音频」块仍是黑框），已扩为 11 项与 `initPlayerZoom()` 的 `PLAYER_IDS` 对齐。`tests/test_theme_light.py` 补 2 处断言。
+- **二次复核**（硬刷新后切「歌曲历史」Tab，亮色模拟）：`#history-audio` 边框 `2.857px solid rgb(39,39,42)` → `0.571px solid rgb(228,228,231)`；全页扫描 `borderTopWidth > 1px` 元素数 = **0**；`.timestamps` 底色 `rgb(250,250,250)`、文字 `rgb(39,39,42)`。
+- **未执行**：未 git commit / push（改动待批准）；多轨编辑页请用户 `Ctrl+F5` 后复测确认。
+
+## 2026-09-30 22:05 — 修复：File 虚线拖拽区 3px 边框 + 多轨编辑被强制亮色时误判为暗色
+
+- **需求**：用户要求「先修复 gr.File 上传区的 3px 虚线框问题，然后修复多轨编辑仍然是暗色问题」。
+- **定位 1（File 虚线框）**：遍历 `document.styleSheets` 用 `el.matches(selectorText)` 命中 Gradio 内置规则 `div.styler > :not(.absolute) { border-width: medium; border-style: none; border-color: currentcolor; }`——宽度 `medium`(3px)、颜色 `currentColor`，本意配合 `border-style: none` 隐藏边框；但 File 组件内联了 `border-style: dashed`，于是露出一圈 3px 近黑虚线（亮色下 `rgb(39,39,42)`）。修复：`_TITLE_ROW_CSS` 追加 `div.styler > :not(.absolute)[style*="dashed"] { border-width: 1px !important; border-color: var(--border-color-primary) !important; }`，只作用于内联带 dashed 的块（两个 File 拖拽区），不动其它组件。
+- **定位 2（多轨编辑仍然是暗色）**：本机 Windows `AppsUseLightTheme = 0`（暗色系统）。用户用 `?__theme=light` 强制亮色时实测：父页 `body.className === ""`（**无 dark 类**）、`--body-background-fill === "white"`，但 `document.body` 的 `backgroundColor` 仍是 `rgb(15,15,17)`（Gradio 用 `@media (prefers-color-scheme: dark)` 直写 body）。原 `syncParentTheme()` 首选 `body.dark` 落空后，回退读 body 背景亮度 → 判成暗色 → **子页被错锁成暗色**，正是用户看到的现象。
+- **修复 2**：回退分支改为读 Gradio 主题变量——`--body-background-fill`（亮 `white` / 暗 `#0f0f11`），再退 `--background-fill-primary`，最后才退回 body/html 背景。变量值写法不固定（`white`/`#rrggbb`/`rgb()`/`color()`），统一用 canvas `fillStyle` 归一化后算亮度，并用哨兵色 `#010203` 识别解析失败（避免非法值被当成纯黑判暗）。
+- **验证**：`node --check`（提取内联脚本）通过；`py_compile app.py` 通过；全量 `pytest tests/ --ignore=tests/test_i18n.py -q` → **183 passed**（基线 182 + 新增 `test_file_dropzone_border_is_normalized`）。浏览器实测（不施加颜色模拟，用真实系统暗色 + `?__theme=` 切换）：`?__theme=light` → iframe `data-theme=light`、`--bg=#ffffff`（修复前为 dark，已复现并修掉）；`?__theme=dark` → iframe `data-theme=dark`、`--bg=#16181d`（无回归）；全页 3 个 dashed 元素宽度均 1px、颜色均 `rgb(228,228,231)`。
+- **服务**：已重启（停旧进程 → 确认端口释放 → 同命令重新拉起），HTML 下发 `app.js?v=13`。
+- **未执行**：未 git commit / push（改动待批准）。
+
