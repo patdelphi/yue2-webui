@@ -533,3 +533,21 @@
 - **验证**：`pytest tests/test_mix_web.py -q` → 34 passed；`pytest tests/ --ignore=tests/test_i18n.py -q` → 177 passed（无回归）。
 - **未执行**：push（需另行批准）。
 
+## 2026-09-30 12:10 — 运维：yue2.patdelphi.xyz 无法访问（Cloudflare Tunnel 排查）
+
+- **现象**：`https://yue2.patdelphi.xyz/` 无法访问。
+- **根因**：本机仅有一个 cloudflared 进程（PID 44320，`--config provenbraid-config.yml`），其 ingress 只映射 `provenbraid.patdelphi.xyz → 127.0.0.1:8710`；承载 `yue2.patdelphi.xyz → 127.0.0.1:9898` 的隧道（`e453c5f2-7910-4a5d-aa84-9d38d2189671`，配置文件 `config.yml`）**进程未运行**。无计划任务、无启动项，重启后需手动拉起。DNS 解析正常（Cloudflare 代理 IP），本地 9898 服务正常（HTTP 200）。
+- **处理**：以 `cloudflared --config C:\Users\patde\.cloudflared\config.yml tunnel run` 独立后台启动（新 PID 51768），日志写入 `.cloudflared/yue2-tunnel-20260930.{stdout,stderr}.log`；日志显示 4 条 `Registered tunnel connection`、连通性 precheck 全 PASS、无 ERR/WRN。
+- **验证**：`https://yue2.patdelphi.xyz/` 走系统代理与 `--noproxy` 均返回 **HTTP 200**（首次测试的 SSL 报错系隧道刚注册时边缘未就绪的瞬时现象，复测消失）。
+- **未执行**：未配置开机自启；未升级 cloudflared（日志提示 2026.8.2 过时 → 2026.9.3）；未改动任何配置文件。
+
+## 2026-09-30 12:20 — 运维：cloudflared 升级至 2026.9.3 + 新增隧道启动脚本
+
+- **升级**：`winget upgrade --id Cloudflare.cloudflared`，2026.8.2 → **2026.9.3**（MSI，安装路径不变 `C:\Program Files (x86)\cloudflared\cloudflared.exe`）。
+- **副作用**：MSI 升级过程终止了正在运行的 cloudflared 进程，ProvenBraid 隧道（原 PID 44320）随之停止（其后端 8710 仍在监听）。
+- **重启 yue2 隧道**：停旧进程后用新 exe 以 `--config C:\Users\patde\.cloudflared\config.yml tunnel run` 后台启动（PID 10508），日志 `yue2-tunnel.log` / `yue2-tunnel.err.log`；4 条 `Registered tunnel connection` 全部成功（connIndex=2 首次 QUIC 拨号超时，15 秒后自动重连成功）。
+- **启动脚本**：新增 `yue2-webui/start-tunnel.bat`（前台运行、Ctrl+C 停止；含 cloudflared/配置文件存在性检查、9898 监听检查，日志追加到 `%USERPROFILE%\.cloudflared\yue2-tunnel.log`）；按用户要求**不做开机自启**。
+- **验证**：`https://yue2.patdelphi.xyz/` → **HTTP 200**（`-NoProxy`）。
+- **ProvenBraid 隧道**：经用户确认后一并拉起（PID 43612，`--config provenbraid-config.yml`）；因 yue2 实例已占用 cloudflared 默认 metrics 端口 20241，显式指定 `--metrics 127.0.0.1:20242` 避免冲突；日志 `.cloudflared/provenbraid-tunnel-20260930.{stdout,stderr}.log`。
+- **最终状态**：两条隧道同时运行 —— yue2（PID 10508，2026.9.3）+ ProvenBraid（PID 43612）；`https://yue2.patdelphi.xyz/` 与 `https://provenbraid.patdelphi.xyz/` 均返回 **HTTP 200**。未做任何 git 操作。
+
