@@ -4,6 +4,237 @@
 
 ---
 
+## 2026-10-04 — 同类问题排查与修复：切 Tab 时「下拉已选中、试听却空着」（4 处）
+
+> 起因：用户「请检查其他模块是否有类似问题」（对标刚修好的「翻唱任务历史默认不回填播放器」）。
+
+- **排查方法**：机械枚举 `app.py` 全部事件绑定（`.select(` / `.change(` / `.input(` 共 22 处），再语义核对每个「程序化设值的下拉」是否有对应的依赖内容刷新。
+- **结论（同类问题 4 处）**：Gradio 的 `.change` 只在用户交互时触发，切 Tab 用 `gr.update` 程序化设值**不会**触发它；而 `_dd_update` 会把下拉默认选中首项，其依赖的「试听」播放器却只在 `.change` 里更新 ⇒ 4 处假选中：
+  - 分离 Tab：`lib_stem_dd` → `lib_stem_preview`、`lib_ref_dd` → `lib_ref_preview`
+  - 翻唱 Tab：`cover_ref_dropdown` → `cover_ref_preview`、`cover_acc_dd` → `cover_acc_preview`
+  - （此前两库均无写入路径、内容恒为空，问题被掩盖；补上「保存到素材库」后才显性化。）
+- **已核对无问题**：`variant_selector`（与 `audio_output` 在同一次生成回调内一起产出，非假选中）；歌曲历史页无默认选中行（需点击行才加载，属设计）；`sep_src_history` / `cover_src_history` / `cover_ref_dry_sep` / `cover_ref_dry_upload` 均无配套试听组件。
+- **修复**：新增 `_preview_first_update(choices)`（按下拉首项算试听值 + 显隐）；`tab_sep.select` 输出追加 `lib_stem_preview, lib_ref_preview`；`tab_cover.select` 输出追加 `cover_ref_preview, cover_acc_preview`。
+- `tests/test_voice_handlers.py`：新增 `test_tab_switch_refreshes_library_previews`。
+- **验证**：`py_compile` OK、全量 `pytest` **197 passed**；服务重启后真实浏览器切「音轨分离」「音色翻唱」Tab 无任何报错（回调返回值 13/15 项与 outputs 元数一致）。
+- **非空场景实测（2026-10-04 补）**：真实浏览器验证 4 处试听均随切 Tab 自动出现且有值——
+  1. 分离「生成 · 20261003_204007.wav」→「保存到素材库」入库 `验证伴奏入库__accompaniment.wav`；切走再回「音轨分离」Tab，`#lib-stem-preview` 自动可见、时长 2:55、下载链接指向 `_accompaniment_preview.mp3`；
+  2. 同一条素材在「音色翻唱」Tab 的「自定义伴奏(可选)」自动选中并弹出 `#cover-acc-preview`（2:55）；
+  3. 按 `save_ref` 语义写入音色库条目 `验证参考音色_ab12.wav`（15s 片段；MCP 文件上传无法访问 Y: 盘，故未经上传 UI）；切「音轨分离」Tab 后 `#lib-ref-preview` 自动可见、时长 0:15；
+  4. 「音色翻唱」Tab `#cover-ref-preview` 自动可见（0:15），下拉值 `验证参考音色_ab12.wav`。
+- **测试条目清理（已完成）**：经用户确认后清理——素材库 `验证伴奏入库__accompaniment.wav`、音色库 `验证参考音色_ab12.wav`（均走 UI「删除选中」入回收站，含各自 `_preview.mp3`）；临时片段 `voice-tools/tmp/_verify_ref_15s.wav` 直接删除；两次测试分离 `outputs/separations_20261004_105538`、`outputs/separations_20261004_113704` 经 `history_mgr.delete_project` 整目录入回收站并移除历史记录。复核：两库目录为空、无全仓残留文件、无残留 `separations_20261004_*` 记录。
+- **未执行**：未 git commit / push。
+
+---
+
+## 2026-10-04 — 修复翻唱任务历史默认不回填播放器
+
+> 起因：用户「翻唱任务历史，默认也没有 load 最后一首歌」。
+
+- **根因**：`tab_cover.select` 切 Tab 刷新时只更新了「翻唱任务历史」下拉并把 `cover_selected_task` 置为首条，未回填回放播放器组；对比 `tab_sep.select` 有 `*_voice_task_first_players("separation")` → `*sep_hist_audios`，故分离页可默认加载、翻唱页停在「下拉显示任务名、播放器却空着」的假选中状态。
+- `app.py`：`tab_cover.select` 输出追加 `*_voice_task_first_players("cover")` 与 `*cover_hist_audios`，上方注释同步说明。
+- `tests/test_voice_handlers.py`：`test_voice_stem_items_prefers_preview_keeps_full_for_mix` 增补两条源码断言（`*_voice_task_first_players("cover")`、`cover_selected_task, *cover_hist_audios]`）。
+- **验证**：`py_compile` OK、全量 `pytest` **196 passed**；真实浏览器切到「音色翻唱」Tab 后 4 个播放器自动填充（翻唱成品 / 换嗓干声 / 伴奏 / 分离人声 = 最新任务 `cover_20260927_105003`，时长 2:52，下载链接指向该任务产物）。
+- **未执行**：未 git commit / push。
+
+---
+
+## 2026-10-04 — 补「保存到素材库」入口（素材库此前无写入路径）
+
+> 起因：全模块同类问题排查（UI 存在但永远不可达/永远为空）发现「素材库(乐器轨)」下拉与本页/翻唱页「自定义伴奏」下拉在应用内**永远为空**——`voice_handlers.save_stem` 全仓库无 UI 调用方。用户指示「修复」。
+
+- `app.py`：
+  - 新增 `_stem_pick_choices(stems)`：由本次分离产物生成「待入库轨道」选项（value=音频路径，label=经 tr 的轨道类型名），与素材库下拉一致排除 `vocals`（人声归音色库）。
+  - 新增回调 `on_voice_save_stem_to_lib(pick_path, name, stems_state)`：从 `sep_stems_state` 回查轨道类型 → 调 `voice_handlers.save_stem` 写入 `voice-tools/stems/<名>__<类型>.ext`；名称留空回退轨道类型名；返回（素材库下拉刷新, 名称清空）。
+  - 新增 `_sep_running_outputs(text)` 包装（`_voice_running_outputs` 为分离/翻唱共享，不能直接扩展）。
+  - `on_voice_separate` 5 处 yield 的 outputs 由 9 项扩为 11 项（末尾追加 `lib_stem_pick, sep_stems_state`）；成功路径回填「待入库轨道」并缓存本次 stems。
+  - 分离页「库管理」卡片在 `lib_stem_dd` 前插入「待入库轨道 / 素材名称 / 保存到素材库」行 + `sep_stems_state = gr.State([])`；`sep_btn.click` outputs 同步扩展；新增 `lib_stem_save_btn.click` 绑定。
+- `src/i18n.py`：新增 8 条词条（待入库轨道 / 素材名称 / 留空则用轨道名 / 保存到素材库 / 请先选择要入库的轨道 / 无法识别该轨的类型 / 保存失败 / 已存入素材库）。
+- `tests/test_voice_handlers.py`：新增 `test_separation_tracks_can_be_saved_to_stem_library`（源码断言入库组件、回调、`save_stem` 调用、完成回填、排除 vocals）。
+- **验证**：`py_compile` OK、全量 `pytest` **196 passed**；真实浏览器（`http://127.0.0.1:9898`）跑通端到端：分离「夜色」源曲 → 完成后「待入库轨道」自动选中「伴奏」→ 保存得 `测试伴奏入库__accompaniment.wav`（约 64MB 落盘 `voice-tools/stems/`）→ 素材库下拉与翻唱页「自定义伴奏」下拉均出现该条目。
+- **清理**：验证用测试条目 `测试伴奏入库__accompaniment.wav` 已按用户确认经回收站删除（`voice-tools/stems/` 现为空）；**未执行**：未 git commit / push。
+
+---
+
+## 2026-10-04 — 移除歌曲历史页失联的「轨道回放」死 UI（P0 收尾）
+
+> 起因：上一轮真实测试发现 P0「历史页多轨回放」在历史页不可达。用户指示「有问题吗？你自己修复」。
+
+- **根因**：历史页表格经 `to_dataframe_rows(record_types=("generation",))` 只列 generation 记录，而 `entry.stems` 只存在于 separation/cover 记录 → `has_stem` 恒为 False → `history_stem_dd`（「轨道回放(分离/翻唱)」下拉）与 `history_stem_audio` 永远隐藏。该 UI 属死代码。
+- **修法**：按既定设计（歌曲历史页仅显示生成记录；分离/翻唱逐轨回放已各自在专用页）**移除历史页这段失联 UI**，而非把分离/翻唱记录塞回历史表。
+- `app.py`：
+  - 删除组件 `history_stem_dd` / `history_stem_audio` 及其 `_reg`；改写区块 2 注释说明为何不再放轨道回放。
+  - `history_df.select` 与「删除选中 / 清空历史 / 改项目名 / 删除项目」四处 `.click(outputs=...)` 去掉两个 stem 输出；删除 `history_stem_dd.change(...)` 绑定。
+  - `_hist_player_keep/_clear` 由双值改为单值（返回 `gr.update()` / `gr.update(value=None)`）。
+  - `on_history_rename_project` 去掉 stem 分支；`_load_history_entry` 去掉 stem 输出（返回值由 11 元降为 9 元），docstring 同步。
+- `static/js/app.js`：`PLAYERS` 选择器与 `initPlayerZoom` 的 `PLAYER_IDS` 移除 `history-stem-audio`；两处相关注释同步改写。
+- `tests/test_theme_light.py` / `tests/test_voice_handlers.py`：去掉对 `#history-stem-audio` 的断言，新增「历史页已无 `history_stem` / `history-stem-audio`」负向断言，`_voice_stem_items` 断言改指分离/翻唱页用法。
+- 因 `app.js` 内容变更，`app.py` 内 `app.js?v=16` 升为 `v=17`（绕开 Cloudflare 边缘缓存）。
+- **验证**：`py_compile app.py` OK、
+ode --check static/js/app.js` OK、全量 `pytest` **195 passed**。
+- **未执行**：未 git commit / push。
+
+---
+
+## 2026-10-04 — 远端回放修复（P0–P3 + 历史表行点击）整体真实测试
+
+> 目的：用户要求「整体做真实测试」。对上述改动做端到端真实验证（真实浏览器 + 真实音频 + 真实网络），而非源码断言。
+
+- **rt1 历史页**：`history-audio` 主播放器实际取 `夜色_20260927_104543.mp3`（P1 生效）；行点击高亮独占且 1 次点击 = 1 次 `queue/join`；空播放器无 loading 浮层。
+- **rt4 多轨页（P3 进度提示）**：iframe 内真实调用 `fetchWithProgress` 下载 101.3 MB WAV（106,192,888 字节）→ 49.4s、3639 个进度点 0%→100% 单调；真实 UI 路径 `ensureBuffers()` 令 `#tp-msg` 逐帧显示「正在下载音频 1/1 · <轨> N%」→100%→「正在解码音频」→清空，返回 `true`（测试后已复原注入的假轨）。
+- **rt2/rt3 库试听（`_preview_for_library`）**：临时造 2 个 3 秒小件（`voice-tools/refs/测试参考_ab12.wav`、`voice-tools/stems/测试伴奏__accompaniment.wav`）做 UI 端到端——切 Tab 刷新下拉后选中即触发服务端生成 `_preview.mp3`，四个试听播放器（`lib-stem-preview`/`lib-ref-preview`/`cover-ref-preview`/`cover-acc-preview`）均渲染波形与 0:03；**网络请求证据：仅拉取 `*_preview.mp3`，测试件 `.wav` 零请求**。测完经 `delete_ref`/`delete_stem` 将 4 个文件移入系统回收站（删除链路同时得到验证），两库目录复原为空。
+- **预览件真实校验**：ffprobe 比对最大分离轨 WAV（301.0s / 2822kbps / 101.27MB）与其 `_preview.mp3`（301.0s / 192kbps / 6.89MB），时长完全一致；`_make_preview` 复用命中 0ms；`outputs/` 下 24 份 WAV 均已带预览件。
+- **gen-audio（P1）已有产物验证**（经用户确认不跑 GPU 生成）：5/5 生成记录的 `audio_path` 均为 `.wav` 且同目录存在同名 `.mp3`，`_prefer_mp3` 全部返回 mp3（含批量变体 `var1/2/3`，覆盖批量 / 列表 / 变体切换三处接线）。
+
+**新发现（行为澄清，非缺陷回归）**
+
+- **P0「历史页多轨回放」在历史页不可达**：`_load_history_entry` 以 `to_dataframe_rows(record_types=("generation",))` 取记录，`entry` 恒为生成记录、`entry.stems` 恒空 → 历史页「轨道回放(分离/翻唱)」下拉永远隐藏。分离/翻唱的轨道回放真正可用入口是「音轨分离」「音色翻唱」两页各自的任务历史下拉（本轮网络证据显示这两处回放均取 `*_preview.mp3`）。
+
+**未执行**
+
+- 未真实跑歌曲生成（经用户选择跳过，改用已有产物验证）。
+- 未 git commit / push。
+
+---
+
+## 2026-10-04 — 修复历史表行点击选择器失效（tbody tr → role=row）+ 移除冗余隐藏 trigger
+
+> 目的：用户要求「修复 app.js 中 tbody tr 选择器不生效的问题」。
+
+- **根因**：Gradio 6 的 Dataframe 用虚拟滚动渲染——表头是 `<thead><tr role="row">`，**数据行是 `<div class="virtual-row" role="row">`（不是 `tbody tr`）**，
+  `tbody` 内仅有一条 0 高的量宽占位 `tr`。故 `e.target.closest('tbody tr')` 对数据行恒为 
+ull`（若点到占位 tr 又会得到恒定 index 0）
+  → 行高亮、`cursor:pointer`、hover 底色全部失效。
+- **实测确认**：Gradio 原生 `history_df.select` 一直正常工作（可信点击正确加载对应行 MP3），而隐藏 `#history-row-trigger` 的值恒为 `-1`，说明 JS 这条触发链从未生效过。
+- `static/js/app.js`（`initHistoryTableClick`）：
+  - 行匹配改按 `[role="row"]`，并用「是否含列头单元格」(`[role="columnheader"]`) 排除表头行；
+  - CSS 同步改为 `#history-table [role="row"]:not(:has([role="columnheader"]))`；
+  - **移除 `setTriggerValue()` 与隐藏 trigger 依赖**——选行统一交给 Gradio 原生 `history_df.select`，避免两条路径同时触发导致重复加载后端；
+  - 增加 `dataset.y2RowClickInit` 标记（该函数会被 `initPlayerZoom` 与 2s 定时器各调一次），避免重复挂监听 / 重复插样式。
+- `app.py`：移除已失效的 `history_row_trigger = gr.Number(elem_id="history-row-trigger")`、`history_row_trigger.change(...)` 绑定与 `on_history_row_click()` 函数；
+  脚本版本 `app.js?v=15` → `v=16`（app.js 内容变更必须换版本号，否则命中 Cloudflare 旧缓存）。
+- `tests/test_history_filter.py`：新增 `test_history_row_click_uses_role_row_not_tbody_tr`
+  （断言 JS/CSS 走 role=row、无 `setTriggerValue`、无 `history-row-trigger`、app.py 无残留，且 `history_df.select` 仍在）。
+
+**验证**
+
+- `py_compile app.py`、
+ode --check static/js/app.js` 通过。
+- `pytest tests/ --ignore=tests/test_i18n.py -q --basetemp=".pytest_tmp_all"` → **195 passed**（基线 194 + 新增 1）。
+- **远端实测**（`https://yue2.patdelphi.xyz/`，服务重启 + 硬刷新后，`app.js?v=16`）：
+  - 数据行 `getComputedStyle(...).cursor === "pointer"`（修复前为默认值）；
+  - 点击第 2 行 → 该行加 `rgba(59,130,246,0.2)` 高亮、其余行无、表头行不受影响；
+  - 可信点击正确加载对应行 MP3（`夜色_20260927_104543.mp3`）；
+  - 计得 1 次点击 = 1 次 `queue/join`，无重复触发。
+
+**更正**
+
+- 上一条 2026-10-04 条目「发现的无关问题（仅记录，未修）」所述的历史页行点击问题，已由本次修复。
+
+**未执行**
+
+- 未 git commit / push（改动待批准）。
+
+---
+
+## 2026-10-04 — 远端回放「大文件」同类问题整体排查与修复（P0–P3）
+
+> 目的：用户在上一轮修复「音轨分离/翻唱」大文件回放慢之后追问「其他模块是不是有类似问题？你整体检查、修改、测试」。
+> 经确认的两项决策：主播放器改用同目录同名 MP3；多轨编辑器暂不改格式，只强化进度提示。
+
+- **同类问题审计**（根因一致：Gradio 前端必须把整个文件下完才给 `<audio>` 挂 `src`，经 Cloudflare 隧道下行约 1.2 MB/s）：
+  - 歌曲创作 `gen-audio`：原播 31–48MB WAV（同目录已有约 3.5MB 同名 MP3）→ P1 改用同名 MP3；
+  - 歌曲历史 `history-audio`：同上 → P1 改用同名 MP3；
+  - 歌曲历史「轨道回放(分离/翻唱)」下拉：原指向 WAV 原件 → P0 改走 preview 小件；
+  - 音轨分离「库管理」试听 `lib-stem-preview` / `lib-ref-preview`：原指向库内大 WAV → P2 按需生成/复用 preview；
+  - 音色翻唱参考/伴奏试听 `cover-ref-preview` / `cover-acc-preview`：同上 → P2 按需生成/复用 preview；
+  - 多轨编辑（4 轨约 250MB，需全部解码）→ P3 暂不改格式，仅强化下载/解码进度提示。
+- **P0** `app.py`：`_load_history_entry` 的「轨道回放(分离/翻唱)」下拉改用 `_voice_stem_items(getattr(entry, "stems", None))`，
+  preview 优先 + 命名约定推导 + 缺失回退原件。
+- **P1** `app.py`：新增 `_prefer_mp3(path)`（同名 `.mp3` 存在即用，否则回退原路径；仅作用于回放/下载槽位，
+  合成/分离/混音等后端链路仍用原件），覆盖生成回传、批量变体、重合成、历史页试听四处。
+- **P2** `app.py`：新增 `_preview_for_library(path)`（调用 `_make_preview`，失败回退原件），4 个库试听 lambda 统一改用它；
+  `src/voice_ui_handlers.py` 配套新增 `_preview_sibling` / `_is_preview_file` / `_rename_preview_sibling`，
+  `list_refs` / `list_stems` 过滤预览小件（避免污染下拉），`delete_*` 连带回收预览件，`rename_*` 同步搬移。
+- **P3** `static/multitrack/index.html`：新增 `fetchWithProgress()`（读 `Content-Length` + `getReader()` 流式下载并回传百分比），
+  `ensureBuffers()` 显示「正在下载音频 x/y · 轨名 P%」→「正在解码音频 x/y · 轨名」；
+  `src/i18n.py` 与 `src/mix_web.py` 的 `PAGE_TEXT_KEYS` 补「正在下载音频」。
+- **修复本轮实测发现的 bug**：历史页未选中任何记录时 `history-audio` 会误显示「正在加载音频… Ns」。
+  根因：上一轮的 `syncLoading` 判据只要求「可见 + 无 shadow src」，而 Gradio 空播放器（无值时只渲染空白占位 `DIV.empty`，不含 `#waveform`）也满足；
+  新增 `hasPlayerChrome(root)`（要求存在 `#waveform`）作为前置判据修复；脚本版本 `app.js?v=14` → `v=15`。
+
+**验证**
+
+- `py_compile app.py src/voice_ui_handlers.py src/i18n.py src/mix_web.py`、
+ode --check static/js/app.js`、内联脚本语法检查均通过。
+- `pytest tests/ --ignore=tests/test_i18n.py -q --basetemp=".pytest_tmp_all"` → **194 passed**（基线 190 + 新增 4 个用例）。
+- **远端实测**（`https://yue2.patdelphi.xyz/`，服务重启 + 硬刷新后）：
+  - `app.js?v=15` 已下发；
+  - 切「歌曲历史」不选记录时 `#history-audio .yz-loading` 为 
+ull`（空播放器不再误显示）；
+  - 可信点击第 1 行后 shadow `<audio>` 的 `src` 为 `...\20261003_204007.mp3` —— 确认主播放器下发的是 MP3 而非 WAV。
+
+**未执行**
+
+- 多轨编辑器仍解码全量 WAV（按决策仅加进度提示，未改格式）；P3 只做了源码级断言与单测，未做多轨真机大文件回放实测。
+- 未 git commit / push（改动待批准）。
+
+**发现的无关问题（仅记录，未修）**
+
+- `static/js/app.js` 的 `initHistoryTableClick` 用 `e.target.closest('tbody tr')` 判定行，但 Gradio 6 把数据行渲染为 `[role="row"]` 的 div，
+  `tbody tr` 为 null → 该原生行点击高亮/触发逻辑不生效（实际靠 Gradio 原生 select 事件工作）。与本轮「大文件」主题无关，按「不做顺手重构」原则仅记录。
+
+---
+
+## 2026-10-04 — 远端音轨分离历史回放加速（预览小件）+ 加载提示 + 切 Tab 回填播放器
+
+> 目的：用户反馈「音轨分离历史，远端访问，选择歌曲显示不了音轨内容，是不是无法 load 音轨？」并提出三项要求：
+> 「1. 分离后有没有生成小音频？ 2. 回放只需要 load 小音频，合成才需要大音频 3. 增加 loading 显示」。
+
+- **根因**：分离/翻唱产物是 32bit float WAV（48000×2×4 = 384,000 B/s），单轨 63–101MB；
+  Gradio 前端必须把**整个文件下完**才给 shadow `<audio>` 挂 `src`（此前一直是 0:00 空壳）。
+  经 Cloudflare 隧道下行约 1.2 MB/s → 单轨约 1 分钟、多轨数分钟，看起来就像「加载不出来」。
+- `src/voice_ui_handlers.py`：新增 `_PREVIEW_SUFFIX = "_preview"`、`_PREVIEW_BITRATE = "192k"` 与
+  `_make_preview()`（ffmpeg `libmp3lame -b:a 192k`；原件不存在 / ffmpeg 缺失 / 转码失败一律静默返回空串，
+  已有且不旧于原件的预览件直接复用）；`_build_stems()` 为每条 stem 增加 `preview` 键（`path` 仍为原件）。
+- `app.py`：
+  - `_voice_stem_items()` 回放优先取 `preview`；**存量记录无 `preview` 键时**按命名约定从原件名推导
+    `<原名>_preview.mp3`（存在即用），避免为历史数据做数据库迁移；预览件缺失则退回原件。
+    合成链路（翻唱换伴奏、`sep_task:` 复用分离结果）始终读 `path`（原件），不受影响。
+  - 新增 `_voice_task_first_players(record_type)`；`tab_sep.select` 追加该回填并令 `outputs` 增加 `*sep_hist_audios`
+    ——修复「进入分离页时下拉已显示任务名、播放器组却是空的」假选中状态。
+  - 脚本引用 `app.js?v=13` → `v=14`（`app.js` 内容变更必须换版本号，否则命中旧缓存）。
+- `src/history.py`：`rename_project` 同步 `_remap(s["preview"])`；`_files_for` 删除范围纳入 `preview`（改名/删除后预览件不失效、不残留）。
+- `static/js/app.js`：新增 `.yz-loading` 样式与 `watchPlayer` 内的 `syncLoading()`（`poll()` 每 1s 调用）——
+  等待期在播放器根节点挂「正在加载音频… Ns」浮层，`getShadowAudio(root)` 拿到 `src` 后自动移除。
+- `aipython/backfill_voice_previews.py`：新增存量补生成脚本（幂等、支持 `--dry-run`，复用产线 `_make_preview`）。
+
+**验证**
+
+- `py_compile app.py src/voice_ui_handlers.py src/history.py`、
+ode --check static/js/app.js` 均通过。
+- `pytest tests/ --ignore=tests/test_i18n.py -q --basetemp=".pytest_tmp_all"` → **190 passed**
+  （基线 183 + 新增 7 个用例：`_make_preview` 三分支、`_build_stems` 带 preview、`_voice_stem_items` 优先 preview 且合成读 path、
+  history 改删处理 preview、app.js loading 浮层）。
+- **存量补生成**：7 个目录 19 轨，991MB → 99.5MB（约 1/10），耗时 42.5s；复跑 dry-run 待处理 0（幂等）。
+- **远端实测**（`https://yue2.patdelphi.xyz/`，服务重启后）：
+  - 切「音轨分离」自动回填 4 轨（夜色 4 轨分离记录），播放器不再为空；
+  - 网络请求为 `夜色_20260930_120709_{drums,bass,other,vocals}_preview.mp3`（HTTP 200/206 分段），
+    shadow `<audio>` 时长 171.6s —— 确认回放走小件，不再拉 63MB 原 WAV；
+  - 浮层实测：摘掉 shadow audio 的 `src` 后 2.5s 内出现「正在加载音频… 2s」（父节点 `sep-history-audio-0`），恢复 `src` 后自动移除。
+- **缓存陷阱（重要）**：Cloudflare 边缘缓存了旧 `/static/js/app.js?v=13`（内容不含新代码，且 Gradio 的 `v` 不随内容变化），
+  同 URL 直取会拿到旧文件；升 `v=14` 后恢复正确。远端访问时如遇「页面功能像旧版」，可硬刷新或换版本号。
+
+**副作用**
+
+- 回放播放器改用预览 MP3 后，`gr.Audio` 的下载按钮下载的是 **MP3 小件**（一个组件只有一个 value）；原始 WAV 仍在磁盘，合成链路使用原件。
+
+**未执行**
+
+- 未 git commit / push（改动待批准）。
+
+---
+
 ## 2026-09-30 — 亮色主题修复（File 虚线拖拽区 / 多轨编辑被强制亮色时误判为暗色）
 
 > 目的：用户反馈「gr.File 上传区有 3px 虚线框」「多轨编辑仍然是暗色」。
@@ -26,7 +257,8 @@
 
 **验证**
 
-- `node --check`（提取 index.html 内联脚本）通过；`py_compile app.py` 通过。
+- 
+ode --check`（提取 index.html 内联脚本）通过；`py_compile app.py` 通过。
 - `pytest tests/ --ignore=tests/test_i18n.py -q --basetemp=".pytest_tmp_all"` → **183 passed**（基线 182 + 新增 1 个用例）。
 - 浏览器实测（本机 Windows 为暗色系统，Chrome DevTools 不施加颜色模拟）：
   - `?__theme=light`：父页 `body` 无 `dark` 类、`--body-background-fill=white`，但 `body` 背景仍是 `rgb(15,15,17)`；修复后 iframe `data-theme=light`、`--bg=#ffffff`（修复前会被判成 dark）。
@@ -56,7 +288,8 @@
 
 **验证**
 
-- `node --check "static/js/app.js"` 通过；`pytest tests/test_theme_light.py -q` → 5 passed。
+- 
+ode --check "static/js/app.js"` 通过；`pytest tests/test_theme_light.py -q` → 5 passed。
 - `pytest tests/ --ignore=tests/test_i18n.py -q --basetemp=".pytest_tmp_all"` → **182 passed**（基线 177 + 新增 5 个用例）。
 - 浏览器实测（Chrome DevTools MCP，`emulate colorScheme` 切明暗；Gradio 6.28 只跟随 `prefers-color-scheme`，`localStorage.theme` / `?__theme=` 均无效）：亮色下 `#gen-audio` 背景由 `rgba(0,0,0,0.7)` 恢复为 `rgb(255,255,255)`；多轨编辑 iframe 由父页 `body.dark` 驱动，亮/暗切换后 `data-theme` 与 `--bg` 均正确跟随（`#ffffff` ↔ `#16181d`）。
 - 播放器外框二次复核（硬刷新后切「歌曲历史」Tab）：`#history-audio` 边框由 `2.857px solid rgb(39,39,42)` → `0.571px solid rgb(228,228,231)`；全页扫描 `borderTopWidth > 1px` 元素数 = 0；`.timestamps` 底色 `rgb(250,250,250)`、文字 `rgb(39,39,42)`。
@@ -85,7 +318,8 @@
 **验证**
 
 - `pytest tests/ --ignore=tests/test_i18n.py -q --basetemp=".pytest_tmp_all"` → **177 passed**（基线 175 + 新增 2 个用例）。
-- `node --check`（提取内联脚本）通过；`py_compile`（mix_render / mix_web / i18n / app）通过。
+- 
+ode --check`（提取内联脚本）通过；`py_compile`（mix_render / mix_web / i18n / app）通过。
 - 浏览器实测（Chrome DevTools MCP，服务已重启、页面已硬刷新）：
   - iframe 高度 262 → 1337px 跟随内容；追加 600px 占位块 → 1937px，移除后回 1337px（双向）。
   - 面板高 232px；音质/压缩同宽 362px；FX 工具整行 1078px，三组左沿 70 / 496 / 1017，右端 1127 与 OUT 表右沿对齐。
@@ -262,7 +496,8 @@
 
 **验证**
 
-- `node` + `vm.Script` 编译内联 script：`compiled scripts: 1 ok`。
+- 
+ode` + `vm.Script` 编译内联 script：`compiled scripts: 1 ok`。
 - `python -m pytest tests/test_mix_web.py tests/test_mix_render.py -q` → 61 passed；`python -m pytest tests/ --ignore=tests/test_i18n.py -q` → 175 passed（本轮未改 Python，无新增文案键）。
 - 浏览器实测（Chrome DevTools MCP，pageId 33，载入 `separations_20260927_104930`）：
   - 控制簇无缝衔接：play `[109,40]`、stop `[148,40]`（与 play 间隙 −1px）、loop `[187,48]`（与 stop 间隙 −1px）。
@@ -294,7 +529,8 @@
 
 **验证**
 
-- `node --check`（抽取内联 script，经 `vm.Script` 编译）通过。
+- 
+ode --check`（抽取内联 script，经 `vm.Script` 编译）通过。
 - `python -m py_compile src/mix_web.py src/i18n.py` 通过。
 - `python -m pytest tests/test_mix_web.py tests/test_mix_render.py -q` → 61 passed；`python -m pytest tests/ --ignore=tests/test_i18n.py -q` → 175 passed。
 - 浏览器实测（Chrome DevTools MCP，1440×1000，深浅两主题 + `?embed=1`）：
@@ -351,7 +587,8 @@
 
 **验证**
 
-- 内联 JS `node --check` 通过（65848 字符，exit=0）；`py_compile` 通过。
+- 内联 JS 
+ode --check` 通过（65848 字符，exit=0）；`py_compile` 通过。
 - `pytest tests/test_mix_web.py tests/test_mix_render.py` → **61 passed**（较第一批 +1，新增接线测试）；全量（排除脚本式 `tests/test_i18n.py`）→ **175 passed**。
 - 浏览器实测（页 32，真实 2 轨素材 04. K歌之王，224.3s）：
   - 结构：每轨 2 个 `.fxmeter`（IN/OUT）+ 5 个 `.mt-col`（2+2 电平 + 1 GR）+ 1 个 `canvas.eqc`；模块标题 `["音质","压缩","回声"]`；`mtrEl` 五键齐全。
@@ -398,7 +635,8 @@
 
 **验证**
 
-- 内联 JS `node --check` 通过（53307 字符，exit=0）；`pytest tests/test_mix_web.py tests/test_mix_render.py` → 60 passed；全量（排除脚本式 `tests/test_i18n.py`）→ 174 passed。
+- 内联 JS 
+ode --check` 通过（53307 字符，exit=0）；`pytest tests/test_mix_web.py tests/test_mix_render.py` → 60 passed；全量（排除脚本式 `tests/test_i18n.py`）→ 174 passed。
 - 浏览器实测（pageId，真实 2 轨素材 04. K歌之王）：
   - 结构：2 轨 × 3 模块 = 6 个 `.fxmod`，16 个旋钮 + 6 个推子；默认态 16 个值弧全部为空（中性）✓。
   - 手感：旋钮上拖 90px → 低频 +15.0 dB（触顶钳制）且弧出现；滚轮两格 → 中频 +0.5 dB；双击盘面 → 复位 0；双击徽标 → 出现 `.fxnum`，输入 7.5 + Enter → `+7.5 dB` 且输入框消失；Esc → 不提交（保持 7.5）；推子点轨道 25% 高度 → 延迟 1500 ms、填充 75%；`Home` → 0；`↑` → 0.5；`Shift+↑` → 3.0。
@@ -430,7 +668,8 @@
 
 **验证**
 
-- `py_compile src/i18n.py src/mix_web.py` 通过；内联 JS `node --check` 通过。
+- `py_compile src/i18n.py src/mix_web.py` 通过；内联 JS 
+ode --check` 通过。
 - `pytest tests/test_mix_web.py tests/test_mix_render.py --basetemp=".pytest_tmp_mix"` → 60 passed；全量（排除脚本式 `tests/test_i18n.py`）→ 174 passed。
 - 浏览器实测（pageId 载入 2 轨真实素材）：`loopChecked=true`、`Sloop=true`；每轨 10 个 `.step` 控件，按钮文本 `["−","+","−"]`；回声延迟控件 `value="0"`、tooltip「延迟（0 = 自动 250ms）」、反馈 0、混合 0、压缩阈值 0 / 比率 1；卡片 `radius 12px / shadow 生效`、transport `radius 8px + 背景`、轨道卡 `radius 8px`。
 - 全局热键实测：数字框聚焦后按空格 → 播放；再按 → 暂停；文本输入（工程名）内空格不拦截、不触发播放。
@@ -479,7 +718,8 @@
   - 单轨试听（▶）与统一播放共用同一条音效链；`buildPayload` 输出 5 个音效字段；`applyTrackState` 载入工程后钳制回灌、同步控件显示并刷新节点链。
 - `tests/test_mix_render.py`：新增 `test_fx_effect_params_default_and_clamped`、`test_comp_filter_linear_threshold_and_off`、`test_echo_filter_taps_default_delay_and_decay_floor`、`test_fx_filters_p2_order_after_pan`；`test_build_cmd_includes_fx_after_volume` 扩展为覆盖「音量→音质→压缩→回声→adelay」的完整顺序。
 - `tests/test_mix_web.py`：`test_save_project_persists_fx_params` 扩展为 P1+P2 往返幂等；文案抽查加 7 键；编辑页源码断言加 `createDynamicsCompressor`/`createDelay`/`fxRow2`/`comp_th`/`echo_mix` 等 10 个 token。
-- 验证：`py_compile` 通过；编辑器内联 JS `node --check` 通过；`pytest tests/test_mix_web.py tests/test_mix_render.py` 59 项、全量（排除脚本式 `tests/test_i18n.py`）173 项通过。
+- 验证：`py_compile` 通过；编辑器内联 JS 
+ode --check` 通过；`pytest tests/test_mix_web.py tests/test_mix_render.py` 59 项、全量（排除脚本式 `tests/test_i18n.py`）173 项通过。
   - **ffmpeg 语义实测**（源：200ms 幅度 0.8 正弦 + 0.8s 静音）：压缩 `-24dB/8:1` 使整段峰值 -1.9 → -8.0 dBFS、持续段均值 -11.9 → -29.9 dB（约 18dB 压缩量，符合阈值/比率预期，-8.0 峰值来自 20ms attack 的起音瞬态）；回声 `混合0.5/反馈0.5/延迟200ms` 在源静音窗（0.3–0.8s）由 -91.0 dB 提升至 -14.0 dB，抽头确实出现；串联链路中静音窗为 -26.0 dB（= 压缩后的信号再入回声），印证「压缩→回声」顺序。
   - **浏览器实测**（真实 171.6s 素材，2 轨）：音效行 5 控件渲染正常并显示「压缩/阈值/比率/回声/延迟/反馈/混合」；设 -24dB/8:1/300ms/0.5/0.4 后节点参数为 threshold=-24、ratio=8、knee=6、attack=0.02、release=0.25，回声抽头 delay=0.3/0.6/0.9s、gain=0.2/0.1/0.05（= 混合×fb^k，与后端公式一致），P1 节点未受影响（hpf=20 关闭、lpf=22050 关闭、pan=0）；`buildPayload` 携带 5 字段；保存工程→载入工程后控件与参数原样恢复。
   - **端到端渲染实测**：带 P2 参数走页面「渲染」成功产出 `mix_..._mix.flac`，成品 **-14.21 LUFS / 真峰值 -1.50 dBTP**，符合母带目标（压缩+回声未破坏响度归一化）。测试产物（混音记录与目录、工程文件、临时素材、pytest 临时目录）已全部移入系统回收站。
@@ -516,7 +756,8 @@
   - 新增选区读数 `#sel-info`（等宽数字）：显示 `起始 <时间码>  时长 <时长>`；无有效选区时显示整曲范围，与 `playRange()` 的播放区间保持一致；由 `redrawAll()` 统一刷新，故拖拽选择、手填起止、载入素材、窗口缩放后都会同步更新。
 - `src/mix_web.py`、`src/i18n.py`：新增文案键「播放控制 / 取消选择区 / 起始 / 时长」（编辑页文案仍全部由后端下发，前端零硬编码）。
 - `tests/test_mix_web.py`：`test_page_texts_complete` 抽查加入 4 个新键；`test_editor_page_has_transport_playback` 增加 `t-transport`/`sel-clear`/`sel-info`/`updateSelInfo` 断言。
-- 验证：`py_compile` 通过；编辑器内联 JS `node --check` 通过；`pytest tests/test_mix_web.py tests/test_mix_render.py` 50 项通过。浏览器实测（真实 171.6s 素材）：label 显示「播放控制」、按钮「取消选择区」；无选区读数「起始 0:00.0  时长 2:51.6」、选区 [5,8] 读数「起始 0:05.0  时长 0:03.0」；点「取消选择区」后 `S.sel=[0,0]`、播放范围回整曲、输入框回到 `0~171.599`、读数复位。
+- 验证：`py_compile` 通过；编辑器内联 JS 
+ode --check` 通过；`pytest tests/test_mix_web.py tests/test_mix_render.py` 50 项通过。浏览器实测（真实 171.6s 素材）：label 显示「播放控制」、按钮「取消选择区」；无选区读数「起始 0:00.0  时长 2:51.6」、选区 [5,8] 读数「起始 0:05.0  时长 0:03.0」；点「取消选择区」后 `S.sel=[0,0]`、播放范围回整曲、输入框回到 `0~171.599`、读数复位。
 
 ---
 
@@ -530,7 +771,8 @@
   - 播放引擎（`audioCtx` / `scheduleIteration`）：所有轨共用一个 `AudioContext`，每轨按 `clips` 建 `AudioBufferSourceNode`（`offset=clip.in`、`duration=out-in`），**全部使用同一个 `start(t0)`** → 样本级同步；无裁切的轨按整轨调度。首次播放 `fetch('/api/mix/audio')` → `decodeAudioData` 并按 `path` 缓存，解码期间显示「正在解码音频 x/y」。
   - 增益链：`片段淡变包络 → 轨 GainNode → masterGain → destination`；淡变按片段边界生成折线（起点已落在淡入区内时从当前值续接）。Mute/Solo/增益用 `setTargetAtTime` 门控，**播放中切换即时生效，无需重启播放**。
   - 播放头：每轨 canvas 外层包 `wave-wrap`，叠加绝对定位竖线（避免每帧整幅重绘 canvas），由 `requestAnimationFrame` 按音频时钟 `pos = playStart + (ctx.currentTime - t0)` 更新；用「播放代次 `S.gen`」作废旧帧回调，避免重排后出现双 tick 循环（实测推进速率 0.994x）。
-  - 循环：`setInterval` lookahead 在每轮结束前 ~0.5s 预排下一轮（`nextLoopAt`），播放头按 `pos mod span` 取模；同时清理已播完的节点引用，避免长时间循环时数组膨胀。
+  - 循环：`setInterval` lookahead 在每轮结束前 ~0.5s 预排下一轮（
+extLoopAt`），播放头按 `pos mod span` 取模；同时清理已播完的节点引用，避免长时间循环时数组膨胀。
   - 交互：波形 `pointerdown → pointerup` 位移 < 4px 视为**单击**（定位播放头，保留原选区），≥ 4px 才生成选区（此前 `pointerdown` 即清空选区）；`Space` 播放/暂停（焦点在 input/select/textarea 时不拦截）；单轨 ▶ 试听与统一播放互斥。
 - `src/mix_web.py`、`src/i18n.py`：新增文案键「播放/暂停/停止/循环/正在解码音频/解码失败/播放失败」（编辑页文案仍全部由后端下发，前端零硬编码）。
 - `tests/test_mix_web.py`：新增 `test_editor_page_has_transport_playback`（transport 控件 + 引擎/播放头/空格键源码断言）；文案抽查加入 5 个新键。
@@ -600,7 +842,8 @@
 - `src/history.py`：`_PROJECT_DIR_PREFIXES` 新增 `mix_`；新增 `_DERIVED_DIR_PREFIXES`（记录类型 → 产物目录前缀），`_derived_dir_for` 改为查表，使混音记录删除时其 `mix_<ts>/` 目录可整目录回收。
 - `src/i18n.py`：补充「多轨编辑」及编辑页 39 条中英词条。
 - 新增 `tests/test_mix_web.py`：22 项测试（路径白名单/MIME/峰值分桶与缓存/素材清单过滤/提交与状态各分支/注册表淘汰/文案完整性/app.py 路由与入口源码断言/编辑页接口引用/**真实端到端**：提交→队列渲染→产物落盘→写 mix 历史→目录可整目录回收）。
-- 验证：`py_compile` 通过；`pytest tests/test_mix_web.py tests/test_mix_render.py` 41 项通过；全量 `pytest tests`（排除脚本式 `tests/test_i18n.py`）155 项通过；服务重启后对 6 个接口做真实 HTTP 冒烟：静态页 200 `text/html` + `no-store`、`sources` 列出 4 组分离素材、`peaks` 400 桶/时长 171.6s、`audio` 200 `audio/wav`、越界路径 404、非法工程/未知任务/未知取消均返回 `ok=false` + 中文错误。
+- 验证：`py_compile` 通过；`pytest tests/test_mix_web.py tests/test_mix_render.py` 41 项通过；全量 `pytest tests`（排除脚本式 `tests/test_i18n.py`）155 项通过；服务重启后对 6 个接口做真实 HTTP 冒烟：静态页 200 `text/html` + 
+o-store`、`sources` 列出 4 组分离素材、`peaks` 400 桶/时长 171.6s、`audio` 200 `audio/wav`、越界路径 404、非法工程/未知任务/未知取消均返回 `ok=false` + 中文错误。
 - 未完项（M3）：Tab 内嵌（C3）、编辑工程持久化为可再次打开的项目、历史页表格展示 mix 记录（当前混音成品的回放/下载在编辑页内完成）。
 
 ---

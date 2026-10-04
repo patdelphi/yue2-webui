@@ -13,7 +13,9 @@ app.py 仅做：Tab 布局、语言注册、事件绑定，并把按钮输入转
 import json
 import logging
 import random
+import shutil
 import string
+import subprocess
 import threading
 import time
 from dataclasses import dataclass
@@ -69,14 +71,71 @@ _STEM_LABELS = {"vocals": "人声", "accompaniment": "伴奏",
                 "cover": "翻唱成品", "converted_vocals": "换嗓干声",
                 "separated_vocals": "分离人声"}
 
+# 回放预览件：MP3 192k（约为 32bit float WAV 原件的 1/12 体积）
+_PREVIEW_SUFFIX = "_preview"
+_PREVIEW_BITRATE = "192k"
+
+
+def _make_preview(src: str) -> str:
+    """为大件 WAV 生成网页回放用小音频 <原名>_preview.mp3，失败返回空串。
+
+    远端经隧道回放时，32bit float WAV 单轨 60–100MB，整文件下完要几十秒才出波形；
+    这里随产物预生成 MP3 小件，历史回放只取小件，合成（翻唱/混音）仍用原件。
+    ffmpeg 缺失或转码失败都静默返回空串，回放自动退回原件，不影响主流程。
+    """
+    p = Path(src)
+    if not p.exists():
+        return ""
+    dst = p.with_name(f"{p.stem}{_PREVIEW_SUFFIX}.mp3")
+    if dst.exists() and dst.stat().st_mtime >= p.stat().st_mtime:
+        return str(dst)  # 已生成且不旧于原件：直接复用
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return ""
+    try:
+        subprocess.run([ffmpeg, "-y", "-nostdin", "-loglevel", "error", "-i", str(p),
+                        "-vn", "-c:a", "libmp3lame", "-b:a", _PREVIEW_BITRATE, str(dst)],
+                       check=True, timeout=900,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        logger.warning("生成回放预览件失败（回放退回原件）: %s %s", p.name, e)
+        return ""
+    return str(dst) if dst.exists() else ""
+
+
+def _preview_sibling(p: Path) -> Optional[Path]:
+    """返回原件对应的预览小件路径（存在则返回，否则 None）。"""
+    cand = p.with_name(f"{p.stem}{_PREVIEW_SUFFIX}.mp3")
+    return cand if cand.exists() else None
+
+
+def _is_preview_file(p: Path) -> bool:
+    """是否为自动生成的预览小件（列表展示时需排除，避免污染库下拉）。"""
+    return p.stem.endswith(_PREVIEW_SUFFIX)
+
+
+def _rename_preview_sibling(old: Path, new: Path) -> None:
+    """原件改名后同步搬移预览小件；失败仅记日志（下次试听会重建）。"""
+    prev = _preview_sibling(old)
+    if not prev:
+        return
+    try:
+        prev.rename(new.with_name(f"{new.stem}{_PREVIEW_SUFFIX}.mp3"))
+    except OSError:
+        logger.warning("预览小件随原件改名失败（下次试听重建）: %s", prev.name)
+
 
 def _build_stems(products: dict) -> list:
-    """把 worker 分离/翻唱产物整理为 [{label,type,path}, ...]，仅收录存在的音频文件。"""
+    """把 worker 分离/翻唱产物整理为 [{label,type,path,preview}, ...]，仅收录存在的音频文件。
+
+    path=原件（合成用），preview=回放用小件（MP3，可为空串）。
+    """
     stems = []
     for key, path in (products or {}).items():
         if not path or not Path(path).exists():
             continue
-        stems.append({"label": _STEM_LABELS.get(key, key), "type": key, "path": str(path)})
+        stems.append({"label": _STEM_LABELS.get(key, key), "type": key, "path": str(path),
+                      "preview": _make_preview(str(path))})
     return stems
 
 
@@ -502,15 +561,18 @@ class VoiceHandlers:
         """列出音色库中所有参考音频绝对路径。"""
         refs = self.refs_dir()
         exts = (".wav", ".mp3", ".flac", ".m4a", ".ogg")
-        return [str(p) for p in sorted(refs.glob("*")) if p.suffix.lower() in exts]
+        # 排除自动生成的 _preview.mp3 小件（试听用，非用户条目）
+        return [str(p) for p in sorted(refs.glob("*"))
+                if p.suffix.lower() in exts and not _is_preview_file(p)]
 
     def delete_ref(self, path: str) -> None:
-        """删除音色库条目：移入系统回收站（文件级，不直接删除）。"""
+        """删除音色库条目：移入系统回收站（文件级，不直接删除），预览小件一并回收。"""
         from history import delete_files_to_recycle
         p = Path(path)
         if not p.exists():
             raise FileNotFoundError(f"文件不存在: {path}")
-        delete_files_to_recycle([p])
+        prev = _preview_sibling(p)
+        delete_files_to_recycle([p] + ([prev] if prev else []))
 
     def rename_ref(self, path: str, new_name: str) -> str:
         """重命名音色库条目（保留 名_短id.wav 格式），返回新路径。
@@ -532,6 +594,7 @@ class VoiceHandlers:
         if dest.exists() and dest.resolve() != p.resolve():
             raise FileExistsError(f"已存在同名条目: {dest.name}")
         p.rename(dest)
+        _rename_preview_sibling(p, dest)   # 同步搬移预览小件，避免留下孤儿
         return str(dest)
 
     # ---------------------------------------------------------------- 上传干音历史（第二来源）
@@ -573,7 +636,7 @@ class VoiceHandlers:
         exts = (".wav", ".mp3", ".flac", ".m4a", ".ogg")
         out = []
         for p in sorted(self.stems_dir().glob("*")):
-            if p.suffix.lower() not in exts:
+            if p.suffix.lower() not in exts or _is_preview_file(p):
                 continue
             # 文件名约定 名__类型.ext；无 __ 分隔时归为 other
             stem = p.stem
@@ -584,12 +647,13 @@ class VoiceHandlers:
         return out
 
     def delete_stem(self, path: str) -> None:
-        """删除素材库条目：移入系统回收站（文件级，不直接删除）。"""
+        """删除素材库条目：移入系统回收站（文件级，不直接删除），预览小件一并回收。"""
         from history import delete_files_to_recycle
         p = Path(path)
         if not p.exists():
             raise FileNotFoundError(f"文件不存在: {path}")
-        delete_files_to_recycle([p])
+        prev = _preview_sibling(p)
+        delete_files_to_recycle([p] + ([prev] if prev else []))
 
     def rename_stem(self, path: str, new_name: str) -> str:
         """重命名素材库条目（保留 名__轨道类型.ext 格式），返回新路径。
@@ -610,6 +674,7 @@ class VoiceHandlers:
         if dest.exists() and dest.resolve() != p.resolve():
             raise FileExistsError(f"已存在同名条目: {dest.name}")
         p.rename(dest)
+        _rename_preview_sibling(p, dest)   # 同步搬移预览小件，避免留下孤儿
         return str(dest)
 
 

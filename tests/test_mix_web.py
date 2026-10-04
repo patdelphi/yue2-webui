@@ -420,7 +420,7 @@ def test_page_texts_complete():
     # 抽查：中文键在英文表里必须给出不同译文（漏译会回退原文而相等）
     for key in ("多轨编辑器", "静音", "下载", "混音记录", "渲染成品",
                 "保存工程", "打开", "改名", "试听本轨",
-                "播放", "暂停", "停止", "循环", "正在解码音频",
+                "播放", "暂停", "停止", "循环", "正在解码音频", "正在下载音频",
                 "播放控制", "取消选择区", "起始", "时长",
                 "音质", "声像", "低频", "中频", "高频", "高通", "低通",
                 "分贝", "Hz（0 = 关闭）",
@@ -470,6 +470,17 @@ def test_editor_page_calls_expected_endpoints():
     assert 'id="solo-audio"' in page          # 隐藏的共享播放器元素
     assert "previewTrack" in page             # 每轨试听按钮的处理函数
     assert "createMediaElementSource" in page  # 用 GainNode 套用该轨增益（支持 +dB）
+
+
+def test_editor_download_progress_for_large_stems():
+    """大轨远端下载耗时是主瓶颈：需按 Content-Length 显示下载百分比 + 解码提示。"""
+    page = (WEBUI_DIR / "static" / "multitrack" / "index.html").read_text(encoding="utf-8")
+    assert "async function fetchWithProgress(" in page
+    assert "getReader()" in page                       # 流式读取以报进度
+    assert 'resp.headers.get("Content-Length")' in page
+    assert 'T("正在下载音频")' in page
+    assert 'T("正在解码音频") + " " + pos' in page     # 解码提示带轨序号/名称
+    assert "正在下载音频" in mix_web.PAGE_TEXT_KEYS      # 文案键由后端下发（英文可用）
 
 
 def test_editor_page_has_transport_playback():

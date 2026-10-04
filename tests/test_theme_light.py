@@ -27,7 +27,7 @@ def test_player_selectors_are_wrapped_in_is():
     """播放器选择器必须整体包在 :is() 里，否则后代选择器只作用于最后一个选择器。"""
     assert "var SEL = ':is(' + PLAYERS + ')';" in JS
     # 固定 id 的播放器必须与 initPlayerZoom 的 PLAYER_IDS 对齐，漏掉会残留近黑内联边框
-    for pid in ("#gen-audio", "#history-audio", "#history-stem-audio", "#lib-stem-preview",
+    for pid in ("#gen-audio", "#history-audio", "#lib-stem-preview",
                 "#lib-ref-preview", "#cover-ref-preview", "#cover-acc-preview"):
         assert pid in JS
     # 回归根因：这条直接拼逗号列表的写法会让 #gen-audio 等根节点吃下 .timestamps 样式
@@ -64,6 +64,20 @@ def test_file_dropzone_border_is_normalized():
     """File 虚线拖拽区：Gradio 重置规则给 medium(3px)+currentColor，需压回 1px 主题边框色。"""
     assert 'div.styler > :not(.absolute)[style*="dashed"]' in APP
     assert "border-width: 1px !important; border-color: var(--border-color-primary) !important;" in APP
+
+
+def test_player_loading_overlay_for_slow_remote_files():
+    """回放等待期加载提示：Gradio 需整文件下完才给播放器挂 src（远端隧道大件要几十秒），
+    app.js 须在等待期挂 .yz-loading 浮层并显示已等待秒数，src 就绪后自动移除。"""
+    assert ".yz-loading {" in JS
+    assert "function syncLoading()" in JS
+    assert "syncLoading();" in JS                       # poll 内每 1s 调用
+    assert "!getShadowAudio(root)" in JS                # 未拿到 src = 还在下载
+    # 空播放器（无值）不显示提示：#waveform 只在已赋值时渲染，用它做前置判据
+    assert "function hasPlayerChrome(root)" in JS
+    assert "hasPlayerChrome(root) && !getShadowAudio(root)" in JS
+    assert "正在加载音频… " in JS
+    assert "loadingEl.parentNode.removeChild(loadingEl)" in JS  # 就绪/隐藏后移除
 
 
 def test_multitrack_theme_detection_is_robust():

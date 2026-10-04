@@ -1936,19 +1936,46 @@ function syncTransportLabels() {
   const tb = $("transport");
   if (tb) tb.classList.toggle("on", !!S.playing);
 }
-/* 顺序解码并缓存全部轨音频；返回 false 表示有轨解码失败 */
+/* 带下载进度的取文件：服务端 FileResponse 会带 Content-Length，故可显示百分比。
+   远端大 WAV（单轨 60–100MB）下载是主要瓶颈，进度提示避免被误以为卡死。 */
+async function fetchWithProgress(url, onPct) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error("HTTP " + resp.status);
+  const total = Number(resp.headers.get("Content-Length") || 0);
+  if (!resp.body || !total) return await resp.arrayBuffer();   // 无长度信息：退化为一次性读取
+  const reader = resp.body.getReader();
+  const chunks = [];
+  let got = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    got += value.length;
+    onPct(got / total);
+  }
+  const buf = new Uint8Array(got);
+  let off = 0;
+  chunks.forEach((c) => { buf.set(c, off); off += c.length; });
+  return buf.buffer;
+}
+/* 顺序下载并解码全部轨音频；返回 false 表示有轨失败 */
 async function ensureBuffers() {
   const ctx = audioCtx();
   const todo = S.tracks.filter((t) => !S.bufs[t.path]);
   if (!todo.length) return true;
   for (let i = 0; i < todo.length; i++) {
     const t = todo[i];
-    $("tp-msg").textContent = T("正在解码音频") + " " + (i + 1) + "/" + todo.length;
+    const name = t.label || t.name;
+    const pos = (i + 1) + "/" + todo.length;
+    $("tp-msg").textContent = T("正在下载音频") + " " + pos + " · " + name + " 0%";
     try {
-      const resp = await fetch("/api/mix/audio?path=" + enc(t.path));
-      S.bufs[t.path] = await ctx.decodeAudioData(await resp.arrayBuffer());
+      const ab = await fetchWithProgress("/api/mix/audio?path=" + enc(t.path), (pct) => {
+        $("tp-msg").textContent = T("正在下载音频") + " " + pos + " · " + name + " " + Math.round(pct * 100) + "%";
+      });
+      $("tp-msg").textContent = T("正在解码音频") + " " + pos + " · " + name;
+      S.bufs[t.path] = await ctx.decodeAudioData(ab);
     } catch (e) {
-      $("tp-msg").textContent = T("解码失败") + ": " + (t.label || t.name);
+      $("tp-msg").textContent = T("解码失败") + ": " + name;
       return false;
     }
   }

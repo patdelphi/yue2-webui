@@ -68,3 +68,29 @@ def test_app_history_page_uses_generation_filter():
     assert 'to_dataframe_rows(record_types=("generation",))' in src
     # 四处调用都必须带过滤（与表格显示的记录集一致）
     assert src.count('to_dataframe_rows(record_types=("generation",))') == 4
+
+
+def test_history_row_click_uses_role_row_not_tbody_tr():
+    """历史表行选择回归：Gradio 6 数据行是 div.virtual-row[role=row]（不是 tbody tr）。
+
+    tbody 内只有一条 0 高的量宽占位 tr，用 closest('tbody tr') 恒为 null → 高亮/指针样式失效。
+    修好后：行匹配按 role="row" 且排除表头行；选行只由 Gradio 原生 Dataframe.select 负责
+    （不再调用隐藏 trigger，避免与原生 select 重复触发后端加载）。
+    """
+    js = (Path(__file__).parent.parent / "static" / "js" / "app.js").read_text(encoding="utf-8")
+    assert "e.target.closest('tbody tr')" not in js
+    assert "e.target.closest('[role=\"row\"]')" in js
+    # 数据行收集：按 role=row 取全部，再用"是否含列头单元格"排除表头
+    assert "tableContainer.querySelectorAll('[role=\"row\"]')" in js
+    assert "!r.querySelector('[role=\"columnheader\"]')" in js
+    # CSS 也按同一口径匹配，且排除表头行
+    assert ':not(:has([role="columnheader"]))' in js
+    # 已弃用隐藏 trigger 方案
+    assert "setTriggerValue" not in js
+    assert "history-row-trigger" not in js
+    # app.py 侧同步移除失效的 trigger 组件与回调
+    app = (Path(__file__).parent.parent / "app.py").read_text(encoding="utf-8-sig")
+    assert "history_row_trigger" not in app
+    assert "on_history_row_click" not in app
+    # 原生 select 仍是唯一入口
+    assert "history_df.select(fn=on_history_select" in app

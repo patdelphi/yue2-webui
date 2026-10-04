@@ -20,7 +20,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import voice_ui_handlers  # noqa: E402  供 monkeypatch 替换模块级 queue_manager
-from voice_ui_handlers import VoiceHandlers, new_short_id, detect_voice, _voice_score  # noqa: E402
+from voice_ui_handlers import (VoiceHandlers, new_short_id, detect_voice,  # noqa: E402
+                               _voice_score, _build_stems, _make_preview)
 from history import HistoryManager  # noqa: E402
 from queue_manager import TaskType, TaskStatus, TaskCancelledError  # noqa: E402
 
@@ -318,6 +319,135 @@ def test_detect_voice_missing_file():
     assert detect_voice(str(Path("Z:/no/such/file.wav"))) is None
 
 
+# ---------------------------------------------------------------- 回放预览件（小音频）
+def test_make_preview_missing_source_returns_empty():
+    """源文件不存在 → 返回空串（回放退回原件），不抛异常。"""
+    assert _make_preview(str(Path("Z:/no/such/file.wav"))) == ""
+
+
+def test_make_preview_without_ffmpeg_returns_empty(tmp_path, monkeypatch):
+    """ffmpeg 缺失 → 返回空串（静默降级，不生成预览件）。"""
+    src = tmp_path / "a.wav"
+    src.write_bytes(b"\x00")
+    monkeypatch.setattr(voice_ui_handlers.shutil, "which", lambda name: None)
+    assert _make_preview(str(src)) == ""
+    assert not (tmp_path / "a_preview.mp3").exists()
+
+
+def test_make_preview_reuses_fresh_existing(tmp_path, monkeypatch):
+    """已有不旧于原件的预览件 → 直接复用，不再次调用 ffmpeg。"""
+    src = tmp_path / "b.wav"
+    dst = tmp_path / "b_preview.mp3"
+    src.write_bytes(b"\x00")
+    dst.write_bytes(b"\x00")  # 后写 → mtime 不早于原件
+
+    def _boom(name):
+        raise AssertionError("不应调用 ffmpeg：已有可用预览件")
+
+    monkeypatch.setattr(voice_ui_handlers.shutil, "which", _boom)
+    assert _make_preview(str(src)) == str(dst)
+
+
+def test_build_stems_carries_preview_key(tmp_path, monkeypatch):
+    """_build_stems 每条 stem 含 preview（回放用）与 path（合成用），缺失文件不入列。"""
+    v = tmp_path / "vocals.wav"
+    v.write_bytes(b"\x00")
+    monkeypatch.setattr(voice_ui_handlers, "_make_preview", lambda p: str(p) + ".mp3")
+    stems = _build_stems({"vocals": str(v), "missing": str(tmp_path / "nope.wav")})
+    assert len(stems) == 1  # 不存在的产物被剔除
+    s = stems[0]
+    assert s["type"] == "vocals" and s["label"] == "人声"
+    assert s["path"] == str(v)                 # 原件：合成链路（翻唱/混音）用
+    assert s["preview"] == str(v) + ".mp3"     # 小件：历史回放用
+
+
+def test_voice_stem_items_prefers_preview_keeps_full_for_mix():
+    """app.py 源码断言：回放优先取 preview，合成链路仍读 path；切 Tab 自动回填播放器组。"""
+    src = (Path(__file__).resolve().parent.parent / "app.py").read_text(encoding="utf-8-sig")
+    assert 'play = preview if preview and Path(preview).exists() else full' in src
+    assert 'full = s.get("path", "")' in src          # 合成链路取原件
+    # 存量记录无 preview 键：按 <原名>_preview.mp3 命名约定推导（免 DB 迁移）
+    assert 'Path(full).with_name(f"{Path(full).stem}_preview.mp3")' in src
+    assert "def _voice_task_first_players(" in src     # 切 Tab 回填播放器组
+    assert '*_voice_task_first_players("separation")' in src
+    assert "sep_selected_task, *sep_hist_audios]" in src
+    assert '*_voice_task_first_players("cover")' in src      # 翻唱 Tab 同样回填
+    assert "cover_selected_task, *cover_hist_audios]" in src
+
+
+def test_tab_switch_refreshes_library_previews():
+    """app.py 源码断言：切 Tab 刷新下拉时同步刷新「试听」播放器。
+
+    Gradio 的 .change 只在用户交互时触发，切 Tab 用 gr.update 程序化设值不会触发它；
+    若不同步刷新试听，就会出现「下拉显示着选中项、试听却是空的」假选中。
+    """
+    src = (Path(__file__).resolve().parent.parent / "app.py").read_text(encoding="utf-8-sig")
+    assert "def _preview_first_update(" in src
+    assert "lib_stem_preview, lib_ref_preview," in src       # 分离 Tab：素材库/音色库试听
+    assert "cover_ref_preview, cover_acc_preview," in src    # 翻唱 Tab：音色库/自定义伴奏试听
+    assert src.count("_preview_first_update(_voice_stem_choices(_CUR_LANG))") == 2
+    assert src.count("_preview_first_update(_voice_ref_choices(_CUR_LANG))") == 2
+
+
+def test_history_rename_and_delete_handle_preview(tmp_path):
+    """history.py 源码断言：改名同步 preview 字段、删除范围纳入 preview。"""
+    src = (Path(__file__).resolve().parent.parent / "src" / "history.py").read_text(encoding="utf-8")
+    assert 's["preview"] = _remap(s.get("preview", ""))' in src
+    assert 'for key in ("path", "preview"):' in src
+
+
+# ---------------------------------------------------------------- 库列表/主播放器小件化
+def test_preview_files_excluded_from_refs_and_stems(tmp_path):
+    """库列表排除自动生成的 _preview.mp3 小件，避免污染下拉选项。"""
+    h = _make_handlers(tmp_path, _FakeVoiceClient())
+    refs = h.refs_dir()
+    (refs / "fetched_a1b2.wav").write_bytes(b"\x00")
+    (refs / "fetched_a1b2_preview.mp3").write_bytes(b"\x00")
+    assert [Path(p).name for p in h.list_refs()] == ["fetched_a1b2.wav"]
+    stems = h.stems_dir()
+    (stems / "drum__drums.wav").write_bytes(b"\x00")
+    (stems / "drum__drums_preview.mp3").write_bytes(b"\x00")
+    assert [(n, t) for n, t, _ in h.list_stems()] == [("drum", "drums")]
+
+
+def test_rename_and_delete_move_preview_sibling(tmp_path, monkeypatch):
+    """改名/删除库条目时预览小件一并搬移/回收（不留孤儿）。"""
+    h = _make_handlers(tmp_path, _FakeVoiceClient())
+    refs = h.refs_dir()
+    src = refs / "old_a1b2.wav"
+    src.write_bytes(b"\x00")
+    prev = refs / "old_a1b2_preview.mp3"
+    prev.write_bytes(b"\x00")
+    dest = Path(h.rename_ref(str(src), "newname"))
+    assert dest.name == "newname_a1b2.wav"
+    assert not prev.exists()                                     # 旧预览件已随改名搬走
+    assert dest.with_name("newname_a1b2_preview.mp3").exists()
+    seen = []
+    monkeypatch.setattr("history.delete_files_to_recycle", lambda files: seen.extend(files))
+    h.delete_ref(str(dest))
+    assert sorted(Path(p).name for p in seen) == ["newname_a1b2.wav", "newname_a1b2_preview.mp3"]
+
+
+def test_app_prefers_small_audio_for_all_players():
+    """app.py 源码断言：主播放器/分离翻唱任务历史回放/库试听统一走小件；后端链路仍用原件。"""
+    src = (Path(__file__).resolve().parent.parent / "app.py").read_text(encoding="utf-8-sig")
+    assert "def _prefer_mp3(path):" in src
+    assert "def _preview_for_library(path):" in src
+    assert "from voice_ui_handlers import VoiceHandlers, detect_voice, _make_preview" in src
+    # 主播放器：生成 / 重合成 / 批量变体 / 历史页 四处均优先取同目录同名 MP3
+    assert "_prefer_mp3(str(first_result.audio_path))" in src
+    assert "return _prefer_mp3(str(result.audio_path)), duration_info" in src
+    assert '"audio_path": _prefer_mp3(str(result.audio_path))' in src
+    assert "_prefer_mp3(str(audio_path))" in src
+    # 分离/翻唱任务历史回放用 _voice_stem_items（preview 优先 + 命名推导）
+    assert '_voice_stem_items(getattr(entry, "stems", None)' in src
+    # 歌曲历史页表格只列 generation 记录，无 stems 可回放 → 相关轨道回放 UI 已整体移除
+    assert "history-stem-audio" not in src
+    assert "history_stem" not in src
+    # 库试听 4 处（cover 参考/伴奏 + 素材库 + 音色库）按需生成 preview 小件
+    assert src.count("gr.update(value=_preview_for_library(p), visible=bool(p))") == 4
+
+
 def test_cover_tab_management_moved_to_separation():
     """翻唱页仅保留选择+试听；删除/重命名管理功能移至分离页库管理区。
 
@@ -342,3 +472,23 @@ def test_cover_tab_management_moved_to_separation():
         assert token in src, f"分离页应有库管理组件/绑定: {token}"
     assert "lib_stem_del_btn.click(fn=on_voice_stem_delete" in src
     assert "lib_ref_del_btn.click(fn=on_voice_ref_delete" in src
+
+
+def test_separation_tracks_can_be_saved_to_stem_library():
+    """素材库必须有应用内写入入口（此前 save_stem 无 UI 调用方 → 素材库下拉永远为空）。
+
+    断言 app.py 源码：
+    1. 分离页库管理区有「待入库轨道 / 素材名称 / 保存到素材库」组件；
+    2. 保存按钮调用 on_voice_save_stem_to_lib，且该回调调用 voice_handlers.save_stem；
+    3. 分离完成时回填「待入库轨道」下拉并缓存 stems（供保存时回查轨道类型）。
+    """
+    src = (Path(__file__).resolve().parent.parent / "app.py").read_text(encoding="utf-8-sig")
+    for token in ("lib_stem_pick", "lib_stem_save_name", "lib_stem_save_btn", "sep_stems_state"):
+        assert token in src, f"分离页应有入库组件: {token}"
+    assert "def on_voice_save_stem_to_lib(" in src
+    assert "lib_stem_save_btn.click(fn=on_voice_save_stem_to_lib" in src
+    assert "voice_handlers.save_stem(" in src                      # 后端写入能力已被接线
+    assert "_dd_update(_stem_pick_choices(stems))" in src          # 分离完成回填待入库下拉
+    assert "def _stem_pick_choices(" in src
+    # 人声归音色库：待入库下拉须排除 vocals（与素材库下拉一致）
+    assert 's.get("type") == "vocals"' in src

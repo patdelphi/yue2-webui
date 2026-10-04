@@ -416,11 +416,14 @@ class HistoryManager:
             if candidate.exists():
                 files.append(candidate)
 
-        # 多轨产物（音色工坊分离/翻唱各轨），一并纳入删除范围
+        # 多轨产物（音色工坊分离/翻唱各轨），一并纳入删除范围（含回放预览件）
         for stem in getattr(entry, "stems", None) or []:
-            p = Path(stem.get("path", "")) if isinstance(stem, dict) else Path()
-            if p.exists() and p not in files:
-                files.append(p)
+            if not isinstance(stem, dict):
+                continue
+            for key in ("path", "preview"):
+                p = Path(stem.get(key, "") or "")
+                if p.exists() and p not in files:
+                    files.append(p)
 
         # 兼容乐谱存于独立目录的旧记录（abc_path 为相对 WEBUI_ROOT 的路径）
         if entry.abc_path:
@@ -502,6 +505,7 @@ class HistoryManager:
                 for s in getattr(e, "stems", None) or []:
                     if isinstance(s, dict):
                         s["path"] = _remap(s.get("path", ""))
+                        s["preview"] = _remap(s.get("preview", ""))
                 self._update(rid, e)  # 逐条回写数据库（事务）
             return len(renames)
 

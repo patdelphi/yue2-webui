@@ -28,45 +28,34 @@
         window.initHistoryTableClick = function() {
             var tableContainer = document.querySelector('#history-table');
             if (!tableContainer) { setTimeout(window.initHistoryTableClick, 500); return; }
+            // 该函数会被 initPlayerZoom 与 2s 定时器各调用一次，加标记避免重复挂监听/插样式
+            if (tableContainer.dataset.y2RowClickInit === '1') return;
+            tableContainer.dataset.y2RowClickInit = '1';
 
-            var triggerInput = document.querySelector('#history-row-trigger input[type="number"]');
-            if (!triggerInput) {
-                var triggerEl = document.getElementById('history-row-trigger');
-                if (!triggerEl) { setTimeout(window.initHistoryTableClick, 500); return; }
-                triggerInput = triggerEl.querySelector('input') || triggerEl;
+            // Gradio 6 的数据表用虚拟滚动：表头是 <thead><tr role="row">，数据行是
+            // <div class="virtual-row" role="row">（不是 tbody tr），tbody 内仅有一条 0 高的量宽占位 tr。
+            // 故按 role="row" 收集数据行，并用“是否含列头单元格”排除表头行。
+            function dataRows() {
+                return Array.from(tableContainer.querySelectorAll('[role="row"]'))
+                    .filter(function(r) { return !r.querySelector('[role="columnheader"]'); });
             }
 
-            function setTriggerValue(index) {
-                var input = triggerInput;
-                if (input.tagName === 'DIV') {
-                    input = input.querySelector('input') || input;
-                }
-                if (!input || input.value === undefined) return;
-                var nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-                nativeInputValueSetter.call(input, index);
-                input.dispatchEvent(new Event('input', { bubbles: true }));
-                input.dispatchEvent(new Event('change', { bubbles: true }));
-            }
-
+            // 选行本身交给 Gradio 原生 Dataframe.select（app.py 的 history_df.select）；
+            // 这里只负责行高亮，避免与原生 select 重复触发后端加载。
             tableContainer.addEventListener('click', function(e) {
-                var row = e.target.closest('tbody tr');
+                var row = e.target.closest('[role="row"]');
                 if (!row) return;
 
-                var tbody = row.parentElement;
-                if (!tbody || tbody.tagName !== 'TBODY') return;
-
-                var rows = Array.from(tbody.querySelectorAll('tr'));
-                var index = rows.indexOf(row);
-                if (index < 0) return;
-
-                setTriggerValue(index);
+                var rows = dataRows();
+                if (rows.indexOf(row) < 0) return;   // 表头行 / 量宽占位行
 
                 rows.forEach(function(r) { r.style.background = ''; });
                 row.style.background = 'rgba(59,130,246,0.2)';
             });
 
+            var rowSel = '#history-table [role="row"]:not(:has([role="columnheader"]))';
             var style = document.createElement('style');
-            style.textContent = '#history-table tbody tr { cursor: pointer; } #history-table tbody tr:hover { background: rgba(59,130,246,0.1) !important; } #history-row-trigger, #history-row-trigger + .block-info { display: none !important; }';
+            style.textContent = rowSel + ' { cursor: pointer; } ' + rowSel + ':hover { background: rgba(59,130,246,0.1) !important; }';
             document.head.appendChild(style);
             console.log('History table click handler initialized');
         };
@@ -735,8 +724,8 @@
                 // 直接写 "a, b, c .timestamps" 时逗号列表只有最后一项带后代限定，
                 // 前几项会命中播放器根节点，把整块播放器染成半透明黑（亮色主题下整条发黑）。
                 // 固定 id 的播放器必须与下方 initPlayerZoom 的 PLAYER_IDS 保持一致，
-                // 漏掉的（如 history-stem-audio）会保留 Gradio 的 3px 近黑内联边框。
-                var PLAYERS = '#gen-audio, #history-audio, #history-stem-audio, ' +
+                // 漏掉的会保留 Gradio 的 3px 近黑内联边框。
+                var PLAYERS = '#gen-audio, #history-audio, ' +
                     '#lib-stem-preview, #lib-ref-preview, #cover-ref-preview, #cover-acc-preview, ' +
                     '[id^="sep-audio-"], [id^="cover-audio-"], [id^="sep-history-audio-"], [id^="cover-history-audio-"]';
                 var SEL = ':is(' + PLAYERS + ')';
@@ -765,9 +754,9 @@
 
                 // 主播放器 + 音色工坊播放器组（固定槽位按 elem_id 前缀收集，
                 // 组件初始隐藏/按需显隐，由 watchPlayer 轮询接管）
-                // 另含不带前缀的散装播放器：歌曲历史「轨道回放(分离/翻唱)」history-stem-audio，
-                // 以及分离/翻唱页各处「试听」播放器（lib-*/cover-*-preview）
-                var PLAYER_IDS = ['gen-audio', 'history-audio', 'history-stem-audio',
+                // 另含不带前缀的散装播放器：分离/翻唱页各处「试听」播放器
+                // （lib-*/cover-*-preview）
+                var PLAYER_IDS = ['gen-audio', 'history-audio',
                                   'lib-stem-preview', 'lib-ref-preview',
                                   'cover-ref-preview', 'cover-acc-preview'];
                 ['sep-audio-', 'cover-audio-', 'sep-history-audio-', 'cover-history-audio-'].forEach(function(prefix) {
@@ -787,6 +776,9 @@
                     '.yz-zoom-label { color: #15803d; font-size: 12px; font-family: monospace; margin-left: 6px; min-width: 70px; }' +
                     'body.dark .yz-zoom-label { color: #4ade80; }' +
                     '.yz-wave { height: 80px; border-radius: 4px; background: var(--background-fill-secondary, rgba(0,0,0,0.25)); }' +
+                    // 等待提示：Gradio 要先整文件下完才给播放器 src（远端隧道下大件要几十秒），
+                    // 期间播放器是 0:00 空壳，需明确提示"正在加载"避免看起来像坏了
+                    '.yz-loading { margin-top: 8px; padding: 6px 10px; font-size: 13px; line-height: 1.4; border-radius: 4px; color: var(--body-text-color, #333); background: var(--background-fill-secondary, rgba(0,0,0,0.06)); border: 1px solid var(--border-color-primary, rgba(0,0,0,0.15)); }' +
                     '.yz-hidden { display: none !important; }';
                 document.head.appendChild(style);
 
@@ -947,6 +939,41 @@
                         }
                     });
 
+                    // 加载提示：Gradio 先把整个文件下完才给播放器挂 src（远端经隧道时
+                    // 单轨 WAV 60–100MB 要等几十秒），等待期播放器是 0:00 空壳。
+                    // 这里在等待期挂一个"正在加载音频… Ns"浮层，src 就绪后自动移除。
+                    // #waveform 只在组件已赋值时渲染（无值时只画空白占位 DIV.empty），
+                    // 用它区分"空播放器"与"已赋值但 src 未就绪"，避免空播放器上误显示提示。
+                    function hasPlayerChrome(root) {
+                        return !!(root && root.querySelector('#waveform'));
+                    }
+                    var loadingEl = null;
+                    var loadingT0 = 0;
+                    function syncLoading() {
+                        var root = boundRoot;
+                        var need = !!root && root.offsetParent !== null &&
+                            hasPlayerChrome(root) && !getShadowAudio(root);
+                        if (!need) {
+                            if (loadingEl) {
+                                mutating = true;
+                                if (loadingEl.parentNode) loadingEl.parentNode.removeChild(loadingEl);
+                                loadingEl = null;
+                                mutating = false;
+                            }
+                            return;
+                        }
+                        if (!loadingEl || !loadingEl.isConnected) {
+                            loadingEl = document.createElement('div');
+                            loadingEl.className = 'yz-loading';
+                            loadingT0 = Date.now();
+                            mutating = true;
+                            root.appendChild(loadingEl);
+                            mutating = false;
+                        }
+                        loadingEl.textContent = '正在加载音频… ' +
+                            Math.round((Date.now() - loadingT0) / 1000) + 's';
+                    }
+
                     // 轮询：组件根出现/销毁重建（Gradio 显隐切换）时重绑 observer 并重新初始化
                     function poll() {
                         var root = document.getElementById(rootId);
@@ -959,6 +986,7 @@
                                 tryInit();
                             }
                         }
+                        syncLoading();
                         setTimeout(poll, 1000);
                     }
                     poll();

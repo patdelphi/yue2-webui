@@ -39,6 +39,7 @@
 - Bash 工具 cwd 会漂移，命令前确认 `pwd`
 
 ---
+
 ## 2026-09-24 09:38 阶段3文档（音色工坊）
 
 完成阶段3文档工作，含：
@@ -49,6 +50,7 @@
 未执行：git commit/push（需用户批准）；音色工坊真实推理端到端（需独立venv+Seed-VC，待安装）。
 
 ---
+
 ## 2026-09-24 09:53 前端冒烟测试（音色工坊）
 
 - 启动服务（根 venv，端口 9898）：首次 17.6s HTTP 200，启动日志无错误。
@@ -58,6 +60,7 @@
 - 服务当前保持运行（后台 job-9e108d7a269a4fb2a8a3ca1646063986），可直接浏览器测试。
 
 ---
+
 ## 2026-09-24 09:56 音色工坊 UI 左右分栏重排
 
 - app.py 音色工坊 Tab 重构为 gr.Row 左右分栏（scale 5:4）：左栏=输入配置（### 输入：功能模式/当前源/历史下拉/上传源 + 分离或翻唱参数区），右栏=执行与输出（执行按钮 + voice_info + voice_files 输出产物）。事件绑定不变。
@@ -66,6 +69,7 @@
 - 服务保持运行（job-c48aa0e9ce7d43ea9817af5c258ada7e）。
 
 ---
+
 ## 2026-09-24 10:01 音色工坊 UI 微调（去标题 + 上传组件疑问排查）
 
 - 删除 Tab 内容顶部冗余大标题「### 音色工坊」（voice_md 及 _reg，Tab 名已标识，app.py L1932-1933）。
@@ -73,6 +77,7 @@
 - 验证：py_compile 通过；重启 5.3s HTTP 200；刷新后快照确认标题消失、源切换正常。
 
 ---
+
 ## 2026-09-24 参考音色双入口显隐改造（翻唱面板）
 
 - 用户反馈「选择翻唱，还是有上传组件」：指翻唱面板中「上传参考干声」与「音色库选择」下拉并存冗余。
@@ -83,6 +88,7 @@
 
 
 ---
+
 ## 2026-09-24 音色工坊拆分为「音轨分离」+「音色翻唱」两个 Tab
 
 - 用户反馈：翻唱参考干声应可从「人声分离的人声干声历史」选择，而非每次上传；并要求把分离与翻唱功能完全分开、放到两个 Tab。
@@ -95,6 +101,7 @@
 - 服务保持运行（job-879d78cf1c964045bf2d34c32621e0e4）。
 
 ---
+
 ## 2026-09-24 补齐音色工坊模块间衔接（分离 vocals 一键入音色库 + 翻唱 Tab 刷新）
 
 - 用户要求「每个模块既能独立工作也能前后衔接」。
@@ -109,6 +116,7 @@
 - 服务保持运行（job-5784f6b6d6d64b57a897757f4b87432c）。
 
 ---
+
 ## 2026-09-24 分离乐器轨入库（素材库）+ 翻唱自定义伴奏 + 修复 cover 分离管线
 
 - 用户问「分离除了人声，乐器/鼓等如何入库留存」；梳理发现：轨道文件虽落盘任务目录但历史只索引人声、音色库只收人声；且 worker._convert 缺分离步骤（整曲直接换嗓+空伴奏混音，e2e 必失败）。
@@ -125,6 +133,7 @@
 - 服务保持运行（job-774d7c4a3df04935951f60fdd52b3cea）。
 
 ---
+
 ## 2026-09-24 分离/翻唱多轨落盘 + 历史页轨道查看与回放
 
 - 用户要求：分离的乐器/鼓等产物要落盘，历史可查看和回放。此前历史记录只索引 vocals，其他轨文件只留在任务目录，历史页无法查看/回放。
@@ -138,6 +147,7 @@
 - 待办：真实端到端分离/翻唱验证（首次点「开始分离」懒启动 worker），届时历史页轨道回放下拉可见并可回放。
 
 ---
+
 ## 2026-09-24 翻唱上传干音轻量人声检测（方案B）
 
 - 用户确认采用方案B：上传参考干声后轻量信号特征判断是否人声（秒级、不占显存、仅提示不拦截）。
@@ -148,6 +158,7 @@
 - 验证：py_compile 通过；i18n 15 通过；voice 三套件 24 passed；ffmpeg 全链路（人声样 0.92/粉噪 0.29）；浏览器真实上传实测：check_voice.wav 显示「人声检测: 通过 (p=0.92)」，check_noise.wav 显示「人声检测: 疑似非人声，建议上传清唱干声 (p=0.30)」；测试音频已清理。
 - 服务保持运行（job-cbd94f5cfa58417197133203af6f66a0）。
 ---
+
 ## 2026-09-24 干声历史两来源拆除下拉+翻唱参考入口验证
 
 - 用户明确「不要混一起」：干声历史来源拆为两级——先 gr.Radio 选来源（分离历史 / 上传干音），再在对应 gr.Dropdown 选文件，不再聚合到一个下拉。
@@ -159,6 +170,7 @@
 - 服务保持运行（job-20a236f26d4e41f5a8823e5216376194）。
 
 ---
+
 ## 2026-09-24 整体检查与测试（全绿）
 
 - 用户要求整体检查代码与流程。逐项执行：
@@ -174,6 +186,7 @@
 - 服务保持运行（job-20a236f26d4e41f5a8823e5216376194）。
 
 ---
+
 ## 2026-09-24 翻唱/分离新增降噪选项（默认关闭）
 
 - 需求：分离出来的人声常带背景噪音，Demucs 是音源分离非降噪，用户要求加可选降噪。已确认：分离页+翻唱页都加，默认关闭手动开启，用 ffmpeg anlmdn。
@@ -186,6 +199,7 @@
 - 未执行：真实端到端推理（需 CUDA/Seed-VC）；git commit/push（需批准）。
 
 ---
+
 ## 2026-09-24 音色工坊流程优化（用户：降噪保留源文件 / 不用硬链接）
 
 - 用户审阅流程优化清单后拍板：降噪源文件必须保留、素材库/干音库不用硬链接（保持 copyfile），其余优化项实施。
@@ -198,6 +212,7 @@
 - 未执行：真实端到端推理；git commit/push（需批准）。
 
 ---
+
 ## 2026-09-24 复审后修复三项（执行）
 
 - 复审无硬性回归，本null落地3项：
@@ -208,6 +223,7 @@
 - 未执行：队列取消终止子进程（需重构进程句柄）、换嗓文件名白名单（更大改动）、真实e2e、git commit/push（需批准）。
 
 ---
+
 ## 2026-09-24 移除参考干声的「分离历史」来源
 
 - 用户澄清定位：音轨分离的历史记录属于历史页（与生成历史并列），用途是轨道回放，不应出现在参考干声的选择里。
@@ -218,6 +234,7 @@
 - 未执行：git commit/push（需批准）；浏览器端手动确认需刷新页面。
 
 ---
+
 ## 2026-09-24 分离/翻唱 Tab 结构最终定稿（用户明确产品逻辑）
 
 - 用户定义结构：1) 分离 Tab：源=生成历史(generation/cover)或上传；新增「分离任务历史」list 可选择回放分离结果。2) 翻唱页：歌曲源=生成历史或上传（不变）；参考干声=分离的人声结果 或 上传干声；新增「翻唱任务历史」list 可选择回放。
@@ -231,6 +248,7 @@
 - 未执行：git commit/push（需批准）；真实端到端分离/翻唱推理；浏览器手动确认需刷新页面。
 
 ---
+
 ## 2026-09-24 顶部菜单重排改名
 
 - 用户要求：创作→歌曲创作；历史→歌曲历史并移到第二位；设置→系统设置；英文同步。
@@ -241,6 +259,7 @@
 - 未执行：git commit/push（需批准）；README/Docs 中 UI 描述的 Tab 名称同步（可后续文档更新时一并处理）。
 
 ---
+
 ## 2026-09-24 音轨分离：执行与输出组件移到左列 + 点击验证
 
 - 用户反馈：分离页「提交与执行结果组件」应放左边；点击开始分离没反应。
@@ -251,6 +270,7 @@
 - 未执行：git commit/push（需批准）；真实端到端分离推理。
 
 ---
+
 ## 2026-09-24 移除「保存分离轨到库」，分离产物靠文件名区分直接供使用
 
 - 用户澄清：不需要单独的库（音色库/素材库），分离成功都应记录历史，通过文件名区分人声轨直接供使用。
@@ -261,6 +281,7 @@
 - 未执行：git commit/push（需批准）；真实端到端分离/翻唱推理。
 
 ---
+
 ## 2026-09-24 修复前端挂载中断：历史表格消失 + 点击分离无反应
 
 - 用户报告：1) 歌曲历史 10 条表格消失；2) 选生成歌曲点开始分离无反应。
@@ -295,6 +316,7 @@
 - 遗留：临时裁剪文件 `yue2-webui/tmp_ref_vocals.wav`（用于尝试上传参考干声，因浏览器工作区限制未用，待用户确认后删除）。
 
 ---
+
 ## 2026-09-25 整体 review 测试（音色工坊）
 - 用户指令"整体review测试一下"：对音色工坊（分离/翻唱）做整体代码审查 + 测试回归。
 - 静态检查：py_compile 全部改动文件通过（app.py / voice-tools/worker.py / src/voice_ui_handlers.py / src/history.py / src/i18n.py 等 7 个）。
@@ -309,6 +331,7 @@
 - 未执行：git commit/push（需用户批准）；app.py L1079 死代码 products = result.get("products") 未使用（review 发现，仅汇报未清理）；临时文件 yue2-webui/tmp_ref_vocals.wav 待用户确认后删除。
 
 ---
+
 ## 2026-09-25 分离/翻唱提交后进度反馈 + 按钮禁用
 - 用户反馈：音轨分离提交后看不出进度（无 gradio 组件显示），按钮应变灰不可点击。
 - 根因：on_voice_separate/on_voice_cover 为同步阻塞回调，仅靠 gr.Progress 弹窗（无细粒度进度值，观感为无反馈），且运行期间按钮仍可点击。
@@ -322,6 +345,7 @@
 - 未执行：git commit/push（需用户批准）；翻唱侧真实推理验证（生成器逻辑与分离侧完全对称，单测已覆盖）。
 
 ---
+
 ## 2026-09-25 修复：翻唱换嗓干声音量与原声不匹配（人声被伴奏盖住）+ commit b5e182b
 - commit b5e182b：音色工坊产物独立目录+播放器组+历史整组回放+实时进度与按钮禁用（13 文件，未 push）。
 - 用户 bug：翻唱后换嗓干声音量与原声干音不匹配（例子偏小），混音成品人声听不清。
@@ -333,6 +357,7 @@
 - 未执行：本次修复的 git commit（需用户批准）；push（需批准）。
 
 ---
+
 ## 2026-09-25 排查修复：翻唱音质劣化（响度匹配放大导致 alimiter 削顶失真）
 - 用户反馈：翻唱音质下降厉害。
 - 排查（任务 20260925_091456_au9c，用户开启降噪）：换嗓干声 mean=-34.9dB/peak=-11.8dB vs 原声干声 mean=-20.6dB/peak=-1.3dB——响度匹配放大 +14.3dB 后换嗓人声峰值冲到 **+2.5dBFS**，alimiter(limit=0.98) 大量硬压 → 波形拍扁（削顶失真），混入成品即音质劣化。客观证据：旧增益链人声 peak 精确卡在 -0.175dB（=limit 阈值，贴限硬压特征）。
@@ -345,6 +370,7 @@
 - 未执行：git commit/push（需用户批准）。
 
 ---
+
 ## 2026-09-25 修复：翻唱人声偏弱（改用 loudnorm 响度归一化）
 - 用户反馈：峰值防削波版翻唱人声又变小了。
 - 定位：静态增益受峰值余量限制——091456 换嗓人声峰值 -11.8dB，防削波把 +14.3dB 收窄到 +10.8dB，人声 RMS 比原声干声低 3.5dB、比伴奏低 6.4dB → 偏弱。静态增益无法同时满足“平均电平到位 + 峰值不超限”。
@@ -479,6 +505,7 @@
 - **测试**：新增 tests/test_history_project.py 8 项；更新 test_history_filter.py（列索引[6]）、test_voice_handlers.py（单层目录命名+project 断言）、test_history_recycle.py（db 路径+close）。
 - **验证**：py_compile 通过；pytest 80 passed；i18n 自检 17 通过；服务重启 9898 HTTP 200，history.db（WAL）自动创建；浏览器实测四个页面——生成页项目名输入框、历史页 7 列表头+共 0 条+改项目名/删除项目、分离页库管理+任务历史改名/删除、翻唱页任务历史改名/删除，均正常。
 - **未执行**：git commit（待批准）；真实生成/分离/翻唱任务端到端验证（建议跑一次生成验证 song_<ts> 目录与 <项目名>_<ts> 文件落盘）。
+
 ## 2026-09-25 18:30 — T1-T7 端到端真实任务测试 + 5 个 bug 修复
 
 - **需求**：文件管理重构后整体测试一遍再交付（T1 生成 / T2 改名 / T3 分离 / T4 翻唱 / T5 删除 / T6 上传留存 / T7 收尾）。
@@ -494,6 +521,7 @@
 - **清理**：测试产物 5 项全部回收站移除（song_173646 乱码/174131/174336 失败残留、sep_src 留存、Temp 测试源）；.pytest_tmp3 已删。
 - **遗留**：outputs/song_20260925_174551 空目录被系统进程锁定无法删除（WinError 32，非本应用占用，关闭资源管理器/索引器后可手动删）；.pytest_tmp 旧临时目录残留待用户决定。
 - **未执行**：git commit（待批准）。
+
 ## 2026-09-25 18:50 — 任务历史下拉增加项目名显示
 
 - **需求**：分离/翻唱任务历史下拉仅显示产物文件夹名（separations_<ts>/cover_<ts>），多个任务只有时间戳可辨，看不出对应哪个源/上传文件（项目名含上传文件名但前端不可见）。
@@ -508,6 +536,7 @@
 - **改动**：tests/test_history_project.py 新增 test_rename_project_updates_all_records_in_dir——同目录两条记录（主变体+var1）改名后断言 project/audio_path 全部指向新文件名且文件存在。
 - **验证**：test_history_project.py 10 passed；rename_project 遍历同目录全部记录同步字段（文件重命名 + db 更新），前端 refresh_history() 刷新表格即全量可见；分离/翻唱独立目录不级联（设计如此）。
 - **未执行**：git commit（待批准）。
+
 ## 2026-09-25 19:20 — 一致性优化（行号错位 bug + 播放器同步 + 类型词中文化 + 删除确认）
 
 - **Bug 修复（严重）**：历史页 _load_history_entry / on_history_next_page 取数未按 record_types=("generation",) 过滤，表格行号与全量记录错位——存在分离记录时点击生成记录实际选中 separation 记录（实测误改了分离目录项目名，已恢复）。两处补过滤参数；test_history_filter.py 源码断言 2→4 处。
@@ -523,7 +552,8 @@
 - **T4/T6/T7 FX 工具**：旁通（`.fxpanel.fx-off` 只压暗处理模块 + 电平表）、FX 预设（中性/人声/伴奏 + localStorage 自定义 + 保存为预设…）、复制到（惰性重建目标列表 + 全部其他轨 + 一并复制旁通态）。
 - **T3/T5**：`--fxmod-w: 362px` 音质=压缩同宽（压缩居中）；工程 JSON 每轨新增 `fx_on`，前端 `buildPayload` 写出、`applyTrackState` 回灌，后端 `mix_render._fx_filters` 遇 false 直接返回空滤镜链。
 - **布局取舍**：压缩加宽后该行仅剩 ~66px，放不下工具卡；竖排三行会把面板撑到 283px，故改为独占整行、内部三组横向均布的工具栏（面板高 232px）。
-- **验证**：`pytest` 177 passed（基线 175 + 2 个新用例）；`node --check` / `py_compile` 通过；浏览器实测 iframe 双向跟随（1337↔1937）、归零/旁通/预设/复制/自定义预设落 localStorage/渲染请求体 `fx_on=[false,true]` 全部命中、741px 无横向溢出、明暗主题正确。
+- **验证**：`pytest` 177 passed（基线 175 + 2 个新用例）；
+ode --check` / `py_compile` 通过；浏览器实测 iframe 双向跟随（1337↔1937）、归零/旁通/预设/复制/自定义预设落 localStorage/渲染请求体 `fx_on=[false,true]` 全部命中、741px 无横向溢出、明暗主题正确。
 - **未执行**：git commit / push（待批准）。服务已重启，浏览器需刷新。
 
 ## 2026-09-30 12:04 — 多轨编辑器：回声模块一键归零
@@ -561,7 +591,8 @@
   4. `app.py` 三处 ABC 预览容器虚线边框 `rgba(255,255,255,0.15)`（亮色下不可见）。
 - **改动**：见 `Docs/changelog.md` 当日新增小节。`app.js?v=12 → v=13` 以破缓存。
 - **多轨编辑页**：本机亮色下**未能复现**「全部不适配」（iframe 内全部组件渲染正常、`data-theme` 正确跟随父页亮色）。按最可能根因加固 `syncParentTheme()`：优先读父页 `body.dark`/`html.dark`，回退亮度判定时兼容 Chrome 的 `color(srgb 0~1)` 分量格式与 `transparent` 背景；四处主题块补 `color-scheme`。修复后实测：父页亮色 → iframe `data-theme=light`、`--bg=#ffffff`；父页暗色 → `data-theme=dark`、`--bg=#16181d`。
-- **验证**：`node --check static/js/app.js` 通过；新增 `tests/test_theme_light.py`（5 用例）全过；全量 `pytest tests/ --ignore=tests/test_i18n.py -q` → **182 passed**（基线 177）。
+- **验证**：
+ode --check static/js/app.js` 通过；新增 `tests/test_theme_light.py`（5 用例）全过；全量 `pytest tests/ --ignore=tests/test_i18n.py -q` → **182 passed**（基线 177）。
 - **用户二次反馈「播放器仍然是暗色」**：定位到真正的遗留根因——Gradio 音频块根节点带内联 `border-style: solid` 却**无 `border-width`**，宽度回落 CSS 初始值 `medium`(3px)、颜色 `currentColor`；亮色主题下即 3px 近黑边框（`rgb(39,39,42)`），整块看着像「暗色播放器」。修复：在注入 CSS 里加 `SEL + ' { border: 1px solid var(--border-color-primary, transparent) !important; }'`；同时发现 `PLAYERS` 只列了 6 个固定 id，漏掉 `#history-stem-audio`/`#lib-stem-preview`/`#lib-ref-preview`/`#cover-ref-preview`/`#cover-acc-preview`（截图里第二个「音频」块仍是黑框），已扩为 11 项与 `initPlayerZoom()` 的 `PLAYER_IDS` 对齐。`tests/test_theme_light.py` 补 2 处断言。
 - **二次复核**（硬刷新后切「歌曲历史」Tab，亮色模拟）：`#history-audio` 边框 `2.857px solid rgb(39,39,42)` → `0.571px solid rgb(228,228,231)`；全页扫描 `borderTopWidth > 1px` 元素数 = **0**；`.timestamps` 底色 `rgb(250,250,250)`、文字 `rgb(39,39,42)`。
 - **未执行**：未 git commit / push（改动待批准）；多轨编辑页请用户 `Ctrl+F5` 后复测确认。
@@ -572,7 +603,157 @@
 - **定位 1（File 虚线框）**：遍历 `document.styleSheets` 用 `el.matches(selectorText)` 命中 Gradio 内置规则 `div.styler > :not(.absolute) { border-width: medium; border-style: none; border-color: currentcolor; }`——宽度 `medium`(3px)、颜色 `currentColor`，本意配合 `border-style: none` 隐藏边框；但 File 组件内联了 `border-style: dashed`，于是露出一圈 3px 近黑虚线（亮色下 `rgb(39,39,42)`）。修复：`_TITLE_ROW_CSS` 追加 `div.styler > :not(.absolute)[style*="dashed"] { border-width: 1px !important; border-color: var(--border-color-primary) !important; }`，只作用于内联带 dashed 的块（两个 File 拖拽区），不动其它组件。
 - **定位 2（多轨编辑仍然是暗色）**：本机 Windows `AppsUseLightTheme = 0`（暗色系统）。用户用 `?__theme=light` 强制亮色时实测：父页 `body.className === ""`（**无 dark 类**）、`--body-background-fill === "white"`，但 `document.body` 的 `backgroundColor` 仍是 `rgb(15,15,17)`（Gradio 用 `@media (prefers-color-scheme: dark)` 直写 body）。原 `syncParentTheme()` 首选 `body.dark` 落空后，回退读 body 背景亮度 → 判成暗色 → **子页被错锁成暗色**，正是用户看到的现象。
 - **修复 2**：回退分支改为读 Gradio 主题变量——`--body-background-fill`（亮 `white` / 暗 `#0f0f11`），再退 `--background-fill-primary`，最后才退回 body/html 背景。变量值写法不固定（`white`/`#rrggbb`/`rgb()`/`color()`），统一用 canvas `fillStyle` 归一化后算亮度，并用哨兵色 `#010203` 识别解析失败（避免非法值被当成纯黑判暗）。
-- **验证**：`node --check`（提取内联脚本）通过；`py_compile app.py` 通过；全量 `pytest tests/ --ignore=tests/test_i18n.py -q` → **183 passed**（基线 182 + 新增 `test_file_dropzone_border_is_normalized`）。浏览器实测（不施加颜色模拟，用真实系统暗色 + `?__theme=` 切换）：`?__theme=light` → iframe `data-theme=light`、`--bg=#ffffff`（修复前为 dark，已复现并修掉）；`?__theme=dark` → iframe `data-theme=dark`、`--bg=#16181d`（无回归）；全页 3 个 dashed 元素宽度均 1px、颜色均 `rgb(228,228,231)`。
+- **验证**：
+ode --check`（提取内联脚本）通过；`py_compile app.py` 通过；全量 `pytest tests/ --ignore=tests/test_i18n.py -q` → **183 passed**（基线 182 + 新增 `test_file_dropzone_border_is_normalized`）。浏览器实测（不施加颜色模拟，用真实系统暗色 + `?__theme=` 切换）：`?__theme=light` → iframe `data-theme=light`、`--bg=#ffffff`（修复前为 dark，已复现并修掉）；`?__theme=dark` → iframe `data-theme=dark`、`--bg=#16181d`（无回归）；全页 3 个 dashed 元素宽度均 1px、颜色均 `rgb(228,228,231)`。
 - **服务**：已重启（停旧进程 → 确认端口释放 → 同命令重新拉起），HTML 下发 `app.js?v=13`。
 - **未执行**：未 git commit / push（改动待批准）。
 
+## 2026-10-04 17:10 — 远端音轨分离历史回放加速（预览小件 / loading 提示 / 切 Tab 回填）
+
+- **需求**：用户报告「音轨分离历史，远端访问，选择歌曲显示不了音轨内容，是不是无法 load 音轨？」，随后明确三点：「1. 分离后有没有生成小音频？ 2. 回放只需要 load 小音频，合成才需要大音频 3. 增加 loading 显示」。
+- **上一轮诊断结论**：分离产物 32bit float WAV 单轨 63–101MB；Gradio 前端要把整个文件下完才给 shadow `<audio>` 挂 `src`（此前 0:00 空壳）。远端经 Cloudflare 隧道下行约 1.2MB/s，实测两轨并行 fetch 起于 +0.7s、**53.9s** 后才出 blob（各 65,893,976 字节），随后时长 2:52 正常 —— 不是「无法 load」，是「下得太慢」。故回答用户第 1 问：**分离后没有生成小音频**。
+- **改动**：
+  1. `src/voice_ui_handlers.py`：新增 `_PREVIEW_SUFFIX`/`_PREVIEW_BITRATE(192k)`/`_make_preview()`（ffmpeg `libmp3lame`；源缺失 / 无 ffmpeg / 转码失败静默返回空串；已有且不旧于原件则复用）；`_build_stems()` 每条 stem 增 `preview` 键。
+  2. `app.py`：`_voice_stem_items()` 回放优先取 `preview`，**存量记录无该键时按 `<原名>_preview.mp3` 命名约定推导**（免 DB 迁移），缺失退回原件；合成链路仍读 `path`（原件）。新增 `_voice_task_first_players()`；`tab_sep.select` 追加回填播放器组并在 `outputs` 增加 `*sep_hist_audios`。脚本引用 `?v=13` → `v=14`。
+  3. `src/history.py`：`rename_project` 同步 `_remap(preview)`；`_files_for` 删除范围纳入 `preview`。
+  4. `static/js/app.js`：新增 `.yz-loading` 样式 + `watchPlayer` 内 `syncLoading()`（`poll()` 每 1s），等待期挂「正在加载音频… Ns」浮层，拿到 `src` 后移除。
+  5. `aipython/backfill_voice_previews.py`：存量补生成脚本（幂等、`--dry-run`、复用产线 `_make_preview`）。
+- **验证**：`py_compile` / 
+ode --check` 通过；全量 `pytest tests/ --ignore=tests/test_i18n.py -q` → **190 passed**（基线 183 + 新增 7 用例）。存量补生成 7 目录 19 轨：991MB → 99.5MB，42.5s，复跑 dry-run 待处理 0。远端实测：切「音轨分离」自动回填 4 轨；网络请求为 `*_preview.mp3`（200/206），shadow audio 时长 171.6s；摘掉 `src` 后 2.5s 内浮层出现「正在加载音频… 2s」，恢复后自动移除。
+- **重要发现**：Cloudflare 边缘缓存了旧 `/static/js/app.js?v=13`（Gradio 的 `v` 不随内容变化），同 URL 直取拿到旧文件、新代码不生效；升 `v=14` 后正常。远端「功能像旧版」时可硬刷新或换版本号。
+- **副作用**：回放播放器下载按钮下载的是 MP3 小件（`gr.Audio` 只有一个 value）；原 WAV 仍在磁盘、合成用原件。
+- **服务**：已重启两次（首次载入预览件逻辑；第二次载入 `v=14`），当前 HTML 下发 `app.js?v=14`。
+- **未执行**：未 git commit / push（改动待批准）。
+
+## 2026-10-04 08:50 — 远端回放「大文件」同类问题整体排查与修复（P0–P3）
+
+- **需求**：用户追问「其他模块是不是有类似问题？你整体检查、修改、测试」——即把上一轮「音轨分离/翻唱」大文件回放慢的根因（Gradio 前端需整文件下完才挂 `src`，经 Cloudflare 隧道约 1.2MB/s）推广排查到全站其它模块。
+- **用户确认的两项决策**：① 主播放器（生成页 `gen-audio`、历史页 `history-audio`）改用同目录同名 MP3；② 多轨编辑器（4 轨约 250MB，需全解码）暂不改格式，只强化进度提示。
+- **审计结论**（同类问题共 6 处）：歌曲创作/歌曲历史主播放器播 31–48MB WAV；历史页「轨道回放」下拉指向 WAV 原件；分离页库管理试听 2 个、翻唱页试听 2 个播放器指向库内大 WAV；多轨编辑器解码全量。
+- **改动**：
+  1. `app.py`：新增 `_prefer_mp3(path)`（同名 `.mp3` 存在即用、否则回退原件；仅回放/下载槽位，后端链路仍用原件），覆盖生成回传 / 批量变体 / 重合成 / 历史页试听四处；新增 `_preview_for_library(path)`（`_make_preview` 失败回退原件），4 个库试听 lambda 统一改用；`_load_history_entry` 的轨道回放下拉改用 `_voice_stem_items`；脚本 `?v=14` → `v=15`。
+  2. `src/voice_ui_handlers.py`：新增 `_preview_sibling` / `_is_preview_file` / `_rename_preview_sibling`；`list_refs`/`list_stems` 过滤预览小件防污染下拉；`delete_*` 连带回收预览件；`rename_*` 同步搬移。
+  3. `static/multitrack/index.html`：新增 `fetchWithProgress()`（读 `Content-Length` + `getReader()` 流式下载并回报百分比），`ensureBuffers()` 显示「正在下载音频 x/y · 轨名 P%」→「正在解码音频 x/y · 轨名」。
+  4. `src/i18n.py` / `src/mix_web.py`：补「正在下载音频」词条与 `PAGE_TEXT_KEYS`。
+  5. `static/js/app.js`：新增 `hasPlayerChrome(root)`（要求存在 `#waveform`）——修复本轮实测发现「历史页未选中记录时空播放器误显示『正在加载音频… Ns』」的 bug。
+- **验证**：`py_compile` / 
+ode --check` / 内联脚本语法检查通过；全量 `pytest tests/ --ignore=tests/test_i18n.py -q` → **194 passed**（基线 190 + 新增 4 用例：preview 文件不入库、改名/删除同步预览件、app 源码偏好小件、多轨下载进度）。远端实测：`app.js?v=15` 已下发；切「歌曲历史」不选记录时 `#history-audio .yz-loading` 为 
+ull`；可信点击第 1 行后 shadow `<audio>` 的 `src` 为 `...\20261003_204007.mp3`（确认主播放器下发 MP3 而非 WAV）。
+- **服务**：已重启，当前 HTML 下发 `app.js?v=15`。
+- **发现的无关问题（仅记录未修）**：`app.js` 的 `initHistoryTableClick` 用 `closest('tbody tr')` 判定行，但 Gradio 6 数据行是 `[role="row"]` 的 div，`tbody tr` 恒为 null → 该原生行点击逻辑不生效（实际靠 Gradio 原生 select 工作）。
+- **未执行**：多轨编辑器仍解码全量 WAV（按决策仅加进度提示）；P3 未做真机大文件回放实测；未 git commit / push（改动待批准）。
+
+## 2026-10-04 09:05 — 修复历史表行点击选择器失效（tbody tr → role=row）
+
+- **需求**：用户「修复 app.js 中 tbody tr 选择器不生效的问题」。
+- **实测根因**（远端 page 实测 DOM）：Gradio 6 Dataframe 用虚拟滚动——`thead>tr[role="row"]`（表头）+ `tbody>tr`（**0 高的量宽占位行**）+ `div.virtual-row[role="row"]`（真正的数据行）。所以 `closest('tbody tr')` 对数据行恒为 
+ull`，行高亮/`cursor:pointer`/hover 全部失效。
+- **关键判断**：实测发现 Gradio 原生 `history_df.select` **一直正常**（可信点击正确加载对应行 MP3），而隐藏 `#history-row-trigger` 的值恒为 `-1`（JS 触发链从未生效）。故与用户确认后**以原生 select 为唯一入口**（用户选择「推荐」项），避免修好选择器后两条路径同时触发导致重复加载。
+- **改动**：
+  1. `static/js/app.js`：行匹配改 `closest('[role="row"]')` + 用 `[role="columnheader"]` 排除表头行；CSS 改 `#history-table [role="row"]:not(:has([role="columnheader"]))`；删除 `setTriggerValue()` 与 trigger 依赖；新增 `dataset.y2RowClickInit` 标记防重复挂监听（该函数被 `initPlayerZoom` 与 2s 定时器各调一次）。
+  2. `app.py`：删除 `history_row_trigger = gr.Number(elem_id="history-row-trigger")`、`history_row_trigger.change(...)` 绑定、`on_history_row_click()` 函数；`?v=15` → `v=16`。
+  3. `tests/test_history_filter.py`：新增 `test_history_row_click_uses_role_row_not_tbody_tr`。
+- **验证**：`py_compile app.py`、
+ode --check static/js/app.js` 通过；全量 `pytest tests/ --ignore=tests/test_i18n.py -q` → **195 passed**（基线 194 + 1）。远端实测（`app.js?v=16`）：数据行 `cursor==="pointer"`；点击第 2 行该行独占 `rgba(59,130,246,0.2)` 高亮、表头不受影响；可信点击加载 `夜色_20260927_104543.mp3`；1 次点击 = 1 次 `queue/join`（无重复触发）。
+- **更正**：上一条记录里「发现的无关问题（仅记录未修）」中的历史页行点击问题已修复。
+- **服务**：已重启，当前 HTML 下发 `app.js?v=16`。
+- **未执行**：未 git commit / push（改动待批准）。
+
+## 2026-10-04 10:20 — 远端回放修复（P0–P3 + 行点击）整体真实测试
+
+- **需求**：用户「整体做真实测试」——对 P0–P3 与历史表行点击修复做端到端真实验证（真实浏览器 + 真实音频 + 真实网络），而非源码断言。
+- **rt1 历史页**：主播放器实际取 `夜色_20260927_104543.mp3`（P1 生效）；行点击高亮独占、1 次点击 = 1 次 `queue/join`；空播放器无 loading 浮层。
+- **rt4 多轨页（P3 进度提示）**：iframe 内真实调 `fetchWithProgress` 下载 101.3MB WAV（106,192,888 字节）→ 49.4s / 3639 个进度点 0%→100% 单调；真实 UI 路径 `ensureBuffers()` 令 `#tp-msg` 逐帧显示「正在下载音频 1/1 · <轨> N%」→100%→「正在解码音频」→清空，返回 `true`；测试后已复原注入的假轨。
+- **rt2/rt3 库试听（`_preview_for_library`）**：临时造 2 个 3 秒小件（`refs/测试参考_ab12.wav`、`stems/测试伴奏__accompaniment.wav`），切 Tab 刷新下拉后选中即触发服务端生成 `_preview.mp3`；四个播放器（`lib-stem-preview`/`lib-ref-preview`/`cover-ref-preview`/`cover-acc-preview`）均渲染波形与 0:03；**网络证据：仅请求 `*_preview.mp3`，测试件 `.wav` 零请求**。测完经 `delete_ref`/`delete_stem` 将 4 个文件移入系统回收站（删除链路一并验证），两库目录复原为空。
+- **预览件真实校验**：ffprobe——最大分离轨 WAV 301.0s / 2822kbps / 101.27MB vs 其 `_preview.mp3` 301.0s / 192kbps / 6.89MB，时长一致；`_make_preview` 复用命中 0ms；`outputs/` 下 24 份 WAV 均已带预览件。
+- **gen-audio（P1）已有产物验证**（经用户确认不跑 GPU 生成）：5/5 生成记录的 `audio_path` 为 `.wav` 且存在同名 `.mp3`，`_prefer_mp3` 全部返回 mp3（含批量变体 `var1/2/3`，覆盖批量 / 列表 / 变体切换三处接线）。
+- **新发现（行为澄清，非回归）**：P0「历史页多轨回放」在历史页不可达——`_load_history_entry` 取数带 `record_types=("generation",)`，`entry.stems` 恒空 → 该下拉永远隐藏；分离/翻唱轨回放的真正入口是分离页 / 翻唱页各自的任务历史下拉。
+- **文档**：`Docs/changelog.md` 新增本轮真实测试条目。
+- **未执行**：未真实跑歌曲生成（用户选择跳过）；未 git commit / push。
+
+## 2026-10-04 11:05 — 移除歌曲历史页失联的「轨道回放」死 UI（P0 收尾）
+
+- **需求**：用户「？ 有问题吗？你自己修复」——针对上轮发现的 P0「历史页多轨回放不可达」。
+- **根因**：历史页表格经 `to_dataframe_rows(record_types=("generation",))` 只列 generation 记录，而 `entry.stems` 仅存在于 separation/cover → `has_stem` 恒 False，`history_stem_dd`（「轨道回放(分离/翻唱)」下拉）与 `history_stem_audio` 永远隐藏（死代码）。
+- **修法**：按既定设计（歌曲历史页仅显示生成记录；分离/翻唱逐轨回放各自在专用页）移除历史页这段失联 UI，不把分离/翻唱记录塞回历史表。
+- **改动文件**：
+  - `app.py`：删 `history_stem_dd`/`history_stem_audio` 组件与 `_reg`；`history_df.select` + 四处 `.click(outputs=...)` 去两个 stem 输出；删 `history_stem_dd.change` 绑定；`_hist_player_keep/_clear` 改单值；`on_history_rename_project` 去 stem 分支；`_load_history_entry` 返回值 11→9 元并同步 docstring；`app.js?v=16`→`v=17`。
+  - `static/js/app.js`：`PLAYERS` 与 `PLAYER_IDS` 移除 `history-stem-audio`，改写两处注释。
+  - `tests/test_theme_light.py`、`tests/test_voice_handlers.py`：去掉 `#history-stem-audio` 断言，新增「历史页已无 `history_stem` / `history-stem-audio`」负向断言，`_voice_stem_items` 断言改指分离/翻唱页用法。
+  - `Docs/changelog.md`：新增本条目。
+- **验证**：`py_compile app.py` OK；
+ode --check static/js/app.js` OK；全量 `pytest tests/ --ignore=tests/test_i18n.py -q` → **195 passed**。
+- **服务**：已重启，`GET /` 实测下发 `app.js?v=17`。
+- **未执行**：未 git commit / push（改动待批准）。
+
+## 2026-10-04 11:40 — 同类问题排查：其他模块是否也有「UI 存在但数据源不可填充」
+
+- **需求**：用户「请检查其他模块是否有类似问题」（对标刚修复的 P0 死 UI）。
+- **机械检查（脚本，均干净）**：
+  - 孤儿组件扫描：194 个组件仅 1 个未被 Python 引用（`segment_cards`，实际由 app.js 的 `#segment-cards` 使用）→ 无死组件。
+  - JS↔DOM id 交叉核对：app.js / multitrack 引用的固定 id 中不存在于 app.py `elem_id` 的，只有颜色值（`#fff` 等）与 JS 动态创建的节点（`history-abc-paper` / `waveform` / `segment-cards` 等）→ 无悬空选择器。
+  - 播放器 elem_id 全在 `PLAYERS`/`PLAYER_IDS` 内 → 无边框回归。
+- **语义检查（均可达）**：`visible=bool(p)`、radio 三/两分支切换（`on_voice_src_mode`/`on_voice_ref_mode`/`on_voice_dry_src_mode`）、`variant_group`、4 处 `to_dataframe_rows(record_types=("generation",))`（仅历史页，设计一致）。
+- **发现 1（高置信度，同类问题）**：**素材库下拉无任何写入路径**。`voice_ui_handlers.save_stem()` 全仓库仅被测试调用，`app.py` 无任何回调调用它，也没有「保存到素材库 / 入库」按钮；且分离不会自动入库。⇒ 分离页「素材库(乐器轨)」下拉与翻唱页「自定义伴奏」下拉在应用内**永远为空**（仅当用户手工往 `voice-tools/stems/` 放文件才有条目）。对比：音色库有 `on_voice_save_ref`、上传干声有 `save_dry_upload`，均有 UI 入口。
+- **发现 2（低，非缺陷）**：分离/翻唱播放器组固定 6 槽（`VOICE_PLAYER_COUNT=6`）；分离最多 5 轨、翻唱 3 轨，翻唱两个组各有 3 个永久隐藏槽位——属「空槽位不占界面」的有意设计，无害。
+- **未执行**：未改代码（等用户决定是否补「保存到素材库」入口）；未 git commit / push。
+
+
+## 2026-10-04 12:20 — 修复：补「保存到素材库」入口（素材库此前无写入路径）
+
+- **需求**：用户「修复」——落实上轮排查的发现 1（素材库下拉无写入路径，永远为空）。
+- **改动文件**：
+  - `app.py`：新增 `_stem_pick_choices(stems)`（本次分离产物的乐器/伴奏轨 → 「待入库轨道」下拉，value=路径，label=经 tr 的类型名，排除 vocals）；新增 `on_voice_save_stem_to_lib`（由 `sep_stems_state` 回查类型 → `voice_handlers.save_stem` → 写 `voice-tools/stems/<名>__<类型>.ext`，名称留空回退类型名，返回素材库下拉刷新 + 名称清空）；新增 `_sep_running_outputs` 包装（`_voice_running_outputs` 为分离/翻唱共享，不能直接扩展）；`on_voice_separate` 5 处 yield 的 outputs 由 9 项扩为 11 项，成功路径回填「待入库轨道」并缓存本次 stems；分离页「库管理」卡片插入「待入库轨道 / 素材名称 / 保存到素材库」行 + `sep_stems_state = gr.State([])`；`sep_btn.click` outputs 同步扩展；新增 `lib_stem_save_btn.click` 绑定。
+  - `src/i18n.py`：新增 8 条中英词条（待入库轨道 / 素材名称 / 留空则用轨道名 / 保存到素材库 / 请先选择要入库的轨道 / 无法识别该轨的类型 / 保存失败 / 已存入素材库）。
+  - `tests/test_voice_handlers.py`：新增 `test_separation_tracks_can_be_saved_to_stem_library`（源码断言入库组件、回调、`save_stem` 调用、完成回填、排除 vocals）。
+  - `Docs/changelog.md`：新增本条目。
+- **验证**：`py_compile` OK；全量 `pytest tests/ --ignore=tests/test_i18n.py -q` → **196 passed**；服务重启后真实浏览器（http://127.0.0.1:9898）端到端跑通：分离「夜色」源曲 → 完成显示「分离完成 · 写入历史」，「待入库轨道」自动选中「伴奏」→ 填名保存 → toast「已存入素材库 · 测试伴奏入库__accompaniment.wav」→ 「素材库(乐器轨)」与翻唱页「自定义伴奏」下拉均出现该条目。
+- **清理**：验证用测试条目 `测试伴奏入库__accompaniment.wav`（约 64MB）已按用户确认经回收站删除，`voice-tools/stems/` 现为空；**未执行**：未 git commit / push（改动待批准）。
+## 2026-10-04 12:50 — 修复：翻唱任务历史切 Tab 默认不回填播放器
+
+- **需求**：用户「翻唱任务历史，默认也没有load最后一首歌」。
+- **根因**：`tab_cover.select` 切 Tab 时只刷新「翻唱任务历史」下拉 + `cover_selected_task`（首条），漏了回填回放播放器组；`tab_sep.select` 有 `*_voice_task_first_players("separation")` → `*sep_hist_audios`，所以分离页能默认加载、翻唱页停在「下拉有任务名、播放器空着」的假选中态。
+- **改动文件**：
+  - `app.py`：`tab_cover.select` 的 lambda 追加 `*_voice_task_first_players("cover")`，outputs 追加 `*cover_hist_audios`，注释同步。
+  - `tests/test_voice_handlers.py`：`test_voice_stem_items_prefers_preview_keeps_full_for_mix` 增补两条断言（`*_voice_task_first_players("cover")`、`cover_selected_task, *cover_hist_audios]`）。
+  - `Docs/changelog.md`：新增本条目。
+- **验证**：`py_compile` OK；全量 `pytest` → **196 passed**；服务重启后真实浏览器切到「音色翻唱」Tab：4 个播放器自动填充（翻唱成品 / 换嗓干声 / 伴奏 / 分离人声，最新任务 `cover_20260927_105003`，时长 2:52，下载链接指向该任务产物），与分离页行为一致。
+- **未执行**：未 git commit / push（改动待批准）。
+## 2026-10-04 13:20 — 同类问题排查与修复：切 Tab 时「下拉已选中、试听却空着」（4 处）
+
+- **需求**：用户「请检查其他模块是否有类似问题」（对标刚修好的翻唱任务历史默认不回填）。
+- **排查方法**：机械枚举 `app.py` 全部事件绑定（`.select(` / `.change(` / `.input(` 共 22 处），再语义核对每个「程序化设值的下拉」是否有对应的依赖内容刷新。
+- **结论（同类问题 4 处）**：Gradio 的 `.change` 只在用户交互时触发，切 Tab 用 `gr.update` 程序化设值不会触发；而 `_dd_update` 会把下拉默认选中首项，其依赖的「试听」播放器却只在 `.change` 里更新 ⇒ 4 处假选中：分离 Tab 的 `lib_stem_dd`→`lib_stem_preview`、`lib_ref_dd`→`lib_ref_preview`；翻唱 Tab 的 `cover_ref_dropdown`→`cover_ref_preview`、`cover_acc_dd`→`cover_acc_preview`。（此前两库均无写入路径、内容恒为空，问题被掩盖。）
+- **已核对无问题**：`variant_selector`（与 `audio_output` 在同一次生成回调内一起产出，非假选中）；歌曲历史页无默认选中行（点击行才加载，属设计）；`sep_src_history` / `cover_src_history` / `cover_ref_dry_sep` / `cover_ref_dry_upload` 均无配套试听组件。
+- **改动文件**：
+  - `app.py`：新增 `_preview_first_update(choices)`；`tab_sep.select` 输出追加 `lib_stem_preview, lib_ref_preview`，`tab_cover.select` 输出追加 `cover_ref_preview, cover_acc_preview`，注释同步。
+  - `tests/test_voice_handlers.py`：新增 `test_tab_switch_refreshes_library_previews`。
+  - `Docs/changelog.md`：新增本条目。
+- **验证**：`py_compile` OK；全量 `pytest` → **197 passed**；服务重启后真实浏览器切「音轨分离」「音色翻唱」Tab 无任何报错（回调返回值 13/15 项与 outputs 元数一致）。
+- **未验证**：两库当前均为空，「试听播放器自动出现」的非空场景未做浏览器实测。
+- **未执行**：未 git commit / push（改动待批准）。
+
+## 2026-10-04 12:10 — 非空场景实测：切 Tab 后 4 处库试听自动出现
+
+- **背景**：上一轮修复了「切 Tab 只刷下拉、试听却空着」的 4 处假选中（`lib_stem_preview`/`lib_ref_preview`/`cover_ref_preview`/`cover_acc_preview`），但当轮两库均为空，无法观察非空场景。
+- **动作**：
+  - 分离「生成 · 20261003_204007.wav」，完成后经分离页「库管理 → 保存到素材库」入库 `验证伴奏入库__accompaniment.wav`（toast 确认）。
+  - 按 `save_ref` 命名约定写入音色库 `验证参考音色_ab12.wav`（用本次分离人声截取 15s 片段；MCP `upload_file` 受工作区根限制无法访问 Y: 盘，故未走上传 UI）。
+- **结果（真实浏览器 DOM 校验）**：
+  1. 分离 Tab `#lib-stem-preview`：visible=true，时长 2:55，下载链接 `验证伴奏入库__accompaniment_preview.mp3`；
+  2. 翻唱 Tab `#cover-acc-preview`：visible=true，时长 2:55；
+  3. 分离 Tab `#lib-ref-preview`：visible=true，时长 0:15，链接 `验证参考音色_ab12_preview.mp3`；
+  4. 翻唱 Tab `#cover-ref-preview`：visible=true，时长 0:15，下拉值 `验证参考音色_ab12.wav`。
+  → 4 处全部随切 Tab 自动出现且有值，非空场景验证通过。
+- **改动文件**：`Docs/changelog.md`（把「未验证」更新为实测结论）。
+- **未执行**：未 git commit / push；测试条目（素材库 1 条、音色库 1 条、`voice-tools/tmp/_verify_ref_15s.wav` 及两处 `_preview.mp3`）待用户确认后删除。
+
+## 2026-10-04 12:35 — 清理非空场景验证产生的测试条目
+
+- **用户确认**后执行清理：
+  - 素材库 `验证伴奏入库__accompaniment.wav`、音色库 `验证参考音色_ab12.wav`：经分离页「库管理 → 删除选中」入系统回收站（各自 `_preview.mp3` 一并回收）；
+  - 临时片段 `voice-tools/tmp/_verify_ref_15s.wav`：直接删除；
+  - 两次测试分离 `outputs/separations_20261004_105538`、`outputs/separations_20261004_113704`：经 `history_mgr.delete_project` 整目录入回收站并移除历史记录（注：脚本需传绝对 outputs 根，相对路径会使 `relative_to` 失败返回 0）。
+- **复核**：`voice-tools/stems`、`voice-tools/refs`、`voice-tools/tmp` 均为空；全仓无 `验证伴奏入库*` / `验证参考音色*` / `_verify_ref_15s*` 残留；无残留 `separations_20261004_*` 历史记录。
+- **改动文件**：`Docs/changelog.md`（把「待确认清理」更新为「已完成」）。
+- **未执行**：未 git commit / push。

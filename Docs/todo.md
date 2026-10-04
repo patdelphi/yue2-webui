@@ -49,3 +49,44 @@
 | 面板新增模块后高度变高 | 「FX 工具」模块内容压缩为 3 行小控件；`align-items: stretch` 保证与其他模块上下沿对齐 |
 | 固定 362px 宽在窄视口溢出 | 沿用 `flex-wrap: wrap`；媒体查询下改为 `width:auto` |
 | 旁通与「中性值」语义混淆 | 旁通只影响音频链与导出，不改旋钮数值（保留用户设置，便于 A/B） |
+
+---
+
+# TODO — 远端回放「大文件」同类问题：整体排查与修复
+
+> 起因：分离/翻唱产物为 32bit float WAV（单轨 63–101MB），Gradio 前端须整文件下完才给 `<audio>` 挂 src，
+> 远端经 Cloudflare 隧道（约 1.2MB/s）要几十秒到几分钟。已用「随产物生成 MP3 192k 预览小件 + 回放取小件 + loading 提示」修复分离/翻唱。
+> 本轮要求：排查**其它模块**是否有同类问题，整体修改并测试。
+
+## 一、审计结果（已完成的只读排查）
+
+`outputs/` 体积分布实测：`.wav` 24 个共 1630MB（均 68MB）；`.flac` 11 个 164MB；`.mp3` 24 个 123MB（均 5MB）。
+
+| 回放位置 | 取值来源 | 实际文件 | 典型体积 | 现状 |
+|---|---|---|---|---|
+| `sep-audio-*` / `cover-audio-*`（分离/翻唱**当场**回放） | `_voice_stem_items(result["stems"])` | preview mp3 | 5MB | ✅ 已修 |
+| `sep-history-audio-*` / `cover-history-audio-*`（任务历史回放） | `_voice_stem_items(entry.stems)` | preview mp3 | 5MB | ✅ 已修 |
+| **`history-stem-audio` + 「轨道回放(分离/翻唱)」下拉** | `stems[*].path` 原样 | 32bit float WAV | 63–101MB | ❌ 待修 |
+| **`gen-audio` / `history-audio`（主播放器）** | `entry.audio_path` = `.wav` | WAV | 31–48MB | ❌ 待修（同目录已有 `.mp3` 约 3.5MB） |
+| **`lib-stem-preview` / `lib-ref-preview` / `cover-ref-preview` / `cover-acc-preview`（库试听）** | 库文件（WAV 副本） | WAV | 上传干声 10–60MB | ❌ 待修 |
+| **多轨编辑器**（`/static/multitrack/`） | `GET /api/mix/audio?path=` 每轨全文件 → `decodeAudioData` | 32bit float WAV | 单轨 63–101MB，4 轨约 250MB | ❌ 待修（方案待定） |
+| 音频转谱 | 无音频产物（仅 `.abc`/`.mid`/`events.json`） | — | — | ✅ 无此问题 |
+
+## 二、任务清单
+
+- **P0（低风险，照搬已验证模式）**：歌曲历史页「轨道回放」下拉 + `history-stem-audio`
+  改用 `_voice_stem_items()`（preview 优先 + `<原名>_preview.mp3` 命名推导 + 缺失回退原件）。
+- **P1（需确认副作用）**：`gen-audio` / `history-audio` 主播放器改为优先取同目录同名 `.mp3`（缺失回退 WAV）。
+  副作用：播放器自带下载按钮给出的从 WAV 变为 MP3（生成页本就另有「下载 MP3」槽位，仅历史页会失去即点即下 WAV）。
+- **P2（低风险）**：库试听 4 个播放器统一走 preview 小件（复用 `_make_preview` 命名推导；库文件首次试听时按需生成）。
+- **P3（方案待定）**：多轨编辑器播放加速。候选：
+  - (a) 播放走 `<原名>_preview.mp3`，渲染仍用原件 —— 最快，但 MP3 编解码延迟/padding 会造成轨间毫秒级错位（编辑器要求样本级同步）。
+  - (b) 生成 **16bit PCM WAV** 预览件（`_preview16.wav`）—— 体积约减半（63MB→32MB）、对齐无损，但仍偏大。
+  - (c) 不改格式，仅强化"正在解码音频 x/y"进度提示（现状已有）。
+
+## 三、验证计划
+
+- 复用/新增单测：`tests/test_voice_handlers.py`（preview 命名推导）、`tests/test_theme_light.py`（源码级接线断言）、`tests/test_history_filter.py`（历史页回放取小件）。
+- 全量 `pytest tests/ --ignore=tests/test_i18n.py -q --basetemp=".pytest_tmp_all"`（当前基线 190）。
+- 远端实测：`https://yue2.patdelphi.xyz/` 逐项确认网络请求落在小件、波形快速出现。
+- 注意：`app.js` 内容若变更需同步升级 `app.js?v=N`（Cloudflare 边缘会缓存旧文件）。
