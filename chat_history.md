@@ -757,3 +757,17 @@ ode --check static/js/app.js` OK；全量 `pytest tests/ --ignore=tests/test_i18
 - **复核**：`voice-tools/stems`、`voice-tools/refs`、`voice-tools/tmp` 均为空；全仓无 `验证伴奏入库*` / `验证参考音色*` / `_verify_ref_15s*` 残留；无残留 `separations_20261004_*` 历史记录。
 - **改动文件**：`Docs/changelog.md`（把「待确认清理」更新为「已完成」）。
 - **未执行**：未 git commit / push。
+
+## 2026-10-04 13:05 — 更新 README（多轨编辑器等重大更新）
+
+- **需求**：更新 README，补充多轨编辑器等新功能与重大更新内容，然后 commit push。
+- **中文部分**：
+  - 「功能特性」新增 4 条：多轨编辑器（内置 DAW）、素材库（乐器轨）、大文件回放优化（MP3 预览件）、卡片化界面 + 明暗主题；并为既有条目补充远端回放 / 预览件等说明。
+  - 「界面结构」由「4 个 Tab + 可选音色工坊」改为「7 个 Tab」，章节重命名为 歌曲创作 / 歌曲历史 / 音频转谱 / 音轨分离 / 音色翻唱 / 多轨编辑 / 系统设置；按实现顺序把「音频转谱」调整到「歌曲历史」之后。
+  - 将原「音色工坊（可选）」拆分为独立的「音轨分离」「音色翻唱」两节；新增「多轨编辑」小节（载入 / Transport / 单轨控制 / 可视化 / 剪辑 / 渲染导出 / 加载进度）。
+  - 目录结构补充 src/mix_render.py、src/mix_web.py、static/multitrack/、voice-tools/stems/，并补充 outputs 的 separations_* / covers_* / *_mix.flac 与 Docs 多轨规划文档。
+- **英文部分**：Features 同步新增 4 条；UI Overview 改为「7 Tabs」，章节重命名与顺序调整同中文；拆分 Stem Separation / Voice Cover 并新增 Multitrack；Directory Layout 镜像中文新增项。
+- **格式**：README.md 归一化为 UTF-8 BOM + CRLF（原为 BOM + 全 LF）。
+- **改动文件**：README.md、chat_history.md。
+- **验证**：CRLF 计数 394、LoneLF 0、BOM 存在。
+- **未执行**：push 前需用户最终确认（本条随 commit 一起提交）。

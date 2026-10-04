@@ -27,13 +27,17 @@
 - 🎚️ **预设系统**：5 套内置参数预设，支持自定义预设的保存与加载
 - 📈 **波形缩放与时间码**：所有音频播放器支持波形缩放（适应宽度 / 按 px/s 逐级放大，带横向滚动）与高对比度时间码显示
 - 🎛️ **音色工坊**：音轨分离（Demucs）拆分任意音频为人声/伴奏，参考音色翻唱（Demucs + Seed-VC）将歌曲换嗓后与伴奏混音；翻唱按源音频内容自动查重，命中已有分离即直接复用、跳过重复分离，任务支持阶段进度显示与运行中取消（可选功能，独立安装）
+- 🎬 **多轨编辑器（内置 DAW）**：把生成 / 分离 / 翻唱产物或上传音频作为音轨载入，样本级同步多轨播放（单一播放/暂停、循环、停止回起点、统一进度线与时间码，空格键全局快捷键）；每轨 Solo/Mute/音量/声像 + 三段 EQ、高/低通、压缩（含 GR 表）、回声（垂直推子）；波形上拖拽选区并可取消，支持起点偏移 / 裁剪 / 增益 / 静音段；实时 IN/OUT 电平表与 EQ 频响曲线（曲线—旋钮双向同步）；旁通 / 预设 / 复制轨道；导出经后端 ffmpeg 滤镜链离线渲染为 `<项目名>_<时间戳>_mix.flac`（总线响度归一化，真峰值 ≤ -1.2 dBTP）
+- 🧰 **素材库（乐器轨）**：分离产出的乐器 / 伴奏轨可一键「保存到素材库」，供翻唱页「自定义伴奏」复用（此前无入库入口）
+- 📥 **大文件回放优化**：历史 / 分离 / 翻唱的大 WAV 自动生成并优先播放 MP3 预览件（`*_preview.mp3`，192kbps），远端 / 隧道环境下加载更快；多轨编辑器与音频轨加载显示下载与解码进度
+- 🎨 **卡片化界面 + 明暗主题**：统一卡片、圆角、阴影与聚焦光圈；明暗主题自动适配（含波形、电平表、EQ 曲线）
 - 🌐 **中英双语界面**：右上角即时切换，含 Gradio 内置文案（上传提示/页脚）同步切换；模型路径外置 `config.cfg` 配置
 
 ---
 
-## 界面结构（4 个 Tab + 可选「音色工坊」）
+## 界面结构（7 个 Tab）
 
-### 🎼 创作
+### 🎼 歌曲创作
 - **风格描述**：语言 + 流派 + 乐器 + 人声 + 速度。内置风格 / 人声 / 乐器 / 情绪 / 语言 / 流派快捷标签，点击自动追加到文本框。
 - **歌词**：支持 `[Intro] [Verse] [Pre-Chorus] [Chorus] [Bridge] [Outro]` 段落标记；提供结构模板（V-C、V-C-V-C、V-C-V-C-B-C、A-A-B-A 等）、段落拖拽排序、内容模板。
 - **工作模式**：完整创作 / 旋律创作 / 直接生成。
@@ -42,24 +46,38 @@
 - **高级采样参数**：ABC 乐谱采样（Stage 1）与语义 Token 采样（Stage 2）的两组温度 / Top-P / Top-K / 重复惩罚 / 惩罚窗口 / Min-Max Tokens。
 - **输出区**：音频播放、变体选择器（批量时显示，可"选定为最终版"或"保留全部变体"）、ABC 乐谱预览、导出 MIDI / PNG / MP3、重新合成。
 
+### 📜 歌曲历史
+- 分页列表显示：时间、风格、模式、音频时长、生成耗时、Task ID。
+- 点击记录可试听音频、查看歌词同步、预览乐谱、查看 ABC 文本与风格描述；行点击高亮定位，大文件自动优先播放 MP3 预览件（远端更流畅）。
+- 自动清理缺失文件的历史记录；支持删除选中、清空全部、刷新。
+
 ### 🎤 音频转谱
 - 上传音频（WAV / MP3 / FLAC / OGG / M4A 等），使用 SheetSage2 转写为 ABC 乐谱。
 - 乐谱可预览、下载 ABC / MIDI，并可「发送到生成页」直接复用。
 
-### 📜 历史
-- 分页列表显示：时间、风格、模式、音频时长、生成耗时、Task ID。
-- 点击记录可试听音频、查看歌词同步、预览乐谱、查看 ABC 文本与风格描述。
-- 自动清理缺失文件的历史记录；支持删除选中、清空全部、刷新。
+### 🎛️ 音轨分离
+- 把任意音频拆为人声/伴奏（2 轨）或人声/鼓/贝斯/其他（4 轨），使用 Demucs，可选人声降噪。
+- 源音频来自生成历史或本地上传；页面含**分离任务历史**，选中后整组回放、逐轨试听 / 下载。
+- 分离产物可一键「保存到素材库」（乐器 / 伴奏轨），供翻唱页「自定义伴奏」复用。
+- 产物独立目录存放（`outputs/separations_<时间戳>/`）并自动写入历史；需独立安装（见 setup.md 第 6 节）。
 
-### 🎛️ 音色工坊（可选）
-- **音轨分离**：把任意音频拆为人声/伴奏（2 轨）或鼓/贝斯/其他（4 轨），使用 Demucs，可选人声降噪。
-- **参考音色翻唱**：完整歌曲 → 分离人声 → 换成参考音色（Seed-VC）→ 与伴奏混音，支持半音移调 / 扩散步数（默认 40） / 伴奏增益；翻唱源可手动选历史分离记录，也会按源音频内容自动查重（取音频前 1MB 计算 MD5），命中已有分离即直接复用、跳过 Demucs；自定义伴奏自动对齐源伴奏响度。**参考段**可选「智能 (推荐) / 能量最高段 / 整曲不裁剪」：默认「智能」取「人声主导度最高」（人声与同一次分离的配对伴奏 RMS 差最大，即串音最少）的 10 秒作音色参考，拿不到配对伴奏（上传干声 / 音色库）时自动回退「能量最高段」；「整曲不裁剪」等价关闭该优化。
+### 🎤 音色翻唱
+- 完整歌曲 → 分离人声 → 换成参考音色（Seed-VC）→ 与伴奏混音，支持半音移调 / 扩散步数（默认 40） / 伴奏增益；翻唱源可手动选历史分离记录，也会按源音频内容自动查重（取音频前 1MB 计算 MD5），命中已有分离即直接复用、跳过 Demucs；自定义伴奏自动对齐源伴奏响度。**参考段**可选「智能 (推荐) / 能量最高段 / 整曲不裁剪」：默认「智能」取「人声主导度最高」（人声与同一次分离的配对伴奏 RMS 差最大，即串音最少）的 10 秒作音色参考，拿不到配对伴奏（上传干声 / 音色库）时自动回退「能量最高段」；「整曲不裁剪」等价关闭该优化。
 - **源与参考**：可从生成历史选择源音频或直接上传（上传源自动留存副本）；参考干声支持上传 / 分离人声 / 音色库三来源。
-- **音色库**：目录 `voice-tools/refs/`，存放 1–30 秒参考干声，命名规范 `名称_4位短id.wav`。入库为手动操作——在翻唱页「上传参考干声」上传后填写名称并点「保存到音色库」（名称留空则取原文件名）；分离人声与上传干声历史**不会**自动进音色库。翻唱时参考音色解析优先级：上传 → 上传干声 → 分离人声 → 音色库。音色库与素材库均支持试听 / 删除（进系统回收站）/ 重命名（保留短 id）。
-- **任务管理**：阶段进度实时显示（分离中 / 换嗓中 / 降噪中 / 混音中），运行中可取消（换嗓阶段即时中断），长曲超时按源时长自适应。
-- 产物独立目录存放（`outputs/separations|covers/<时间戳>_<短id>/`）并写入历史，历史按文件夹整组回放、逐轨试听与下载；需独立安装（见 setup.md 第 6 节）。
+- **音色库**：目录 `voice-tools/refs/`，存放 1–30 秒参考干声，命名规范 `名称_4位短id.wav`。入库为手动操作——在翻唱页「上传参考干声」上传后填写名称并点「保存到音色库」（名称留空则取原文件名）；分离人声与上传干声历史**不会**自动进音色库。翻唱时参考音色解析优先级：上传 → 上传干声 → 分离人声 → 音色库。音色库与素材库均支持试听 / 删除（进系统回收站）/ 重命名（保留短 id），切换页面时下拉与试听自动刷新。
+- **任务管理**：阶段进度实时显示（分离中 / 换嗓中 / 降噪中 / 混音中），运行中可取消（换嗓阶段即时中断），长曲超时按源时长自适应；页面含翻唱任务历史，选中后整组回放、逐轨试听 / 下载。
+- 产物独立目录存放（`outputs/covers_<时间戳>/`）并写入历史。
 
-### ⚙️ 设置
+### 🎬 多轨编辑
+- **载入**：从生成 / 分离 / 翻唱历史或本地上传选择音轨，作为独立轨道载入；多轨并行、样本级同步播放。
+- **Transport（DAW 逻辑）**：单一播放 / 暂停按钮，全部轨道同时起停；支持循环播放、停止回区间起点、统一进度线跟随、时间码显示；**空格键**为全局播放 / 暂停快捷键（文本输入时除外）。
+- **单轨控制**：Solo / Mute / 音量 / 声像；音质（三段 EQ + 高 / 低通）、压缩（attack 20ms / release 250ms / knee 6dB，含 GR 表）、回声（3 抽头，垂直推子调延迟 / 反馈 / 混合）；每组配一键归零；另有旁通、预设、复制轨道等 FX 工具。
+- **可视化**：IN/OUT 电平表实时跳动（暂停后归零）；EQ 频响曲线与旋钮双向同步。
+- **剪辑**：波形上拖拽创建选区（位移 < 4px 视为单击定位），可取消选择区；支持起点偏移 / 裁剪 / 增益 / 静音段。
+- **渲染导出**：后端用 ffmpeg 滤镜链离线渲染（处理顺序：高通 → 低通 → EQ → 声像 → 压缩 → 回声），叠加总线响度归一化，输出 `<项目名>_<时间戳>_mix.flac`（真峰值 ≤ -1.2 dBTP）并写入历史；渲染支持协作取消。
+- 加载大文件时显示「正在下载音频 x/y · N%」与「正在解码音频」进度提示；界面不锁定于 iframe 顶部，跟随页面滚动。
+
+### ⚙️ 系统设置
 - **系统状态**：检查模型文件是否就绪（模型 GGUF / VAE GGUF）。
 - **当前队列**：实时显示运行中 / 排队中任务与最近完成记录（每 2 秒自动刷新）。
 - **参数预设**：内置预设（默认 / 快速demo / 高质量 / 创意模式 / 保守模式），支持保存当前参数为自定义预设并加载（覆盖 CFG / 批量 / 后处理 / 采样全部 23 项参数）。
@@ -134,17 +152,19 @@ yue2-webui/
 │   ├── vocal_presets.py  # 人声 / 乐器 / 情绪 / 语言 / 流派标签
 │   ├── lyrics_templates.py # 歌词内容模板
 │   ├── voice_client.py   # 音色工坊 worker 客户端（分离/翻唱 HTTP 调用）
-│   └── voice_ui_handlers.py # 音色工坊队列 worker/历史/音色库逻辑
-├── tests/                # 测试套件（i18n / 模型配置 / 语言持久化 / 使用上一次 / 历史回收站 / 队列 / 预设 / 音色工坊）
+│   ├── voice_ui_handlers.py # 音色工坊队列 worker/历史/音色库逻辑
+│   ├── mix_render.py     # 多轨混音离线渲染（工程契约校验 / ffmpeg 滤镜链 / 任务处理）
+│   └── mix_web.py        # 多轨混音 Web 接线（渲染接口与静态页路由）
+├── tests/                # 测试套件（i18n / 模型配置 / 语言持久化 / 使用上一次 / 历史回收站 / 队列 / 预设 / 音色工坊 / 多轨混音）
 ├── voice-tools/          # 音色工坊独立环境 & 参考音色库（可选）
 │   ├── worker.py         # 独立 venv HTTP worker（Demucs / Seed-VC）
 │   ├── venv/             # 独立 Python 3.11 虚拟环境
 │   └── refs/             # 参考音色库（1-30 秒参考干声，命名 名称_4位短id.wav）
 ├── presets/              # 自定义参数预设存储
-├── outputs/              # 生成结果（按任务定时戳分目录）
+├── outputs/              # 生成结果（按任务定时戳分目录；分离 separations_* / 翻唱 covers_* / 混音 *_mix.flac）
 ├── logs/                 # 运行日志
-├── static/               # 前端静态资源（乐谱渲染等）
-├── Docs/                 # 项目文档（setup 安装指南 / design 设计方案 / requirements 需求 / changelog 变更日志 / voice-tools-plan 音色工坊规划）
+├── static/               # 前端静态资源（乐谱渲染、多轨编辑页 static/multitrack/）
+├── Docs/                 # 项目文档（setup 安装指南 / design 设计方案 / requirements 需求 / changelog 变更日志 / voice-tools-plan 音色工坊规划 / multitrack-editor-plan 多轨编辑器规划 / optimization-plan-cover-quality 翻唱音质优化）
 ├── config.cfg            # 模型路径外置配置（[models] 段；相对路径基于上级系统根解析）
 ├── requirements.txt      # Python 依赖
 ├── install.bat / install.sh
@@ -205,13 +225,17 @@ This is the **YuE2 music generation WebUI** project. Built on the YuE2 model joi
 - 🎚️ **Preset system**: 5 built-in parameter presets plus save/load of custom presets
 - 📈 **Waveform zoom & timecode**: every audio player supports waveform zoom (fit-to-width / step-by-step px/s zoom with horizontal scrolling) and a high-contrast timecode display
 - 🎛️ **Voice Studio**: stem separation (Demucs) splits any audio into vocals/accompaniment, and reference-timbre covers (Demucs + Seed-VC) re-voice a song and mix it with the accompaniment; covers auto-detect the source by content hash and reuse an existing separation to skip Demucs, with live stage progress and in-run cancellation (optional feature, installed separately)
+- 🎬 **Multitrack editor (built-in DAW)**: load generation / separation / cover outputs or uploaded audio as tracks with sample-accurate multi-track playback (single play/pause, loop, stop-back-to-start, shared progress line & timecode, global Space shortcut); per-track Solo/Mute/volume/pan plus 3-band EQ, high/low-pass, compressor (with GR meter) and echo (vertical faders); drag-select regions on the waveform (cancelable) with start offset / trim / gain / silence; live IN/OUT meters and an EQ response curve (curve ↔ knob two-way sync); bypass / presets / duplicate track; export renders offline through a backend ffmpeg filter chain to `<project>_<timestamp>_mix.flac` (bus loudness normalized, true peak ≤ -1.2 dBTP)
+- 🧰 **Stem library (instrument tracks)**: separation outputs (instrument / accompaniment) can be saved to the stem library with one click and reused as the custom accompaniment on the Cover page (previously there was no way in)
+- 📥 **Large-file playback optimization**: large WAVs in History / Separation / Cover automatically get an MP3 preview (`*_preview.mp3`, 192kbps) that is preferred for playback, loading faster over remote/tunnel setups; the multitrack editor and track loading show download & decode progress
+- 🎨 **Card-based UI + light/dark theme**: unified cards, radii, shadows and focus rings; auto-adapting light/dark theme (waveforms, meters and EQ curves included)
 - 🌐 **Bilingual UI (Chinese/English)**: instant switch at the top right, including Gradio built-in texts (upload hints / footer); model paths configured via external `config.cfg`
 
 ---
 
-## UI Overview (4 Tabs + optional Voice Studio)
+## UI Overview (7 Tabs)
 
-### 🎼 Create
+### 🎼 Song Creation
 - **Style description**: language + genre + instruments + vocals + tempo. Built-in style / vocal / instrument / mood / language / genre quick tags — click to append.
 - **Lyrics**: supports `[Intro] [Verse] [Pre-Chorus] [Chorus] [Bridge] [Outro]` section markers; structure templates (V-C, V-C-V-C, V-C-V-C-B-C, A-A-B-A, etc.), drag-to-reorder sections, content templates.
 - **Work mode**: full creation / melody / direct.
@@ -220,24 +244,38 @@ This is the **YuE2 music generation WebUI** project. Built on the YuE2 model joi
 - **Advanced sampling**: two groups of temperature / Top-P / Top-K / repetition penalty / penalty window / Min-Max tokens for ABC sampling (Stage 1) and semantic-token sampling (Stage 2).
 - **Output**: audio player, variant selector (shown for batches — "set as final" or "keep all"), ABC score preview, export MIDI / PNG / MP3, resynthesize.
 
+### 📜 Song History
+- Paginated list: time, style, mode, audio duration, elapsed time, Task ID.
+- Click a record to play the audio, view lyric sync, preview the score, and inspect the ABC text and style description; row clicks highlight the selection, and large files prefer the MP3 preview (smoother over remote).
+- Records with missing files are cleaned automatically; delete selected / clear all / refresh supported.
+
 ### 🎤 Transcribe
 - Upload audio (WAV / MP3 / FLAC / OGG / M4A, etc.) and transcribe it to an ABC score with SheetSage2.
 - Preview the score, download ABC / MIDI, or "Send to Create" to reuse it directly.
 
-### 📜 History
-- Paginated list: time, style, mode, audio duration, elapsed time, Task ID.
-- Click a record to play the audio, view lyric sync, preview the score, and inspect the ABC text and style description.
-- Records with missing files are cleaned automatically; delete selected / clear all / refresh supported.
+### 🎛️ Stem Separation
+- Split any audio into vocals/accompaniment (2 stems) or vocals/drums/bass/other (4 stems) with Demucs, with optional vocal denoising.
+- The source comes from generation history or a local upload; the page includes a **separation task history** — select one to load the whole group for playback, per-stem preview and download.
+- Separation outputs (instrument / accompaniment) can be saved to the stem library with one click and reused as the custom accompaniment on the Cover page.
+- Outputs live in dedicated folders (`outputs/separations_<timestamp>/`) and are written to history automatically; requires a separate install (see setup.md §6).
 
-### 🎛️ Voice Studio (optional)
-- **Stem separation**: split any audio into vocals/accompaniment (2 stems) or drums/bass/other (4 stems) with Demucs, with optional vocal denoising.
-- **Reference-timbre cover**: full song → separate vocals → re-voice with a reference timbre (Seed-VC) → mix with the accompaniment; supports semitone shift / diffusion steps (default 40) / accompaniment gain; the source can be a past separation record, and separations are also auto-detected by content hash (MD5 over the first 1MB of the audio) so a repeated source reuses its existing separation and skips Demucs; custom accompaniments are loudness-matched to the source. The **reference segment** offers "Smart (recommended) / Loudest section / Full track (no trim)": Smart (default) uses the 10s with the highest vocal dominance (largest RMS gap between the vocals and the paired accompaniment from the same separation, i.e. least bleed) as the timbre reference, and falls back to the loudest section when no paired accompaniment is available (uploaded dry vocals / timbre library); "Full track (no trim)" effectively disables this optimization.
+### 🎤 Voice Cover
+- Full song → separate vocals → re-voice with a reference timbre (Seed-VC) → mix with the accompaniment; supports semitone shift / diffusion steps (default 40) / accompaniment gain; the source can be a past separation record, and separations are also auto-detected by content hash (MD5 over the first 1MB of the audio) so a repeated source reuses its existing separation and skips Demucs; custom accompaniments are loudness-matched to the source. The **reference segment** offers "Smart (recommended) / Loudest section / Full track (no trim)": Smart (default) uses the 10s with the highest vocal dominance (largest RMS gap between the vocals and the paired accompaniment from the same separation, i.e. least bleed) as the timbre reference, and falls back to the loudest section when no paired accompaniment is available (uploaded dry vocals / timbre library); "Full track (no trim)" effectively disables this optimization.
 - **Sources & references**: pick the source from generation history or upload directly (uploaded sources keep a copy); reference dry vocals come from upload / separated vocals / timbre library.
-- **Timbre library**: stored in `voice-tools/refs/` as 1–30s reference dry vocals named `name_<4-char-id>.wav`. Entries are added manually — upload a reference on the Cover page, enter a name and click "Save to library" (an empty name falls back to the original file name). Separated vocals and uploaded dry-vocal history are **not** added automatically. Reference priority at cover time: upload → uploaded dry vocal → separated vocals → timbre library. Both libraries support preview / delete (to the OS recycle bin) / rename (preserving the short id).
-- **Task management**: live stage progress (separating / converting / denoising / mixing), in-run cancellation (instant interrupt during conversion), and duration-adaptive timeouts for long tracks.
-- Outputs live in dedicated folders (`outputs/separations|covers/<timestamp>_<short-id>/`) and are written to history for folder-grouped playback, per-stem preview and download; requires a separate install (see setup.md §6).
+- **Timbre library**: stored in `voice-tools/refs/` as 1–30s reference dry vocals named `name_<4-char-id>.wav`. Entries are added manually — upload a reference on the Cover page, enter a name and click "Save to library" (an empty name falls back to the original file name). Separated vocals and uploaded dry-vocal history are **not** added automatically. Reference priority at cover time: upload → uploaded dry vocal → separated vocals → timbre library. Both libraries support preview / delete (to the OS recycle bin) / rename (preserving the short id); dropdowns and previews refresh automatically when switching pages.
+- **Task management**: live stage progress (separating / converting / denoising / mixing), in-run cancellation (instant interrupt during conversion), and duration-adaptive timeouts for long tracks; the page includes a cover task history — select one to load the whole group for playback, per-stem preview and download.
+- Outputs live in dedicated folders (`outputs/covers_<timestamp>/`) and are written to history.
 
-### ⚙️ Settings
+### 🎬 Multitrack
+- **Load**: pick tracks from generation / separation / cover history or upload locally; multiple tracks play in parallel with sample-accurate sync.
+- **Transport (DAW logic)**: a single play/pause button starts and stops all tracks together; supports looping, stop back to the region start, a shared progress line and a timecode readout; **Space** is a global play/pause shortcut (except while typing in a text field).
+- **Per-track controls**: Solo / Mute / volume / pan; tone (3-band EQ + high/low-pass), compressor (attack 20ms / release 250ms / knee 6dB, with a GR meter) and echo (3 taps, vertical faders for delay / feedback / mix); each group has a one-click reset; plus bypass, presets and duplicate-track FX tools.
+- **Visualization**: live IN/OUT meters (reset to zero when paused); an EQ response curve two-way synced with the knobs.
+- **Editing**: drag on the waveform to create a region (< 4px is treated as a click-to-seek), cancelable; supports start offset / trim / gain / silence.
+- **Render/Export**: the backend renders offline through an ffmpeg filter chain (order: high-pass → low-pass → EQ → pan → compressor → echo) with bus loudness normalization, producing `<project>_<timestamp>_mix.flac` (true peak ≤ -1.2 dBTP) and writing it to history; rendering supports cooperative cancellation.
+- Loading large files shows "downloading audio x/y · N%" and "decoding audio" progress; the editor is not locked inside the iframe top so it scrolls with the page.
+
+### ⚙️ System Settings
 - **System status**: check whether model files are ready (main GGUF / VAE GGUF).
 - **Current queue**: live view of running / queued tasks and recent completions (auto-refreshes every 2s).
 - **Presets**: built-in presets (Default / Quick Demo / High Quality / Creative / Conservative); save the current parameters as a custom preset and load it back (covers all 23 params — CFG / batch / post-processing / sampling).
@@ -313,17 +351,20 @@ yue2-webui/
 │   ├── vocal_presets.py  # vocal / instrument / mood / language / genre tags
 │   ├── lyrics_templates.py # lyric content templates
 │   ├── voice_client.py   # voice-studio worker client (separation / cover HTTP calls)
-│   └── voice_ui_handlers.py # voice-studio queue workers / history / timbre library
-├── tests/                # test suites (i18n / model config / lang persistence / use-last-time / recycle bin / queue / presets / voice studio)
-├── voice-tools/          # voice-studio isolated env & reference-timbre library (optional)
+│   ├── voice_ui_handlers.py # voice-studio queue workers / history / stem & timbre libraries
+│   ├── mix_render.py     # multitrack offline render (project contract validation / ffmpeg filter chain / task handling)
+│   └── mix_web.py        # multitrack web wiring (render endpoint and static-page route)
+├── tests/                # test suites (i18n / model config / lang persistence / use-last-time / recycle bin / queue / presets / voice studio / multitrack mixing)
+├── voice-tools/          # voice-studio isolated env, stem library & reference-timbre library (optional)
 │   ├── worker.py         # standalone venv HTTP worker (Demucs / Seed-VC)
 │   ├── venv/             # isolated Python 3.11 virtual env
+│   ├── stems/            # stem library (instrument tracks, named name__type.ext)
 │   └── refs/             # reference-timbre library (1-30s dry vocals, named name_<4-char-id>.wav)
 ├── presets/              # custom parameter presets
-├── outputs/              # generation results (one folder per task timestamp)
+├── outputs/              # generation results (one folder per task timestamp; separation separations_* / cover covers_* / mix *_mix.flac)
 ├── logs/                 # runtime logs
-├── static/               # frontend static assets (score rendering, etc.)
-├── Docs/                 # documentation (setup guide / design / requirements / changelog / voice-tools-plan)
+├── static/               # frontend static assets (score rendering; multitrack editor page static/multitrack/)
+├── Docs/                 # documentation (setup guide / design / requirements / changelog / voice-tools-plan / multitrack-editor-plan / cover-quality optimization plan)
 ├── config.cfg            # external model-path config ([models] section; relative paths resolved against the parent system root)
 ├── requirements.txt      # Python dependencies
 ├── install.bat / install.sh
