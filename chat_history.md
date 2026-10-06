@@ -837,3 +837,42 @@ ode --check static/js/app.js` OK；全量 `pytest tests/ --ignore=tests/test_i18
 - **顺带清理**（同一轮翻唱全链路 review）：① 删除 `_convert` 中已过期的 loudnorm 描述注释（与现「整体 LUFS 静态增益 + 限幅器」实现相反）；② 去掉 `_separate(...)` 中无效的 `denoise_strength=` 实参。
 - **验证**：`py_compile` 通过；`tests/test_voice_loudness.py` **18 passed**；全量 `pytest tests/ --ignore=tests/test_i18n.py -q` → **244 passed**；真实素材复现完整混音链——隔离人声链右声道 `-inf` → 新链左右均 `-18.30dB`；完整成品左右差 3.85dB → **0.03dB**，开头 0.5s 仍为 -63.7/-63.9dB，成品 LUFS -14.28 → -14.23。
 - **收尾**：已 git commit 并重启 9898 服务（worker 懒加载新代码），需刷新浏览器页面验证听感；未跑 tests/test_i18n.py。
+
+## 2026-10-06 — 音轨分离 / 音色翻唱 两页重排（生成区 vs 历史调用区分区 + 1:1 双栏）
+
+- **用户诉求**：分离与翻唱两页的「生成区」与「历史调用区」混淆，需重新分区、区分更清楚，并充分利用左右双栏（1:1）空间。
+- **关键取舍（已用 AskUserQuestion 与用户确认）**：① 分区方式选「按流程阶段分」（左=生成流水线、右=历史与素材），非「按数据来源分」；② 翻唱页「执行与输出」移到左栏参数之后。
+- **执行**：
+  - `src/ui_tabs.py`：两页分栏 `scale=5:4` → **`scale=1:1` 等宽**；每栏顶部新增分区总标题（`y2-zone` 类，`### 生成` / `### 历史与素材`）并注册 i18n updater。
+  - 分离页：左 = 源音频 → 分离参数（卡片标题「### 音轨分离」改名「### 分离参数」，避免与 Tab 名重复）→ 执行与输出；右 = 分离任务历史 → 库管理。
+  - 翻唱页：把「执行与输出」卡片（降噪 + 开始翻唱/取消 + 产物播放器组）整块从右栏**移到左栏「翻唱参数」之后**；右栏只留「翻唱任务历史」。
+  - 新增 CSS `.y2-zone`：15px 加粗 + `--color-accent` 左竖条、无卡片外框，与 `.y2-sec h3`（13px + 下划线）拉开层级；配色走主题变量，明暗自适应。
+  - `src/i18n.py`：新增 3 条词条 —— `### 生成` / `### 历史与素材` / `### 分离参数`。
+- **改动文件**：src/ui_tabs.py、src/i18n.py、Docs/changelog.md、chat_history.md。组件命名与全部事件绑定（inputs/outputs）均未改动，仅调整 Blocks 树位置与 `scale`。
+- **验证**：`py_compile` 通过；`app.build_ui()` 成功构建（**472 组件**）；另起临时实例（9899，不影响 9898 正式服务）并以 Chrome DevTools 截图确认——分离页（左：源音频/分离参数/执行与输出；右：分离任务历史/库管理）与翻唱页（左：被翻唱歌曲/参考音色/翻唱参数/执行与输出；右：翻唱任务历史）分区、1:1 等宽、分区标题渲染均正确，随后关闭临时实例。
+- **未执行**：未 git commit/push；9898 正式服务**未重启**（需重启才能看到新布局，重启后请刷新浏览器页面）。
+
+## 2026-10-06 — 音色翻唱页「翻唱参数」卡片默认折叠
+
+- **用户诉求**：翻唱参数默认折叠（该卡片参数改动频率低，默认收起可减少左栏纵向占用）。
+- **执行**：
+  - `src/ui_tabs.py`：翻唱页「卡片3：翻唱参数」由 `gr.Group(y2-sec)` + `gr.Markdown("### 翻唱参数")` 改为 `y2-sec` 卡片内嵌 `gr.Accordion(_t("翻唱参数"), open=False, elem_classes=["y2-acc"])`；半音偏移 / 快捷原调按钮行 / 扩散步数 / 伴奏增益 / 参考段整体移入 Accordion。**组件变量名与全部事件绑定（inputs/outputs）未改动**。
+  - 新增 CSS `.y2-acc`：去掉 Accordion 自带 Block 外框（border / background / box-shadow / padding 归零），header 按钮做成卡片标题样式（13px / 600、主题色文字、右侧 ▼ 14px）；**仅展开态**（`.y2-acc > button.open`）显示底部 1px 分隔线 + 8px 间距，折叠态无悬空横线。
+  - `src/i18n.py`：新增 `翻唱参数` → `Cover parameters`（Accordion label 走 `_reg` 注册，切语言同步）。
+- **改动文件**：src/ui_tabs.py、src/i18n.py、Docs/changelog.md、chat_history.md。
+- **验证**：`py_compile` 通过；`app.build_ui()` 成功构建（**472 组件**，与改前一致）；核对 Gradio 5.48 Accordion 源码（`accordion/Index.svelte` + `shared/Accordion.svelte`）确认 DOM 为 `Block(.y2-acc) > button.label-wrap`（展开加 `open` 类）+ 同级 `div`(body)，故 `.y2-acc > button` 选择器成立；已重启 9898 服务（带 NO_PROXY 绕本机代理）。
+- **未执行**：未 git commit/push；浏览器截图未做（当前会话 MCP 浏览器不可用），需刷新页面人工确认折叠 / 展开视觉。
+
+## 2026-10-06 — 分离/翻唱历史改「点『加载』才回放」（取消进入页面自动加载）
+
+- **用户诉求**：分离与翻唱历史增加一个「加载」按钮；取消进入网页自动加载历史的功能，点击加载才加载 list 里选中的历史。
+- **执行**：
+  - `src/ui_tabs.py`：分离页「分离任务历史」与翻唱页「翻唱任务历史」在下拉下方各加一行 `gr.Button("加载", variant="primary", size="sm")`（`y2-actions` 行内，按钮按内容宽度不拉伸），走 `_reg` i18n 注册；复用已有 `加载` → `Load` 词条。
+  - 移除 `sep_history_dd.change` / `cover_history_dd.change` 上直接调用 `on_voice_task_history_pick` 的自动回放绑定；下拉 change 仅保留同步隐藏 State 的 lambda（供改名/删除按钮取 task_id）。
+  - 切 Tab（`tab_sep.select` / `tab_cover.select`）不再预选首条历史、不再回填播放器：历史下拉改 `gr.update(choices=..., value=None)`，隐藏 State 置 `None`，播放器以 `_fill_voice_players([])` 清空；列表仍每次刷新。
+  - 新增 `sep_hist_load_btn.click(fn=on_voice_task_history_pick, inputs=sep_history_dd, outputs=[*sep_hist_audios])`，翻唱页同构 —— 点按钮才用下拉当前选中值填充整组回放播放器。
+  - 删除死代码 `callbacks_voice._voice_task_first_players()` 及 `app.py` 对应薄封装。
+  - `src/callbacks_voice.py`：`on_voice_separate` / `on_voice_cover` 完成时刷新历史下拉也显式传 `value=None`，与「点加载才载入」保持一致（不再停在旧选中值 / 假选中）。
+- **改动文件**：src/ui_tabs.py、src/callbacks_voice.py、app.py、tests/test_voice_handlers.py、Docs/changelog.md、chat_history.md。
+- **验证**：`py_compile` 通过；`app.build_ui()` 成功（**476 组件**，较改前 472 增 2 按钮 + 2 行容器）；更新 `test_voice_stem_items_prefers_preview_keeps_full_for_mix` 源码断言；全量 `pytest tests/ --ignore=tests/test_i18n.py` → **244 passed**；已重启 9898 服务。
+- **未执行**：未 git commit/push；浏览器交互验证未做（当前会话 MCP 浏览器不可用），需刷新页面人工确认「进入页面不回放 / 点『加载』才回放」。

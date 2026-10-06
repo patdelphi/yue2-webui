@@ -286,16 +286,6 @@ def on_voice_task_history_pick(d: VoiceDeps, task_id):
     return _fill_voice_players(items)
 
 
-def _voice_task_first_players(d: VoiceDeps, record_type):
-    """按下拉默认首条任务回填播放器组（切 Tab 时用）。
-
-    下拉 refreshing 后 value 已是首条任务（_dd_update），若不同步回填播放器，
-    界面会停在"下拉显示着任务名、播放器却是空的"的假选中状态。
-    """
-    choices = _voice_task_history_choices(d, record_type)
-    return on_voice_task_history_pick(d, choices[0][1] if choices else None)
-
-
 # ---------------------------------------------------------------------------
 # 任务历史管理（改项目名 / 删除项目）
 # ---------------------------------------------------------------------------
@@ -604,7 +594,7 @@ def on_voice_separate(d: VoiceDeps, source_history, source_upload, sep_mode="voc
     stems = result.get("stems") or []
     note = tr(lang, "分离完成") + " · " + tr(lang, "写入历史")
     yield (*_fill_voice_players(items), note, gr.update(interactive=True),
-           gr.update(choices=_voice_task_history_choices(d, "separation", lang)),
+           gr.update(choices=_voice_task_history_choices(d, "separation", lang), value=None),
            _dd_update(_stem_pick_choices(d, stems)), stems)
 
 
@@ -737,7 +727,7 @@ def on_voice_cover(d: VoiceDeps, source_history, source_upload, ref_library, ref
     items = _voice_stem_items(d, result.get("stems"))
     note = tr(lang, "翻唱完成") + " · " + tr(lang, "写入历史")
     yield (*_fill_voice_players(items), note, gr.update(interactive=True),
-           gr.update(choices=_voice_task_history_choices(d, "cover", lang)))
+           gr.update(choices=_voice_task_history_choices(d, "cover", lang), value=None))
 
 
 def on_voice_cancel(d: VoiceDeps, channel):

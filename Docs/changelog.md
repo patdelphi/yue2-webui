@@ -4,6 +4,45 @@
 
 ---
 
+## 2026-10-06 — 分离/翻唱历史改「点『加载』才回放」（取消进入页面自动加载）
+
+> 起因：用户要求「分离与翻唱历史增加一个加载按钮；取消进入网页自动加载历史的功能，点击加载才加载 list 里选中的历史」。
+
+- **新增「加载」按钮**（`src/ui_tabs.py`）：分离页「分离任务历史」与翻唱页「翻唱任务历史」两卡片，在下拉框下方各加一行 `gr.Button("加载", variant="primary", size="sm")`（置于 `y2-actions` 行，按钮按内容宽度不拉伸），并走 `_reg` 注册 i18n；复用现有 `加载` → `Load` 词条，无需新增翻译。
+- **取消自动加载**：
+  - 移除 `sep_history_dd.change` / `cover_history_dd.change` 上直接调用 `on_voice_task_history_pick` 的自动回放绑定；下拉 change 仅保留「同步隐藏 State」的 lambda（供改名 / 删除按钮取 task_id）。
+  - 切 Tab（`tab_sep.select` / `tab_cover.select`）不再预选首条历史、不再回填播放器：历史下拉改为 `gr.update(choices=..., value=None)`，隐藏 State 置 `None`，播放器用 `_fill_voice_players([])` 清空。**列表仍每次刷新**（新完成的任务仍会立即出现在下拉里）。
+- **点击「加载」才回放**：`sep_hist_load_btn.click(fn=on_voice_task_history_pick, inputs=sep_history_dd, outputs=[*sep_hist_audios])`（翻唱页同构），以下拉当前选中值填充整组回放播放器。
+- **死代码清理**：删除 `callbacks_voice._voice_task_first_players()` 及 `app.py` 中对应薄封装（唯一调用方已移除）。
+- **完成刷新同步**（`src/callbacks_voice.py`）：`on_voice_separate` / `on_voice_cover` 完成时刷新历史下拉也显式传 `value=None`（不再让下拉停在旧选中值 / 假选中），与「点『加载』才载入」保持一致。
+- **改动文件**：`src/ui_tabs.py`、`src/callbacks_voice.py`、`app.py`、`tests/test_voice_handlers.py`、`Docs/changelog.md`、`chat_history.md`。
+- **验证**：`py_compile` 通过；`app.build_ui()` 成功（**476 组件**，较改前 472 增加 2 个按钮 + 2 个行容器）；更新 `test_voice_stem_items_prefers_preview_keeps_full_for_mix` 源码断言（已无 `_voice_task_first_players`、两处 load 按钮绑定存在、下拉不再自动回放、切 Tab 以 `_fill_voice_players([])` 清空且 `value=None`）；全量 `pytest tests/ --ignore=tests/test_i18n.py` → **244 passed**。
+- **未执行**：未 git commit/push；浏览器交互验证未做（本会话 MCP 浏览器不可用），需刷新页面后人工确认「进入页面不回放 / 点『加载』才回放」。
+
+## 2026-10-06 — 音色翻唱页「翻唱参数」卡片默认折叠
+
+> 起因：用户要求「翻唱参数默认折叠」——该卡片参数改动频率低，默认收起可减少左栏纵向占用，需要时再展开调参。
+
+- **折叠实现**（`src/ui_tabs.py`）：翻唱页「卡片3：翻唱参数」由 `gr.Group(y2-sec)` + `gr.Markdown("### 翻唱参数")` 改为在 `y2-sec` 卡片内嵌 `gr.Accordion(_t("翻唱参数"), open=False, elem_classes=["y2-acc"])`；半音偏移 / 快捷原调按钮行 / 扩散步数 / 伴奏增益 / 参考段等控件整体移入 Accordion 内。**组件变量名与全部事件绑定（inputs/outputs）均未改动**，仅调整 Blocks 树中的嵌套。
+- **样式**（`src/ui_tabs.py` CSS）：新增 `.y2-acc` 系列规则——去掉 Accordion 自带 Block 外框（border / background / box-shadow / padding 归零），把 header 按钮做成卡片标题样式（13px / 600、主题色文字、右侧 ▼ 图标 14px）；**仅在展开态**（`.y2-acc > button.open`）画底部 1px 分隔线并留 8px 间距，折叠态保持卡片干净、无悬空横线。
+- **i18n**（`src/i18n.py`）：新增 `翻唱参数` → `Cover parameters`（Accordion 的 label 走 `_reg` 注册，切换语言同步）。
+- **改动文件**：`src/ui_tabs.py`、`src/i18n.py`、`Docs/changelog.md`、`chat_history.md`。
+- **验证**：`py_compile` 通过；`app.build_ui()` 成功构建（**472 组件**，与改前一致，说明未增删组件）；核对 Gradio 5.48 Accordion 源码（`accordion/Index.svelte` + `shared/Accordion.svelte`）确认 DOM 为 `Block(.y2-acc) > button.label-wrap`（展开时加 `open` 类）+ 同级 `div`（body），故 `.y2-acc > button` 选择器成立。
+- **未执行**：未 git commit/push；浏览器截图验证未做（当前会话 MCP 浏览器不可用），已重启 9898 服务，需刷新页面人工确认折叠态 / 展开态视觉。
+
+## 2026-10-06 — 音轨分离 / 音色翻唱 两页重排（生成区 vs 历史调用区分区 + 1:1 双栏）
+
+> 起因：用户反馈两页「生成区」与「历史调用区」视觉混淆，要求重新分区并充分利用左右双栏（1:1）空间。
+
+- **分区规范化**：两页统一为「左栏 = 生成流水线（选源 → 参数 → 执行 → 本次产物）/ 右栏 = 历史与素材（任务历史 + 库管理）」，分栏比例由 5:4 改为 **1:1 等宽**。
+- **新增分区总标题**：每栏顶部加 `### 生成` / `### 历史与素材`，样式类 `y2-zone`（15px 加粗 + 主题色左竖条 + 无卡片外框），与卡片标题（13px + 下划线）拉开层级；配色走主题变量，明暗自适应。
+- **音轨分离页**：左栏 = 源音频 → 分离参数（原卡片标题「### 音轨分离」改名 **「### 分离参数」**，避免与 Tab 名重复）→ 执行与输出；右栏 = 分离任务历史 → 库管理。
+- **音色翻唱页**：把「执行与输出」卡片从右栏**移到左栏「翻唱参数」之后**（参数调完即可直接点运行）；左栏 = 被翻唱歌曲 → 参考音色 → 翻唱参数 → 执行与输出；右栏只留「翻唱任务历史」。
+- **i18n**（`src/i18n.py`）：新增 `### 生成` → `### Create`、`### 历史与素材` → `### History & assets`、`### 分离参数` → `### Separation parameters` 三条词条。
+- **改动文件**：`src/ui_tabs.py`、`src/i18n.py`、`Docs/changelog.md`、`chat_history.md`。组件命名与全部事件绑定（inputs/outputs）均**未改动**，仅调整 Blocks 树中的位置与 `scale`。
+- **验证**：`py_compile` 通过；`app.build_ui()` 成功构建（**472 组件**）；临时实例（9899）截图确认两页分区、1:1 等宽、分区标题渲染均正确。
+- **未执行**：未 git commit/push；9898 正式服务**未重启**（需重启才能看到新布局，重启后刷新浏览器页面）。
+
 ## 2026-10-06 — 修复翻唱人声「只有左声道」（单声道→立体声升混写法错误）
 
 > 起因：用户实测翻唱成品人声只在左声道出声。

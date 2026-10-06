@@ -140,6 +140,39 @@ _TITLE_ROW_CSS = """
         border-bottom: 1px solid var(--y2-line) !important;
         color: var(--body-text-color) !important;
     }
+    /* —— 分栏分区总标题（左「生成」/ 右「历史与素材」）：与卡片标题拉开层级 ——
+       用在分栏最顶部，Markdown ### 渲染为 h3，故不进 .y2-sec 以免被卡片标题样式命中 */
+    .y2-zone {
+        margin: 0 0 10px 0 !important; padding: 0 !important;
+        border: 0 !important; background: transparent !important; box-shadow: none !important;
+        align-self: flex-start !important;
+    }
+    .y2-zone .prose { margin: 0 !important; }
+    .y2-zone h3 {
+        font-size: 15px !important; font-weight: 700 !important; line-height: 1.3 !important;
+        margin: 0 !important; padding: 0 0 0 10px !important;
+        border: 0 !important; border-left: 3px solid var(--color-accent) !important;
+        color: var(--body-text-color) !important; letter-spacing: .02em !important;
+    }
+    /* —— 卡片内折叠面板（如翻唱参数）：去掉 Accordion 自带外框，标题做成卡片标题样式 —— */
+    .y2-acc {
+        border: 0 !important; background: transparent !important; box-shadow: none !important;
+        margin: 0 !important; padding: 0 !important;
+    }
+    .y2-acc > button {
+        width: 100% !important; justify-content: space-between !important;
+        padding: 0 !important; margin: 0 !important;
+        border: 0 !important;
+        background: transparent !important; box-shadow: none !important;
+        font-size: 13px !important; font-weight: 600 !important;
+        color: var(--body-text-color) !important; letter-spacing: .01em !important;
+    }
+    /* 展开时才画分隔线，折叠态保持卡片干净（避免底部出现悬空横线） */
+    .y2-acc > button.open {
+        padding-bottom: 8px !important;
+        border-bottom: 1px solid var(--y2-line) !important;
+    }
+    .y2-acc > button svg { width: 14px !important; height: 14px !important; opacity: .7; }
     /* —— 卡片内竖向留白收紧，避免出现大片空白 —— */
     .y2-sec > .form { margin: 0 !important; }
     .y2-sec .block.padded { padding-top: 6px !important; padding-bottom: 6px !important; }
@@ -858,9 +891,14 @@ def build_ui(app_module=None):
 
             with gr.Tab(_t("音轨分离"), elem_id="tab-sep") as tab_sep:
                 _reg(tab_sep, lambda lang: gr.update(label=tr(lang, "音轨分离")))
-                # —— 左右分栏：左=源音频+分离参数+执行输出，右=任务历史+库管理 ——
+                # —— 左右分栏（1:1）：左=生成流水线（源音频→分离参数→执行→产物），
+                #    右=历史与素材（分离任务历史 + 库管理）——
                 with gr.Row():
-                    with gr.Column(scale=5):
+                    with gr.Column(scale=1):
+                        # 分区总标题：生成区
+                        sep_zone_create = gr.Markdown(_t("### 生成"), elem_classes=["y2-zone"])
+                        _reg(sep_zone_create, lambda lang: gr.update(value=tr(lang, "### 生成")))
+
                         # 卡片1：源音频（历史记录 / 上传）
                         with gr.Group(elem_classes=["y2-sec"]):
                             sep_src_md = gr.Markdown(_t("### 源音频"))
@@ -887,8 +925,8 @@ def build_ui(app_module=None):
 
                         # 卡片2：分离参数
                         with gr.Group(elem_classes=["y2-sec"]):
-                            sep_param_md = gr.Markdown(_t("### 音轨分离"))
-                            _reg(sep_param_md, lambda lang: gr.update(value=tr(lang, "### 音轨分离")))
+                            sep_param_md = gr.Markdown(_t("### 分离参数"))
+                            _reg(sep_param_md, lambda lang: gr.update(value=tr(lang, "### 分离参数")))
                             sep_stem_mode = gr.Radio(choices=[
                                 (_t("人声/伴奏"), "vocals"), (_t("人声/鼓/贝斯/其他"), "full"),
                             ], value="vocals", label=_t("分离模式"))
@@ -918,8 +956,12 @@ def build_ui(app_module=None):
                                 for i in range(VOICE_PLAYER_COUNT)
                             ]
 
-                    # —— 右栏：分离任务历史（按文件夹选择，整组播放器回放全部轨道） ——
-                    with gr.Column(scale=4):
+                    # —— 右栏（1:1）：历史与素材 ——
+                    with gr.Column(scale=1):
+                        # 分区总标题：历史与素材区
+                        sep_zone_hist = gr.Markdown(_t("### 历史与素材"), elem_classes=["y2-zone"])
+                        _reg(sep_zone_hist, lambda lang: gr.update(value=tr(lang, "### 历史与素材")))
+
                         # 卡片1：分离任务历史（选择任务 + 回放 + 改名/删除）
                         with gr.Group(elem_classes=["y2-sec"]):
                             sep_hist_md = gr.Markdown(_t("### 分离任务历史"))
@@ -930,6 +972,11 @@ def build_ui(app_module=None):
                             _reg(sep_history_dd, lambda lang: gr.update(
                                 choices=_voice_task_history_choices("separation", lang),
                                 label=tr(lang, "选择分离任务")))
+                            # 「加载」按钮：选中 list 里的任务后手动载入回放
+                            # （进入页面 / 切 Tab 不再自动加载，必须点此按钮）
+                            with gr.Row(elem_classes=["y2-actions"]):
+                                sep_hist_load_btn = gr.Button(_t("加载"), variant="primary", size="sm")
+                                _reg(sep_hist_load_btn, lambda lang: gr.update(value=tr(lang, "加载")))
                             # 隐藏 State 组件：保存当前选中的 task_id，供删除/改名按钮正确读取
                             # （Gradio 6 中 Tab 切换更新 choices 会把 Dropdown 的 value 重置为 None，
                             # 必须用 State 组件显式保存用户选中的值，与历史页 history_state 模式一致）
@@ -1031,9 +1078,14 @@ def build_ui(app_module=None):
 
             with gr.Tab(_t("音色翻唱"), elem_id="tab-cover") as tab_cover:
                 _reg(tab_cover, lambda lang: gr.update(label=tr(lang, "音色翻唱")))
-                # —— 左右分栏：左=被翻唱歌曲+参考音色+翻唱参数，右=执行与输出+任务历史 ——
+                # —— 左右分栏（1:1）：左=生成流水线（被翻唱歌曲→参考音色→翻唱参数→
+                #    执行→产物），右=历史与素材（翻唱任务历史）——
                 with gr.Row():
-                    with gr.Column(scale=5):
+                    with gr.Column(scale=1):
+                        # 分区总标题：生成区
+                        cover_zone_create = gr.Markdown(_t("### 生成"), elem_classes=["y2-zone"])
+                        _reg(cover_zone_create, lambda lang: gr.update(value=tr(lang, "### 生成")))
+
                         # 卡片1：被翻唱歌曲（历史记录 / 上传）
                         with gr.Group(elem_classes=["y2-sec"]):
                             cover_src_md = gr.Markdown(_t("### 被翻唱歌曲"))
@@ -1140,45 +1192,43 @@ def build_ui(app_module=None):
                                )
                             _reg(cover_acc_preview, lambda lang: gr.update(label=tr(lang, "试听")))
 
-                        # 卡片3：翻唱参数
+                        # 卡片3：翻唱参数（默认折叠：减少纵向占用，展开后调参）
                         with gr.Group(elem_classes=["y2-sec"]):
-                            cover_param_md = gr.Markdown(_t("### 翻唱参数"))
-                            _reg(cover_param_md, lambda lang: gr.update(value=tr(lang, "### 翻唱参数")))
-                            cover_semi = gr.Slider(-12, 12, value=0, step=1, label=_t("半音偏移"))
-                            _reg(cover_semi, lambda lang: gr.update(label=tr(lang, "半音偏移")))
-                            with gr.Row(elem_classes=["y2-actions"]):
-                                cover_semi_orig = gr.Button(_t("半音快捷原调"), size="sm")
-                                _reg(cover_semi_orig, lambda lang: gr.update(value=tr(lang, "半音快捷原调")))
-                                cover_semi_m12 = gr.Button(_t("−12"), size="sm")
-                                cover_semi_p12 = gr.Button(_t("+12"), size="sm")
-                            # 默认 40：Seed-VC 官方称质量最佳区为 30-50（30 是质量区下限），
-                            # 默认取 40 兼顾质量与耗时
-                            cover_steps = gr.Slider(10, 50, value=40, step=1, label=_t("扩散步数"))
-                            _reg(cover_steps, lambda lang: gr.update(label=tr(lang, "扩散步数")))
-                            cover_gain = gr.Slider(-6, 6, value=0, step=0.5, label=_t("伴奏增益(dB)"))
-                            _reg(cover_gain, lambda lang: gr.update(label=tr(lang, "伴奏增益(dB)")))
-                            # 参考段策略（P5C 盲听验证）：默认「智能」——参考干声来自分离记录时
-                            # 用配对伴奏挑"人声主导度最高 10s"（串音最少）作音色参考；拿不到配对
-                            # 伴奏（上传干声/音色库）时自动回退「能量最高段」（旧行为）。
-                            # 「整曲不裁剪」等价关闭该优化。
-                            cover_ref_seg = gr.Dropdown(choices=[
-                                (_t("智能 (推荐)"), "smart"),
-                                (_t("能量最高段"), "energy"),
-                                (_t("整曲不裁剪"), "full"),
-                            ], value="smart", label=_t("参考段"),
-                                info=_t("智能：取人声最干净的 10 秒作参考；整曲不裁剪可能音色漂移"))
-                            _reg(cover_ref_seg, lambda lang: gr.update(
-                                choices=[(tr(lang, "智能 (推荐)"), "smart"),
-                                         (tr(lang, "能量最高段"), "energy"),
-                                         (tr(lang, "整曲不裁剪"), "full")],
-                                label=tr(lang, "参考段"),
-                                info=tr(lang, "智能：取人声最干净的 10 秒作参考；整曲不裁剪可能音色漂移")))
+                            with gr.Accordion(_t("翻唱参数"), open=False,
+                                              elem_classes=["y2-acc"]) as cover_param_acc:
+                                _reg(cover_param_acc, lambda lang: gr.update(label=tr(lang, "翻唱参数")))
+                                cover_semi = gr.Slider(-12, 12, value=0, step=1, label=_t("半音偏移"))
+                                _reg(cover_semi, lambda lang: gr.update(label=tr(lang, "半音偏移")))
+                                with gr.Row(elem_classes=["y2-actions"]):
+                                    cover_semi_orig = gr.Button(_t("半音快捷原调"), size="sm")
+                                    _reg(cover_semi_orig, lambda lang: gr.update(value=tr(lang, "半音快捷原调")))
+                                    cover_semi_m12 = gr.Button(_t("−12"), size="sm")
+                                    cover_semi_p12 = gr.Button(_t("+12"), size="sm")
+                                # 默认 40：Seed-VC 官方称质量最佳区为 30-50（30 是质量区下限），
+                                # 默认取 40 兼顾质量与耗时
+                                cover_steps = gr.Slider(10, 50, value=40, step=1, label=_t("扩散步数"))
+                                _reg(cover_steps, lambda lang: gr.update(label=tr(lang, "扩散步数")))
+                                cover_gain = gr.Slider(-6, 6, value=0, step=0.5, label=_t("伴奏增益(dB)"))
+                                _reg(cover_gain, lambda lang: gr.update(label=tr(lang, "伴奏增益(dB)")))
+                                # 参考段策略（P5C 盲听验证）：默认「智能」——参考干声来自分离记录时
+                                # 用配对伴奏挑"人声主导度最高 10s"（串音最少）作音色参考；拿不到配对
+                                # 伴奏（上传干声/音色库）时自动回退「能量最高段」（旧行为）。
+                                # 「整曲不裁剪」等价关闭该优化。
+                                cover_ref_seg = gr.Dropdown(choices=[
+                                    (_t("智能 (推荐)"), "smart"),
+                                    (_t("能量最高段"), "energy"),
+                                    (_t("整曲不裁剪"), "full"),
+                                ], value="smart", label=_t("参考段"),
+                                    info=_t("智能：取人声最干净的 10 秒作参考；整曲不裁剪可能音色漂移"))
+                                _reg(cover_ref_seg, lambda lang: gr.update(
+                                    choices=[(tr(lang, "智能 (推荐)"), "smart"),
+                                             (tr(lang, "能量最高段"), "energy"),
+                                             (tr(lang, "整曲不裁剪"), "full")],
+                                    label=tr(lang, "参考段"),
+                                    info=tr(lang, "智能：取人声最干净的 10 秒作参考；整曲不裁剪可能音色漂移")))
 
-                    # —— 右栏：执行与输出 + 翻唱任务历史 ——
-                    with gr.Column(scale=4):
-                        # 卡片1：执行与输出
+                        # 卡片4：执行与输出（从右栏移来：执行按钮紧跟参数，调完即可直接运行）
                         with gr.Group(elem_classes=["y2-sec"]):
-                            # 补齐卡片标题，与分离页的同名卡片保持一致
                             cover_run_md = gr.Markdown(_t("### 执行与输出"))
                             _reg(cover_run_md, lambda lang: gr.update(value=tr(lang, "### 执行与输出")))
                             cover_denoise = gr.Checkbox(label=_t("降噪"), value=False,
@@ -1199,7 +1249,13 @@ def build_ui(app_module=None):
                                 for i in range(VOICE_PLAYER_COUNT)
                             ]
 
-                        # 卡片2：翻唱任务历史（选择任务 + 回放 + 改名/删除）
+                    # —— 右栏（1:1）：历史与素材 ——
+                    with gr.Column(scale=1):
+                        # 分区总标题：历史与素材区
+                        cover_zone_hist = gr.Markdown(_t("### 历史与素材"), elem_classes=["y2-zone"])
+                        _reg(cover_zone_hist, lambda lang: gr.update(value=tr(lang, "### 历史与素材")))
+
+                        # 卡片1：翻唱任务历史（选择任务 + 回放 + 改名/删除）
                         with gr.Group(elem_classes=["y2-sec"]):
                             # —— 翻唱任务历史：按文件夹选择，整组播放器回放全部轨道 ——
                             cover_hist_md = gr.Markdown(_t("### 翻唱任务历史"))
@@ -1210,6 +1266,11 @@ def build_ui(app_module=None):
                             _reg(cover_history_dd, lambda lang: gr.update(
                                 choices=_voice_task_history_choices("cover", lang),
                                 label=tr(lang, "选择翻唱任务")))
+                            # 「加载」按钮：选中 list 里的任务后手动载入回放
+                            # （进入页面 / 切 Tab 不再自动加载，必须点此按钮）
+                            with gr.Row(elem_classes=["y2-actions"]):
+                                cover_hist_load_btn = gr.Button(_t("加载"), variant="primary", size="sm")
+                                _reg(cover_hist_load_btn, lambda lang: gr.update(value=tr(lang, "加载")))
                             cover_selected_task = gr.State(value=None)
                             # 历史回放播放器组：选中任务后按文件夹填充全部轨道（每轨可下载）
                             cover_hist_audios = [
@@ -1284,17 +1345,16 @@ def build_ui(app_module=None):
                                          inputs=[lib_ref_dd, lib_ref_rename_input],
                                          outputs=[lib_ref_preview, lib_ref_dd])
 
-                # 任务历史回放（按文件夹）：选任务 → 整组播放器填充全部轨道
-                sep_history_dd.change(fn=on_voice_task_history_pick, inputs=sep_history_dd,
-                                      outputs=[*sep_hist_audios])
-                # 额外绑定：用户手动选下拉时，同步更新隐藏 State 组件
-                # （后续删除/改名按钮从 State 读 task_id，避免 Dropdown 被重置）
+                # 任务历史回放（按文件夹）：选中 list 任务后【点「加载」】才载入整组播放器
+                # （进入页面 / 切 Tab 不再自动加载；下拉 change 仅同步隐藏 State 供改名/删除取用）
                 sep_history_dd.change(fn=lambda tid: tid, inputs=sep_history_dd,
                                       outputs=sep_selected_task)
-                cover_history_dd.change(fn=on_voice_task_history_pick, inputs=cover_history_dd,
-                                        outputs=[*cover_hist_audios])
+                sep_hist_load_btn.click(fn=on_voice_task_history_pick, inputs=sep_history_dd,
+                                        outputs=[*sep_hist_audios])
                 cover_history_dd.change(fn=lambda tid: tid, inputs=cover_history_dd,
                                         outputs=cover_selected_task)
+                cover_hist_load_btn.click(fn=on_voice_task_history_pick, inputs=cover_history_dd,
+                                          outputs=[*cover_hist_audios])
 
                 # 项目管理（文件管理重构）：改项目名（重命名文件保留时间戳）/ 删除项目（整目录入回收站）
                 # 关键修复：inputs 用隐藏 State 组件而非 Dropdown，
@@ -1318,34 +1378,33 @@ def build_ui(app_module=None):
                 # （翻唱页删除后保持同步；新生成的歌曲也要能立即作为分离源，无需刷新页面）
                 # 注意：Gradio 6 中 gr.update(choices=...) 不传 value 会把 Dropdown 值重置，
                 # 必须用 _dd_update 同时传递 value=首项值。
-                # 同时更新隐藏 State：保存第一条任务记录的 task_id，供删除/改名按钮正确读取
+                # 任务历史下拉：只刷新列表，**不预选、不加载**（避免「下拉显示着任务名、
+                # 播放器却是空的」假选中），回放一律由「加载」按钮触发。
                 tab_sep.select(fn=lambda: (
                     _dd_update(_voice_source_history_choices(_CUR_LANG)),
-                    _dd_update(_voice_task_history_choices("separation")),
+                    gr.update(choices=_voice_task_history_choices("separation"), value=None),
                     _dd_update(_voice_stem_choices(_CUR_LANG)),
                     _dd_update(_voice_ref_choices(_CUR_LANG)),
                     _preview_first_update(_voice_stem_choices(_CUR_LANG)),
                     _preview_first_update(_voice_ref_choices(_CUR_LANG)),
-                    (_voice_task_history_choices("separation")[0][1]
-                     if _voice_task_history_choices("separation") else None),
-                    *_voice_task_first_players("separation")),
+                    None,                       # 隐藏 State：不预选任务
+                    *_fill_voice_players([])),  # 播放器清空：点「加载」才载入
                                outputs=[sep_src_history, sep_history_dd, lib_stem_dd, lib_ref_dd,
                                         lib_stem_preview, lib_ref_preview,
                                         sep_selected_task, *sep_hist_audios])
-                # 每次切到翻唱 Tab 时刷新翻唱源/音色库/伴奏/干声两来源/翻唱历史下拉 + 两处试听，
-                # 并按历史首条任务回填回放播放器（否则下拉显示着任务名、播放器却是空的）
+                # 每次切到翻唱 Tab 时刷新翻唱源/音色库/伴奏/干声两来源/翻唱历史下拉 + 两处试听；
+                # 任务历史下拉同样只刷新列表、不预选不加载（回放由「加载」按钮触发）
                 tab_cover.select(fn=lambda: (
                     _dd_update(_voice_cover_source_choices(_CUR_LANG)),
                     _dd_update(_voice_ref_choices(_CUR_LANG)),
                     _dd_update(_voice_stem_choices(_CUR_LANG)),
                     _dd_update(_voice_dry_sep_choices(_CUR_LANG)),
                     _dd_update(_voice_dry_upload_choices(_CUR_LANG)),
-                    _dd_update(_voice_task_history_choices("cover")),
+                    gr.update(choices=_voice_task_history_choices("cover"), value=None),
                     _preview_first_update(_voice_ref_choices(_CUR_LANG)),
                     _preview_first_update(_voice_stem_choices(_CUR_LANG)),
-                    (_voice_task_history_choices("cover")[0][1]
-                     if _voice_task_history_choices("cover") else None),
-                    *_voice_task_first_players("cover")),
+                    None,                       # 隐藏 State：不预选任务
+                    *_fill_voice_players([])),  # 播放器清空：点「加载」才载入
                                  outputs=[cover_src_history, cover_ref_dropdown, cover_acc_dd,
                                           cover_ref_dry_sep, cover_ref_dry_upload,
                                           cover_history_dd, cover_ref_preview, cover_acc_preview,

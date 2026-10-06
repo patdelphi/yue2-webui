@@ -417,11 +417,6 @@ def on_voice_task_history_pick(task_id):
     return callbacks_voice.on_voice_task_history_pick(_voice_deps(), task_id)
 
 
-def _voice_task_first_players(record_type):
-    """按默认首条任务回填播放器组（实现见 src/callbacks_voice.py）。"""
-    return callbacks_voice._voice_task_first_players(_voice_deps(), record_type)
-
-
 def on_voice_task_rename(task_id, new_name, record_type):
     """任务历史改项目名（实现见 src/callbacks_voice.py）。"""
     return callbacks_voice.on_voice_task_rename(_voice_deps(), task_id, new_name, record_type)

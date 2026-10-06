@@ -451,17 +451,25 @@ def test_schedule_preview_nonblocking_and_dedup(tmp_path, monkeypatch):
 
 
 def test_voice_stem_items_prefers_preview_keeps_full_for_mix():
-    """app 源码断言：回放优先取 preview，合成链路仍读 path；切 Tab 自动回填播放器组。"""
+    """app 源码断言：回放优先取 preview，合成链路仍读 path；历史回放改为点「加载」触发。"""
     from _app_bundle import app_bundle  # C1 拆分后源码级断言读 app bundle
     src = app_bundle()
     assert 'play = preview if preview and Path(preview).exists() else full' in src
     assert 'full = s.get("path", "")' in src          # 合成链路取原件
     # 存量记录无 preview 键：按 <原名>_preview.mp3 命名约定推导（免 DB 迁移）
     assert 'Path(full).with_name(f"{Path(full).stem}_preview.mp3")' in src
-    assert "def _voice_task_first_players(" in src     # 切 Tab 回填播放器组
-    assert '*_voice_task_first_players("separation")' in src
+    # 历史回放改为「选中 list 任务后点『加载』才载入」：不再有切 Tab 自动回填
+    assert "def _voice_task_first_players(" not in src      # 自动回填播放器已废弃
+    assert "sep_hist_load_btn.click(fn=on_voice_task_history_pick" in src
+    assert "cover_hist_load_btn.click(fn=on_voice_task_history_pick" in src
+    # 下拉 change 只同步隐藏 State，不再自动加载
+    assert "sep_history_dd.change(fn=on_voice_task_history_pick" not in src
+    assert "cover_history_dd.change(fn=on_voice_task_history_pick" not in src
+    # 切 Tab：历史下拉不预选（value=None）、播放器清空
+    assert src.count("*_fill_voice_players([])),") == 2
+    assert '_voice_task_history_choices("separation"), value=None' in src
+    assert '_voice_task_history_choices("cover"), value=None' in src
     assert "sep_selected_task, *sep_hist_audios]" in src
-    assert '*_voice_task_first_players("cover")' in src      # 翻唱 Tab 同样回填
     assert "cover_selected_task, *cover_hist_audios]" in src
 
 
