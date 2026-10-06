@@ -810,3 +810,16 @@ ode --check static/js/app.js` OK；全量 `pytest tests/ --ignore=tests/test_i18
 - **验证**：`py_compile` 全通过；UI 冒烟 `blocks=468`；symtable 静态检查无缺失全局名；全量 `pytest tests/ --ignore=tests/test_i18n.py -q` → **236 passed**。
 - **前端回归**：重启 9898 服务（pid 56352）后浏览器实测——7 Tab 全渲染；静态资源 `app.js?v=18`/wavesurfer/多轨 iframe 均 200；控制台无新增错误（仅既有 manifest.json 404）；语言切换 zh↔en 双向生效（Tab + lang-signal + 服务端 _CUR_LANG）；多轨编辑器 `multitrack.css?v=1`/`multitrack.js?v=1` 加载正常；三处 ABC 预览容器均在 DOM。
 - **未执行**：未 git commit / push（等用户明确批准）；未测真实生成/分离/翻唱任务与预设保存写盘；未跑 tests/test_i18n.py（按既有约定忽略）。
+
+## 2026-10-06 — 修复翻唱成品开头噪声（loudnorm 动态归一 → 静态增益 + 限幅器）
+
+- **用户诉求**：翻唱音质有问题，`cover_20261006_171926` 分轨都正常，但整曲开头有很大的噪声，问是哪儿来的。
+- **诊断**：ffmpeg astats 实测各分轨开头 0–0.5s——分离人声 -94.3dB、伴奏 -87.1dB、换嗓干声 -60.6dB，而成品 **-13.6dB/#峰 -1.49dB**；对同一换嗓干声做 A/B（仅 pan vs 加 loudnorm）→ 加 loudnorm 后开头为 **-13.56dB**，与成品逐位吻合。定位为 `worker.py::_convert` 人声链的 `loudnorm` 动态模式在静音段把噪声底抬高约 +50dB。与本次重构无关（worker.py 不在上次提交清单内）。
+- **用户决定**：选方案 A（整体 LUFS 静态增益 + 限幅器）。
+- **执行**：
+  - 新增 `worker._match_gain_db(target_lufs, input_lufs, max_db=18.0)`（钳 ±18dB，任一测量缺失返回 None）。
+  - `_convert`：分支前先算 `src_lufs`/`conv_lufs`/`match_db`；人声链改为 `pan → [aexciter] → volume=<match_db:+.2f>dB → alimiter=limit=0.841:level=false`；`match_db is None` 时仍回退原 RMS+峰值钳制路径（limit=0.98 不变）。
+  - 测试：`tests/test_voice_loudness.py` 新增 `TestMatchGainDb`（3 项）、`test_static_gain_keeps_silent_head_quiet`（合成"3.5s 噪声底 + 2s 正弦"信号，断言静态增益链开头 = 输入+增益且 < -40dB，并对照旧 loudnorm 链高 20dB 以上）、`test_convert_uses_static_gain_not_dynamic_loudnorm`（源码断言）。
+- **改动文件**：voice-tools/worker.py、tests/test_voice_loudness.py、Docs/changelog.md、chat_history.md。
+- **验证**：`py_compile` 通过；`tests/test_voice_loudness.py` 15 passed；全量 `pytest tests/ --ignore=tests/test_i18n.py -q` → **241 passed**；真实素材 A/B：开头 -13.56 → **-64.03dB**、整体 LUFS -13.95 → -14.28、60s 音乐段 -14.17 → -15.21dB。
+- **未执行**：未在 9898 上重跑翻唱（需 worker 加载新代码）；未 git commit / push（等确认）；未跑 tests/test_i18n.py。

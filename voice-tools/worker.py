@@ -459,6 +459,18 @@ def _lufs(path: str):
     return float(m.group(1)) if m else None
 
 
+def _match_gain_db(target_lufs, input_lufs, max_db: float = 18.0):
+    """按整体 LUFS 差算静态匹配增益（钳 ±max_db）；任一测量不可用（None）返回 None。
+
+    用恒定增益而非 loudnorm 动态归一：LUFS 对线性增益不变，
+    故「输入 LUFS + 本增益」即可精确落到目标 LUFS，且静音段乘常数后仍是静音
+    （loudnorm 动态模式会按段加增益，把人声静音段的噪声底抬成可闻噪声）。
+    """
+    if target_lufs is None or input_lufs is None:
+        return None
+    return max(-max_db, min(max_db, target_lufs - input_lufs))
+
+
 def _convert(seed_dir: str, source: str, ref: str, semi_tone: int,
              diffusion_steps: int, accompaniment: str, output_dir: str,
              gain_db: float = 0.0, denoise: bool = False,
@@ -621,20 +633,29 @@ def _convert(seed_dir: str, source: str, ref: str, semi_tone: int,
             _log(f"自定义伴奏响度对齐: {acc_gain_db:+.1f}dB"
                  f"（素材 {acc_lufs:.1f} -> 源 {ref_lufs:.1f} LUFS）")
     src_lufs = _lufs(source_vocals)
+    # 换嗓干声自身的整体响度，用于算静态匹配增益（与 src_lufs 之差）
+    conv_lufs = _lufs(converted_vocals)
+    match_db = _match_gain_db(src_lufs, conv_lufs)
     # P2 高频细节补偿（hf_enhance>0 时启用，默认 0 完全保持原链路行为）：
     # P1 实测换嗓 over-smoothing —— 谱滚降 6800~7900Hz（源 8950）、谱平坦度 0.10（源 0.197），
     # 高频非谐波细节被抹平，听感"发干/电"。用 ffmpeg aexciter 做谐波激励反向补偿。
-    # 位置放在 loudnorm 之前：激励抬高峰值后由 loudnorm 重新测量并归一到达标的 LUFS/TP，
-    # 无需额外限幅器（挂在 loudnorm 后会让其 TP=-1.5dB 承诺失效，可能引入新削波）。
+    # 位置放在 volume 之前：激励抬高峰值后由后面的静态增益与限幅器一并处理，
+    # 不会像挂在末尾那样破坏 TP 承诺（限幅器是链尾最后一级）。
     # freq=7500 起激励（覆盖歌声齿音/气息能量集中区），drive/blend 用 aexciter 默认（8.5/0）。
     exciter = f",aexciter=amount={hf_enhance:.2f}:freq=7500" if hf_enhance > 0 else ""
-    if src_lufs is not None:
-        _log(f"人声响度匹配: loudnorm 归一到 {src_lufs:.1f} LUFS（原声干声，TP=-1.5dB）"
+    if match_db is not None:
+        _log(f"人声响度匹配: 静态增益 {match_db:+.1f}dB"
+             f"（换嗓干声 {conv_lufs:.1f} -> 原声干声 {src_lufs:.1f} LUFS，TP≤-1.5dB）"
              + (f"；高频补偿 aexciter amount={hf_enhance:.2f}" if exciter else ""))
-        # 注意 pan 在 loudnorm 之前：换嗓输出为单声道，先复制成立体声再归一，
-        # 与原声干声（立体声）的 LUFS 声道求和口径一致；loudnorm 内部升 192k，需 aresample 回 48k
+        # 这里只用【整体 LUFS 差算一个恒定增益 + 限幅器兜底】，不再用 loudnorm 动态归一：
+        # loudnorm 动态模式按段调增益，人声开头/中部的静音段（换嗓噪声底 ≈ -63dB）会被
+        # 放大约 +50dB 顶到 -13dB，成品开头出现与音乐等响的宽带噪声（2026-10-06 实测复现）。
+        # 静态增益对静音段只是乘常数（静音仍是静音）；LUFS 对线性增益不变，
+        # 故平均响度仍精确对齐目标。限幅器 0.841 = -1.5dBFS，仅作峰值兜底。
+        # 注意 pan 在前：换嗓输出为单声道，先复制成立体声再计增益，
+        # 与原声干声（立体声）的 LUFS 声道求和口径一致。
         a0_chain = (f"[0:a]aresample=48000,pan=stereo|c0=c0|c1=c1{exciter},"
-                    f"loudnorm=I={src_lufs:.2f}:TP=-1.5:LRA=11,aresample=48000[a0]")
+                    f"volume={match_db:+.2f}dB,alimiter=limit=0.841:level=false[a0]")
     else:
         match_db = 0.0
         src_rms = _rms_db(source_vocals)

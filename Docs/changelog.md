@@ -1153,3 +1153,12 @@ o-store`、`sources` 列出 4 组分离素材、`peaks` 400 桶/时长 171.6s、
 - **验证**：`py_compile` 全通过；UI 构建冒烟 `blocks=468`；symtable 静态检查 6 个搬迁模块均无缺失全局名；全量 `pytest tests/ --ignore=tests/test_i18n.py -q` → **236 passed**。
 - **前端回归（9898）**：7 Tab 全部渲染；`app.js?v=18` / `wavesurfer` / 多轨 iframe 资源均 200；控制台无新增错误（仅既有 `manifest.json` 404）；语言切换 zh↔en 双向生效（Tab 标签 + `lang-signal` + 服务端 `_CUR_LANG`）；多轨编辑器外链 `multitrack.css?v=1` / `multitrack.js?v=1` 正常加载；三处 ABC 预览容器（generate / history / transcribe）均在 DOM。
 - **未执行**：未 git commit / push（等用户明确批准）；浏览器未覆盖真实生成/分离/翻唱任务与预设保存写盘。
+
+## 2026-10-06 — 修复翻唱成品开头宽带噪声（人声响度对齐改用静态增益 + 限幅器）
+
+- **现象**：翻唱成品（如 `cover_20261006_171926`）开头约 3–5 秒出现与音乐等响的宽带噪声；分离/换嗓各分轨本身正常。
+- **根因**：`voice-tools/worker.py::_convert` 的人声链用 `loudnorm`（动态模式）做响度对齐。该模式按短时响度按段调增益、且只受真峰值约束：换嗓干声开头是一段 ≈-63dB 的纯噪声底，被放大约 +50dB 顶到 -13.5dB（实测复现，与成品开头逐位吻合）；伴奏开头又是数字静音（-87dB），无人掩盖，故听感为"整曲开头很大的噪声"。
+- **修复（方案 A）**：新增 `_match_gain_db(target_lufs, input_lufs, max_db=18.0)`（按整体 LUFS 差算恒定增益，任一测量缺失返回 None）；人声链改为 `pan → [aexciter] → volume=<静态增益> → alimiter=limit=0.841:level=false`（0.841 = -1.5dBFS 峰值兜底）。LUFS 对线性增益不变，故平均响度仍精确对齐目标；静音段只是乘常数，仍是静音。`loudnorm` 仅保留在 `_lufs()` 测量用途。
+- **改动文件**：`voice-tools/worker.py`、`tests/test_voice_loudness.py`、`Docs/changelog.md`、`chat_history.md`。
+- **验证**：真实素材 A/B（同一换嗓干声 + 伴奏）——开头 0–0.5s 由 **-13.56dB → -64.03dB**（降 50dB），整体 LUFS -13.95 → **-14.28**（差 0.33LU，仍与源曲 -14.0 对齐），60s 音乐段 -14.17 → -15.21dB；`tests/test_voice_loudness.py` 15 passed；全量 `pytest tests/ --ignore=tests/test_i18n.py -q` → **241 passed**。
+- **未执行**：未在 UI 上重跑翻唱（worker 需下次请求/重启加载新代码）；未 git commit / push。
