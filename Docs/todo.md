@@ -1,7 +1,7 @@
 ﻿# yue2-webui 代码审计修复 TODO
 
 - **来源**：`Docs/code-audit-2026-10-06.md`（已逐条复核订正）
-- **状态**：已完成（A1–A10 + B4/B5/B6/B7/B8 + C3/C4/C5；未做 B1/B2/B3/C1/C6/C7），全量 pytest 227 passed
+- **状态**：已完成（A1–A10 + B1/B2/B3 + B4–B8 + C1–C6；仅 C7 待 staging 验证暂缓），全量 pytest 236 passed
 - **约定**：每项修复尽量先补测试；不顺手重构无关代码；危险操作（删除/回收）单独确认
 
 ---
@@ -40,12 +40,12 @@
 
 | # | 方案 | 风险 | 状态 |
 |---|---|---|---|
-| C2 | 历史查询走 SQL（同 A4，合并处理） | 中高 | 未做 |
+| C2 | 历史查询走 SQL（同 A4，合并处理） | 中高 | ✅ 已完成（随 A4） |
 | C3 | Task 增加 `max_runtime` 任务级超时，防队列卡死 | 中 | ✅ 已完成 |
 | C4 | `_make_preview` 转码后台化 | 中 | ✅ 已完成 |
 | C5 | `on_preset_save` 24 参数改 dict/dataclass；`_generate_worker` 12 元组改结构 | 中 | ✅ 已完成 |
-| C1 / C6 | 拆分 app.py（3699 行）/ multitrack 单文件（134KB） | 高（建议暂缓） | 未做 |
-| C7 | `(record_type, source_md5)` 加索引（需 staging 验证） | 中（暂缓） | 未做 |
+| C1 / C6 | 拆分 app.py（3699→842 行）/ multitrack 单文件（拆出 CSS/JS） | 高 | ✅ 已完成 |
+| C7 | `(record_type, source_md5)` 加索引（需 staging 验证） | 中 | ⏸ 暂缓（待 staging） |
 
 ---
 
