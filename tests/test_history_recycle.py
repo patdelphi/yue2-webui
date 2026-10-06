@@ -150,6 +150,28 @@ def test_real_recycle_on_windows():
         print("PASS: 文件/目录均通过 SHFileOperationW 移入回收站")
 
 
+def test_recycle_dir_removes_whole_dir(tmp_path):
+    """recycle_dir：递归回收目录内文件并删空目录（生成全失败时清理孤儿目录）。"""
+    d = tmp_path / "song_20260101_000000"
+    (d / "sub").mkdir(parents=True)
+    (d / "a.wav").write_bytes(b"x")
+    (d / "sub" / "b.abc").write_text("X:1", encoding="utf-8")
+    removed = H.recycle_dir(d)
+    assert removed == 2
+    assert not d.exists()
+    # 不存在的目录：返回 0，不抛异常
+    assert H.recycle_dir(tmp_path / "nope") == 0
+
+
+def test_app_recycles_output_dir_on_total_failure():
+    """app.py 生成全失败（非取消）分支必须调用 _recycle_output_dir 回收目录。"""
+    src = (Path(__file__).parent.parent / "app.py").read_text(encoding="utf-8-sig")
+    assert "def _recycle_output_dir(" in src
+    idx = src.index("_recycle_output_dir(output_dir)")
+    window = src[idx - 200:idx]  # 调用点前应处于"全部失败"分支（紧随取消判定）
+    assert "任务已取消" in window
+
+
 if __name__ == "__main__":
     test_delete_is_file_level_not_directory_level()
     test_auto_prune_uses_constant_default()

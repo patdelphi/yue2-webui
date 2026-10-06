@@ -95,6 +95,30 @@ def delete_files_to_recycle(files: list) -> int:
     return removed
 
 
+def recycle_dir(path) -> int:
+    """把一个目录整体回收：内部文件逐个移入系统回收站，再自底向上删除空目录。
+
+    仅回收确属该目录的内容（非空目录 rmdir 失败即跳过，天然避免误删他人文件），
+    不使用 rm 整目录，保证可还原（如生成全失败时清理孤儿产物目录）。
+    目录不存在返回 0。返回回收的文件数。
+    """
+    d = Path(path)
+    if not d.is_dir():
+        return 0
+    removed = delete_files_to_recycle([p for p in d.rglob("*") if p.is_file()])
+    for sub in sorted((p for p in d.rglob("*") if p.is_dir()),
+                      key=lambda p: len(p.parts), reverse=True):
+        try:
+            sub.rmdir()
+        except OSError:
+            pass
+    try:
+        d.rmdir()
+    except OSError:
+        pass
+    return removed
+
+
 # 项目产物文件名规范：<项目名>_<时间戳>[_后缀].<ext>（项目名可空 -> 时间戳开头）
 # 解析用途：rename_project 按 ts 段定位，仅替换项目名段，保留时间戳/后缀
 _FILENAME_TS_RE = re.compile(r"^(?:(?P<proj>.+)_)?(?P<ts>\d{8}_\d{6})(?P<rest>.*)$")
@@ -157,6 +181,10 @@ class HistoryManager:
              "audio_path", "output_dir", "backend", "status", "abc_path",
              "out_format", "record_type", "derived_from", "root_task_id",
              "stems", "project", "source_md5")
+
+    # 历史表格所需列（不含 lyrics 全文，避免全表大字段 IO）
+    _DF_COLS = ("created_at", "project", "style", "status", "cot",
+                "audio_duration_seconds", "generation_time_seconds", "task_id")
 
     def __init__(self, db_file: Path, outputs_root: Path):
         self.db_file = Path(db_file)
@@ -258,6 +286,16 @@ class HistoryManager:
             self._conn.execute(
                 f"UPDATE history SET {', '.join(c + ' = :' + c for c in self._COLS)} "
                 "WHERE id = :rid", {**self._record_values(record), "rid": row_id})
+
+    def _update_many(self, items: list) -> None:
+        """批量更新多条记录（单事务）：items = [(row_id, record), ...]，减少事务开销。"""
+        if not items:
+            return
+        params = [{**self._record_values(rec), "rid": rid} for rid, rec in items]
+        with self._conn:
+            self._conn.executemany(
+                f"UPDATE history SET {', '.join(c + ' = :' + c for c in self._COLS)} "
+                "WHERE id = :rid", params)
 
     def _delete_ids(self, row_ids: list) -> None:
         """按行 id 批量删除（事务：异常自动回滚）。"""
@@ -496,6 +534,7 @@ class HistoryManager:
                 new = renames.get(os.path.normcase(str(webui_root / p)))
                 return str(Path(new).relative_to(webui_root)) if new else path
 
+            pending = []  # 收集待回写记录，循环结束后单事务批量更新
             for rid, e in self._select_all():
                 if not self._same_output_dir(e.output_dir, output_dir):
                     continue
@@ -506,7 +545,8 @@ class HistoryManager:
                     if isinstance(s, dict):
                         s["path"] = _remap(s.get("path", ""))
                         s["preview"] = _remap(s.get("preview", ""))
-                self._update(rid, e)  # 逐条回写数据库（事务）
+                pending.append((rid, e))
+            self._update_many(pending)  # 单事务批量回写数据库
             return len(renames)
 
     def delete_project(self, output_dir: str) -> int:
@@ -565,7 +605,12 @@ class HistoryManager:
                 self._conn.execute("DELETE FROM history")
 
     def auto_prune(self, max_entries: int = HISTORY_MAX_ENTRIES):
-        """Remove oldest entries if over the limit."""
+        """Remove oldest entries if over the limit。
+
+        作为"写操作后"的统一收尾钩子：先 prune_missing 清理文件已缺失的记录
+        （读取路径不再触发它，避免每次读全表 stat），再按上限裁剪最旧条目。
+        """
+        self.prune_missing()
         with self._lock:
             all_rows = self._select_all()
             if len(all_rows) <= max_entries:
@@ -619,30 +664,69 @@ class HistoryManager:
                     return rec
             return None
 
-    def to_dataframe_rows(self, record_types=None) -> list[list]:
-        """Convert entries to rows for Gradio Dataframe.
+    @staticmethod
+    def _type_where(record_types) -> tuple:
+        """构造类型过滤的 WHERE 子句与参数元组；record_types=None 表示不过滤。
+
+        历史数据 record_type 为空时按 generation 处理（与旧行为一致）。
+        """
+        if record_types is None:
+            return "", ()
+        types = list(record_types)
+        if not types:
+            return " WHERE 0", ()
+        conds = " OR ".join(["COALESCE(NULLIF(record_type, ''), 'generation') = ?"] * len(types))
+        return f" WHERE ({conds})", tuple(types)
+
+    def count_rows(self, record_types=None) -> int:
+        """按类型统计记录数（SQL COUNT，不读全表、不含 lyrics）。"""
+        where, params = self._type_where(record_types)
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT COUNT(*) AS c FROM history{where}", params).fetchone()
+            return int(row["c"]) if row else 0
+
+    def task_id_at(self, record_types=None, offset: int = 0) -> Optional[str]:
+        """取按 id 倒序第 offset 条记录的 task_id（SQL LIMIT 1 OFFSET，避免读全表）。"""
+        if offset < 0:
+            return None
+        where, params = self._type_where(record_types)
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT task_id FROM history{where} ORDER BY id DESC LIMIT 1 OFFSET ?",
+                params + (int(offset),)).fetchone()
+            return row["task_id"] if row else None
+
+    def to_dataframe_rows(self, record_types=None, limit=None, offset=0) -> list[list]:
+        """Convert entries to rows for Gradio Dataframe。
 
         record_types: 可选类型过滤（如 ("generation",)）；None 返回全部（向后兼容）。
         歌曲历史页只展示生成记录，分离/翻唱记录在各自 Tab 的历史区查看。
+        limit/offset: 可选分页（SQL LIMIT/OFFSET），避免一次读全表。
+        仅 SELECT 表格所需列（不含 lyrics 全文），且读取路径不再触发 prune_missing
+        （改为写操作后由 auto_prune 统一收尾），避免每次读都全表 stat。
         列序：时间, 项目名, 风格, 模式, 音频时长, 生成耗时, Task ID。
         """
-        self.prune_missing()
+        where, params = self._type_where(record_types)
+        sql = f"SELECT {', '.join(self._DF_COLS)} FROM history{where} ORDER BY id DESC"
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            params = params + (int(limit), int(offset))
+        with self._lock:
+            db_rows = self._conn.execute(sql, params).fetchall()
         rows = []
-        for e in self.list_all():  # RLock 可重入：持锁状态下调 list_all 安全
-            # 类型过滤：不在指定类型内的记录跳过（record_type 缺省视为 generation）
-            if record_types is not None and \
-                    getattr(e, "record_type", "generation") not in record_types:
-                continue
-            style_short = e.style[:40] + "..." if len(e.style) > 40 else e.style
-            if e.status == "final":
+        for r in db_rows:
+            style = r["style"] or ""
+            style_short = style[:40] + "..." if len(style) > 40 else style
+            if r["status"] == "final":
                 style_short = f"🏆 {style_short}"
             rows.append([
-                e.created_at,
-                getattr(e, "project", "") or "",
+                r["created_at"],
+                r["project"] or "",
                 style_short,
-                e.cot,
-                f"{e.audio_duration_seconds:.1f}s",
-                f"{e.generation_time_seconds:.1f}s",
-                e.task_id,
+                r["cot"],
+                f"{r['audio_duration_seconds'] or 0:.1f}s",
+                f"{r['generation_time_seconds'] or 0:.1f}s",
+                r["task_id"],
             ])
         return rows

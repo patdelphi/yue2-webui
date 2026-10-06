@@ -771,3 +771,21 @@ ode --check static/js/app.js` OK；全量 `pytest tests/ --ignore=tests/test_i18
 - **改动文件**：README.md、chat_history.md。
 - **验证**：CRLF 计数 394、LoneLF 0、BOM 存在。
 - **未执行**：push 前需用户最终确认（本条随 commit 一起提交）。
+
+## 2026-10-06 代码探查报告（只读审计，未改代码）
+
+- **任务**：探查 yue2-webui 代码，找出错误、冗余、可优化点，输出探查报告。
+- **过程**：根目录结构扫描 + 精读 src/（history、queue_manager、voice_client、voice_ui_handlers、mix_render、postprocess、mix_web）+ app.py 关键段（_generate_worker、历史分页、模型检查、队列状态）+ backend_gguf 子进程段 + .gitignore/static/tests 概览；按顺序使用两个 Explore subagent 定位代码（其只做定位，结论均经人工核实行号）。
+- **主要发现**（详见当次对话报告）：
+  - 错误：backend_gguf 取消阻塞读 stdout 无超时+kill 后未 wait；postprocess 无异常处理会吞掉成功生成的历史记录；生成失败孤儿目录不回收；历史页每次翻页 2 次全表扫描+全记录磁盘 stat；_cancel_notify 线程 30min 空等堆积；排队中取消不进最近任务环形缓冲。
+  - 冗余：_probe_duration 三处重复实现；separate/cover/ensure_separation 三段重复管线；app.js 三套 ABC 预览初始化；模块内冗余局部导入；根目录 =1.47 垃圾文件。
+  - 优化：app.py 3286 行建议拆分；历史查询加 SQL 过滤+指定列+prune 降频；任务级超时；multitrack/index.html 134KB 单文件。
+- **改动文件**：无（纯探查）；验证：行号均经 Read 核实。
+
+## 2026-10-06 09:49 — 按审计文档修复代码（A 类全修 + B 类清理）
+
+- **需求**：更新文档，然后按文档进行代码修复。
+- **确认范围**：A 类全部（A1–A10）+ B 类低风险清理（B4/B5/B6/B7/B8）；A4 与 C2 合并；不做 B1/B2/B3/C1/C6/C7。A1 取「看门狗线程 + 宽松总超时 1800s」。
+- **改动文件**：app.py、src/backend_gguf.py、src/history.py、src/postprocess.py、src/queue_manager.py、src/voice_client.py、src/voice_ui_handlers.py、src/mix_web.py、src/i18n.py；tests/test_backend_watchdog.py（新）、tests/test_postprocess.py（新）、tests/test_generate_defense.py（新）、tests/test_history_filter.py、tests/test_history_recycle.py、tests/test_mix_web.py、tests/test_queue.py、tests/test_voice_client.py、tests/test_voice_handlers.py；删除根目录 `=1.47`。
+- **验证**：全量 `pytest tests/ --ignore=tests/test_i18n.py -q` → **219 passed**。
+- **未执行**：未 git commit / push（等用户明确批准）；未做 B1/B2/B3/C1/C6/C7。

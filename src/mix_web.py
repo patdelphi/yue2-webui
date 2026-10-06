@@ -67,6 +67,8 @@ _PEAK_TIMEOUT = 120        # 单轨解码超时（秒）
 _PEAK_CACHE_MAX = 16
 _peak_cache: "OrderedDict" = OrderedDict()
 _peak_lock = threading.Lock()
+# 每个缓存键一把锁：避免并发请求对同一 key 重复解码（check-then-compute 竞态）
+_peak_key_locks: dict = {}
 
 _TASKS_MAX = 20
 _tasks: "OrderedDict" = OrderedDict()
@@ -159,30 +161,46 @@ def compute_peaks(path, buckets: int = PEAK_BUCKETS_DEFAULT) -> dict:
         cached = _peak_cache.get(key)
         if cached is not None:
             return cached
+        # 同一 key 共用一把锁：并发请求串行化，只有一个真正解码
+        key_lock = _peak_key_locks
+        lock = key_lock.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            key_lock[key] = lock
 
-    samples = _decode_mono(path)
-    if not samples:
-        return {"peaks": [], "duration": 0.0}
+    with lock:
+        # 双重检查：等锁期间可能已被先到的请求填充
+        with _peak_lock:
+            cached = _peak_cache.get(key)
+            if cached is not None:
+                return cached
 
-    total = len(samples)
-    duration = total / float(_PEAK_SR)
-    step = max(1, total // buckets)
-    scale = 1.0 / 32768.0
-    peaks = []
-    for start in range(0, total, step):
-        chunk = samples[start:start + step]
-        if not chunk:
-            break
-        peaks.append([min(chunk) * scale, max(chunk) * scale])
-        if len(peaks) >= buckets:
-            break
+        samples = _decode_mono(path)
+        if not samples:
+            return {"peaks": [], "duration": 0.0}
 
-    result = {"peaks": peaks, "duration": duration}
-    with _peak_lock:
-        _peak_cache[key] = result
-        while len(_peak_cache) > _PEAK_CACHE_MAX:
-            _peak_cache.popitem(last=False)
-    return result
+        total = len(samples)
+        duration = total / float(_PEAK_SR)
+        step = max(1, total // buckets)
+        scale = 1.0 / 32768.0
+        peaks = []
+        for start in range(0, total, step):
+            chunk = samples[start:start + step]
+            if not chunk:
+                break
+            peaks.append([min(chunk) * scale, max(chunk) * scale])
+            if len(peaks) >= buckets:
+                break
+
+        result = {"peaks": peaks, "duration": duration}
+        with _peak_lock:
+            _peak_cache[key] = result
+            while len(_peak_cache) > _PEAK_CACHE_MAX:
+                _peak_cache.popitem(last=False)
+            # 锁表随缓存回收，避免无界增长
+            if len(_peak_key_locks) > _PEAK_CACHE_MAX:
+                _peak_key_locks.clear()
+        return result
 
 
 # ------------------------------------------------------------------ 素材清单

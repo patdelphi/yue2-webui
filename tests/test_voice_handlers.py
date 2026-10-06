@@ -166,6 +166,66 @@ def test_cover_worker_cancelled_by_worker_maps_to_cancelled(tmp_path):
     assert h.history_mgr.list_all() == []
 
 
+def test_ensure_separation_passes_cancel_event(tmp_path):
+    """翻唱前置的同步分离阶段：cancel_event 必须透传给 worker；UI 取消（事件已置位）
+    时映射为 TaskCancelledError，且回收本次衍生目录、不写历史。"""
+    import threading
+    ev = threading.Event()
+    vc = _FakeVoiceClient(_FakeResult(ok=False, error="worker stopped"))
+    h = _make_handlers(tmp_path, vc)
+    src = tmp_path / "src.wav"
+    src.write_bytes(b"\x00")
+    ev.set()  # 模拟 UI 已在同步阶段点了取消
+    with pytest.raises(TaskCancelledError):
+        h.ensure_separation(str(src), project="p", cancel_event=ev)
+    call = vc.calls[0]
+    assert call[0] == "separate"
+    assert call[2].get("cancel_event") is ev  # 事件原样透传
+    assert h.history_mgr.list_all() == []  # 取消不写历史
+    outputs = tmp_path / "yue2-webui" / "outputs"
+    # 衍生的 separations_* 目录已被回收（不存在残留）
+    assert not [p for p in outputs.iterdir()
+                if p.is_dir() and p.name.startswith("separations_")]
+
+
+def test_persist_upload_dedup_reuses_same_file(tmp_path):
+    """上传留存：同内容重复上传复用同一份（不产生第二份副本）。"""
+    vc = _FakeVoiceClient()
+    h = _make_handlers(tmp_path, vc)
+    src = tmp_path / "song.wav"
+    src.write_bytes(b"hello-world")
+    p1 = h.persist_upload(str(src), "sep_src")
+    p2 = h.persist_upload(str(src), "sep_src")
+    assert p2 == p1
+    assert len(h.list_uploads("sep_src")) == 1
+
+
+def test_persist_upload_skips_md5_when_size_differs(tmp_path, monkeypatch):
+    """A9：去重先比 size——候选文件 size 不同时不应再算 md5（避免 O(N×文件大小) 全量重算）。"""
+    import hashlib
+    calls = {"n": 0}
+    real_md5 = hashlib.md5
+
+    def _counting(*a, **k):
+        calls["n"] += 1
+        return real_md5(*a, **k)
+
+    monkeypatch.setattr(hashlib, "md5", _counting)
+    vc = _FakeVoiceClient()
+    h = _make_handlers(tmp_path, vc)
+
+    a = tmp_path / "a.wav"
+    a.write_bytes(b"aaaa")          # size 4
+    h.persist_upload(str(a), "sep_src")   # 1 次 md5（算 src，无候选）
+    assert calls["n"] == 1
+
+    b = tmp_path / "b.wav"
+    b.write_bytes(b"bbbbbbbb")      # size 8 ≠ 4
+    h.persist_upload(str(b), "sep_src")
+    # 只多算一次 src 的 md5；候选项因 size 不同被短路，未算 md5
+    assert calls["n"] == 2
+
+
 def test_refs_save_and_list(tmp_path):
     vc = _FakeVoiceClient()
     h = _make_handlers(tmp_path, vc)
@@ -423,7 +483,9 @@ def test_rename_and_delete_move_preview_sibling(tmp_path, monkeypatch):
     assert not prev.exists()                                     # 旧预览件已随改名搬走
     assert dest.with_name("newname_a1b2_preview.mp3").exists()
     seen = []
-    monkeypatch.setattr("history.delete_files_to_recycle", lambda files: seen.extend(files))
+    # delete_files_to_recycle 已上提到模块顶部 import，需 patch 本模块的绑定名
+    monkeypatch.setattr(voice_ui_handlers, "delete_files_to_recycle",
+                        lambda files: seen.extend(files))
     h.delete_ref(str(dest))
     assert sorted(Path(p).name for p in seen) == ["newname_a1b2.wav", "newname_a1b2_preview.mp3"]
 

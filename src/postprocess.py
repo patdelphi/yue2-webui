@@ -1,9 +1,12 @@
 """Audio post-processing: normalize, fade, trim, metadata."""
 import json
+import logging
 import numpy as np
 import soundfile as sf
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 def postprocess_audio(
@@ -139,5 +142,6 @@ def _embed_metadata(wav_path: Path, title: str = "", style: str = "", seed: int 
             audio.add(TPE1(encoding=3, text=["YuE2 Music Studio"]))
             audio.add(COMM(encoding=3, lang="zho", desc="Comment", text=[comment]))
             audio.save(str(wav_path))
-    except Exception:
-        pass
+    except Exception as e:
+        # 元数据写入为可选增强（sidecar JSON 已落盘）：失败仅记日志，不静默吞掉
+        logger.warning("嵌入音频元数据失败（sidecar JSON 仍可用）: %s: %s", wav_path, e)

@@ -29,7 +29,7 @@ from backend_gguf import GGUFBackend
 from style_presets import STYLE_PRESETS
 from vocal_presets import VOCAL_PRESETS, INSTRUMENT_PRESETS, MOOD_PRESETS, LANGUAGE_PRESETS, GENRE_PRESETS
 from lyrics_templates import LYRICS_TEMPLATES
-from history import HistoryManager, HistoryRecord, sanitize_project, _FILENAME_TS_RE
+from history import HistoryManager, HistoryRecord, sanitize_project, _FILENAME_TS_RE, recycle_dir
 from postprocess import postprocess_audio
 from queue_manager import queue_manager, TaskType, TaskStatus, TaskCancelledError
 from i18n import tr, normalize_lang
@@ -103,6 +103,22 @@ def _unregister_task(channel: str, task_id: str):
             tasks.discard(task_id)
             if not tasks:
                 _active_tasks.pop(channel, None)
+
+
+# 队列外同步阶段的取消事件（如翻唱前的 ensure_separation）：
+# 该阶段尚未提交队列任务、没有 task_id，故单独登记 channel → Event 供取消按钮触发
+_pending_cancel: dict = {}
+
+
+def _set_pending_cancel(channel: str, event: threading.Event) -> None:
+    """登记队列外同步阶段的取消事件（同一 channel 后写覆盖）。"""
+    with _active_tasks_lock:
+        _pending_cancel[channel] = event
+
+
+def _clear_pending_cancel(channel: str) -> None:
+    with _active_tasks_lock:
+        _pending_cancel.pop(channel, None)
 
 BUILTIN_PRESETS = {
     "默认": {
@@ -299,6 +315,18 @@ def on_generate(
         _unregister_task("generation", task.task_id)
 
 
+def _recycle_output_dir(output_dir: Path) -> None:
+    """回收生成失败的孤儿产物目录（转交 history.recycle_dir，异常仅记日志）。
+
+    与 voice 侧 _recycle_created_derived 行为一致（不 rm 整目录，保证可还原）；
+    回收失败不掩盖原始生成错误。
+    """
+    try:
+        recycle_dir(output_dir)
+    except Exception:
+        logger.exception("孤儿生成目录回收失败(已忽略): %s", output_dir)
+
+
 def _generate_worker(
     _task,
     project, style, lyrics, cot, seeds, cfg_scale, num_inference_steps, out_format, batch_count,
@@ -308,6 +336,11 @@ def _generate_worker(
     lang="zh",
 ):
     """Worker function that runs in the queue thread. Returns the result tuple."""
+
+    # 防御：种子列表与批量数对齐（UI 已保证成对；worker 层兜底，避免 seeds[i] 越界）。
+    # 种子为空时给一个随机种子，批量数不超过实际种子数。
+    seeds = [int(s) for s in (seeds or [])] or [random.randint(0, 2**31 - 1)]
+    batch_count = max(1, min(int(batch_count), len(seeds)))
 
     params = GenerationParams(
         style=style.strip(),
@@ -342,7 +375,6 @@ def _generate_worker(
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base_task_id = f"song_{timestamp}"           # 目录名 / 历史 task_id（不含项目名，改名不动目录）
     file_stem = f"{project}_{timestamp}" if project else timestamp  # 产物文件名主干
-    batch_count = int(batch_count)
     output_dir = WEBUI_ROOT / "outputs" / base_task_id
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -358,9 +390,7 @@ def _generate_worker(
         label = phase_labels.get(p.get("phase", ""), tr(lang, "处理中..."))
         _task.push_progress(0, label)
 
-    batch_count = int(batch_count)
     results = []
-    seeds = [int(s) for s in seeds]
 
     for i in range(batch_count):
         if _task.cancel_event and _task.cancel_event.is_set():
@@ -390,6 +420,8 @@ def _generate_worker(
     if not successful:
         if _task.cancel_event.is_set():
             raise TaskCancelledError(tr(lang, "任务已取消"))
+        # 全部变体失败（非取消）：回收本次生成的孤儿目录（含半成品），避免残留且无历史记录
+        _recycle_output_dir(output_dir)
         failed_msg = results[0][3].error_message if results else tr(lang, "未知错误")
         raise ValueError(f"{tr(lang, '生成失败')}: {failed_msg}")
 
@@ -406,24 +438,29 @@ def _generate_worker(
             if wav_path.exists():
                 _task.push_progress(0, tr(lang, "后处理音频..."))
                 # 携带完整生成/采样参数写入 sidecar JSON（cfg/ODE/批量/采样等）
-                postprocess_audio(
-                    wav_path,
-                    normalize=normalize, fade=fade, trim=trim, metadata=metadata,
-                    style=params.style, seed=variant_seed,
-                    out_format=params.out_format.value,
-                    extra_meta={
-                        "cot": params.cot.value,
-                        "cfg_scale": params.cfg_scale if params.cfg_scale is not None else 0,
-                        "num_inference_steps": params.num_inference_steps,
-                        "batch_count": batch_count,
-                        "variant_index": idx + 1,
-                        "out_format": params.out_format.value,
-                        "model_gguf": backend.main_model,
-                        "vae_gguf": backend.vae_model,
-                        "abc_sampling": asdict(params.abc_sampling),
-                        "semantic_sampling": asdict(params.semantic_sampling),
-                    },
-                )
+                try:
+                    postprocess_audio(
+                        wav_path,
+                        normalize=normalize, fade=fade, trim=trim, metadata=metadata,
+                        style=params.style, seed=variant_seed,
+                        out_format=params.out_format.value,
+                        extra_meta={
+                            "cot": params.cot.value,
+                            "cfg_scale": params.cfg_scale if params.cfg_scale is not None else 0,
+                            "num_inference_steps": params.num_inference_steps,
+                            "batch_count": batch_count,
+                            "variant_index": idx + 1,
+                            "out_format": params.out_format.value,
+                            "model_gguf": backend.main_model,
+                            "vae_gguf": backend.vae_model,
+                            "abc_sampling": asdict(params.abc_sampling),
+                            "semantic_sampling": asdict(params.semantic_sampling),
+                        },
+                    )
+                except Exception:
+                    # 后处理失败不阻断历史写入：音频已落盘，继续登记记录，避免孤儿文件
+                    logger.exception("后处理失败(已忽略，音频已落盘): %s", wav_path)
+                    continue
                 if result.mp3_path:
                     new_mp3 = backend.re_export_mp3(wav_path)
                     if new_mp3:
@@ -1366,13 +1403,24 @@ def on_voice_cover(source_history, source_upload, ref_library, ref_dry_upload,
         # 原唱路径 → 先 ensure_separation（查重 / 同步分离 + 持久化）
         source_orig, from_upload = _resolve_voice_source(source_history, source_upload)
         project = _project_from_source(source_orig)
+        # 该分离在进入队列前同步执行，不带 task_id：登记一个取消事件，
+        # 让「取消」按钮在此阶段也能立即中止（否则点取消无效）。
+        precancel = threading.Event()
+        _set_pending_cancel("cover", precancel)
         try:
-            sep_task_id = voice_handlers.ensure_separation(source_orig, project)
+            sep_task_id = voice_handlers.ensure_separation(source_orig, project,
+                                                           cancel_event=precancel)
+        except TaskCancelledError:
+            yield (*[gr.update()] * VOICE_PLAYER_COUNT, tr(_CUR_LANG, "任务已取消"),
+                   gr.update(interactive=True), gr.update())
+            return
         except Exception as e:
             yield (*[gr.update()] * VOICE_PLAYER_COUNT,
                    tr(_CUR_LANG, "源音频分离失败") + f": {e}",
                    gr.update(interactive=True), gr.update())
             raise gr.Error(str(e))
+        finally:
+            _clear_pending_cancel("cover")
         # sep_task_id = "sep_task:<task_id>" → 走复用分支解析
         entry = history_mgr.get(sep_task_id.split(":", 1)[1])
         stems = {s.get("type"): s.get("path", "") for s in (getattr(entry, "stems", None) or [])
@@ -1448,9 +1496,13 @@ def on_voice_cancel(channel):
     """
     with _active_tasks_lock:
         task_ids = _active_tasks.pop(channel, set())
+        pending = _pending_cancel.get(channel)
+    # 队列外同步阶段（如翻唱前的 ensure_separation）：设置事件让该阶段尽快中止
+    if pending is not None:
+        pending.set()
     for task_id in task_ids:
         queue_manager.cancel_task_by_id(task_id)
-    if task_ids:
+    if task_ids or pending is not None:
         return tr(_CUR_LANG, "正在取消...")
     return tr(_CUR_LANG, "没有正在运行的任务")
 
@@ -1614,10 +1666,11 @@ def _history_page_info_text(page, pages, total):
 def refresh_history():
     """Refresh history dataframe (first page)."""
     # 歌曲历史页只展示生成记录；分离/翻唱记录在各自 Tab 的历史区查看
-    rows = history_mgr.to_dataframe_rows(record_types=("generation",))
-    page_rows = rows[:HISTORY_PAGE_SIZE]
-    total = len(rows)
+    # SQL 分页 + COUNT：只取本页列、不读全表（A4）
+    total = history_mgr.count_rows(record_types=("generation",))
     pages = max(1, (total + HISTORY_PAGE_SIZE - 1) // HISTORY_PAGE_SIZE)
+    page_rows = history_mgr.to_dataframe_rows(record_types=("generation",),
+                                              limit=HISTORY_PAGE_SIZE, offset=0)
     return page_rows, _history_page_info_text(1, pages, total)
 
 
@@ -1629,13 +1682,13 @@ def refresh_history_full():
 
 def _get_history_page(page):
     """Get a specific page of history. Returns (rows, page_info)."""
-    # 与 refresh_history 一致：仅生成记录进入歌曲历史分页
-    rows = history_mgr.to_dataframe_rows(record_types=("generation",))
-    total = len(rows)
+    # 与 refresh_history 一致：仅生成记录进入歌曲历史分页（SQL LIMIT/OFFSET）
+    total = history_mgr.count_rows(record_types=("generation",))
     pages = max(1, (total + HISTORY_PAGE_SIZE - 1) // HISTORY_PAGE_SIZE)
     page = max(0, min(int(page), pages - 1))
-    start = page * HISTORY_PAGE_SIZE
-    page_rows = rows[start:start + HISTORY_PAGE_SIZE]
+    page_rows = history_mgr.to_dataframe_rows(record_types=("generation",),
+                                              limit=HISTORY_PAGE_SIZE,
+                                              offset=page * HISTORY_PAGE_SIZE)
     return page_rows, _history_page_info_text(page + 1, pages, total)
 
 
@@ -1648,9 +1701,9 @@ def on_history_prev_page(current_page):
 def on_history_next_page(current_page):
     """Go to next page."""
     # 页数按过滤后的记录集计算（与 refresh_history/_get_history_page 一致），
-    # 否则存在分离/翻唱记录时总页数会偏大
-    rows = history_mgr.to_dataframe_rows(record_types=("generation",))
-    pages = max(1, (len(rows) + HISTORY_PAGE_SIZE - 1) // HISTORY_PAGE_SIZE)
+    # 否则存在分离/翻唱记录时总页数会偏大；COUNT 走 SQL，不读全表
+    total = history_mgr.count_rows(record_types=("generation",))
+    pages = max(1, (total + HISTORY_PAGE_SIZE - 1) // HISTORY_PAGE_SIZE)
     new_page = min(pages - 1, int(current_page) + 1)
     return _get_history_page(new_page) + (new_page,)
 
@@ -1662,10 +1715,10 @@ def _load_history_entry(row_index, current_state):
     注意：行号映射基于与表格一致的过滤记录集（generation），否则选中行会错位
     （曾导致点击生成记录实际选中 separation 记录）。
     """
-    rows = history_mgr.to_dataframe_rows(record_types=("generation",))
-    if row_index < 0 or row_index >= len(rows):
+    # 只按行号取该条 task_id（SQL LIMIT 1 OFFSET），不再读全表（A4）
+    task_id = history_mgr.task_id_at(record_types=("generation",), offset=row_index)
+    if row_index < 0 or not task_id:
         return current_state, None, tr(_CUR_LANG, "请选择一条记录"), "", "", "", "", "", ""
-    task_id = rows[row_index][6]  # 列序：时间/项目名/风格/模式/时长/耗时/TaskID
     entry = history_mgr.get(task_id)
     if not entry:
         return current_state, None, tr(_CUR_LANG, "记录不存在"), "", "", "", "", "", ""

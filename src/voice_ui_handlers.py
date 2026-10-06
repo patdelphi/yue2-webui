@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
-from history import HistoryRecord, sanitize_project
+from history import HistoryRecord, HistoryManager, sanitize_project, delete_files_to_recycle
 from queue_manager import queue_manager, TaskCancelledError, TaskStatus, TaskType
 from voice_client import VoiceClient, VoiceResult
 
@@ -188,7 +188,7 @@ class VoiceHandlers:
         留存是尽力而为：任何异常仅记日志并返回原路径，不阻断任务。
         """
         import hashlib
-        import shutil
+
         src = Path(src_path)
         if not src.exists() or category not in self.UPLOAD_CATEGORIES:
             return str(src)
@@ -203,8 +203,12 @@ class VoiceHandlers:
 
             try:
                 digest = _md5(src)
+                src_size = src.stat().st_size
                 for p in self.list_uploads(category):
                     try:
+                        # 先比 size（廉价）：size 不同必然内容不同，跳过全量 md5 重算
+                        if p.stat().st_size != src_size:
+                            continue
                         if _md5(p) == digest:
                             return str(p)  # 内容相同：复用已有留存
                     except OSError:
@@ -239,7 +243,6 @@ class VoiceHandlers:
         if not out_dir or not out_dir.is_dir():
             return
         try:
-            from history import delete_files_to_recycle
             files = [p for p in out_dir.rglob("*") if p.is_file()]
             delete_files_to_recycle(files)
             dirs = sorted((p for p in out_dir.rglob("*") if p.is_dir()),
@@ -414,7 +417,6 @@ class VoiceHandlers:
         duration = _probe_duration(products.get("vocals", ""))
         stems = _build_stems(products)
         # 计算源音频 MD5（分离记录留痕，查重跳过后续翻唱的 Demucs）
-        from history import HistoryManager  # 局部导入避免模块初始化循环
         src_md5 = HistoryManager.compute_source_md5(Path(source))
         self._record(_task.task_id, "separation", derived_from, root,
                      products.get("vocals", ""), out_dir,
@@ -494,22 +496,22 @@ class VoiceHandlers:
         return {"products": result.products, "stems": stems,
                 "output_dir": str(out_dir), "root_task_id": root}
 
-    def ensure_separation(self, source: str, project: str = "") -> str:
+    def ensure_separation(self, source: str, project: str = "",
+                          cancel_event: Optional[threading.Event] = None) -> str:
         """确保源音频有持久化的 separation 记录，返回 sep_task:<task_id>。
 
         先查 history（source_md5 前 1MB），有现成且双轨齐全就直接复用；
         没有就同步调 worker separate + 手动写 history 记录。
         供翻唱 Tab 调用 —— 让 Demucs 分离流程与「音轨分离」Tab 完全一致
         （同样的目录结构、同样的 HistoryRecord 字段），后续同曲翻唱自动跳过分离。
+        cancel_event 透传给 worker 协作取消（该同步阶段此前不响应 UI 取消）。
         """
-        from history import HistoryManager as _HM  # 避免模块初始化循环
-
         src_path = Path(source)
         if not src_path.exists():
             raise RuntimeError(f"源音频不存在: {source}")
 
         # 1. 查重：算 md5 + 查 history
-        md5 = _HM.compute_source_md5(src_path)
+        md5 = HistoryManager.compute_source_md5(src_path)
         existing = self.history_mgr.find_separation_by_source(md5)
         if existing:
             return f"sep_task:{existing.task_id}"
@@ -522,7 +524,8 @@ class VoiceHandlers:
 
         try:
             result = self.voice_client.separate(
-                source, mode="2", output_dir=str(out_dir), prefix=prefix)
+                source, mode="2", output_dir=str(out_dir), prefix=prefix,
+                cancel_event=cancel_event)
         except Exception:
             # worker 抛异常：回收本次已建但未入历史的衍生目录
             self._recycle_created_derived(out_dir)
@@ -530,6 +533,9 @@ class VoiceHandlers:
 
         if not result.ok:
             self._recycle_created_derived(out_dir)
+            # 取消来源两路：UI 取消（cancel_event）或 worker 侧 cancelled —— 命中即视为取消
+            if (cancel_event is not None and cancel_event.is_set()) or result.cancelled:
+                raise TaskCancelledError("任务已取消")
             raise RuntimeError(result.error or "同步分离失败")
 
         products = result.products or {}
@@ -550,7 +556,6 @@ class VoiceHandlers:
 
     def save_ref(self, src_path: str, name: str) -> str:
         """把参考干声存入音色库，返回落盘路径。"""
-        import shutil
         refs = self.refs_dir()
         safe = "".join(c for c in name.strip() if c.isalnum() or c in "_- ").strip() or "ref"
         dest = refs / f"{safe}_{new_short_id(4)}.wav"
@@ -567,7 +572,6 @@ class VoiceHandlers:
 
     def delete_ref(self, path: str) -> None:
         """删除音色库条目：移入系统回收站（文件级，不直接删除），预览小件一并回收。"""
-        from history import delete_files_to_recycle
         p = Path(path)
         if not p.exists():
             raise FileNotFoundError(f"文件不存在: {path}")
@@ -622,7 +626,6 @@ class VoiceHandlers:
 
     def save_stem(self, src_path: str, name: str, stem_type: str) -> str:
         """把分离轨道存入素材库（命名 名__类型.wav），返回落盘路径。"""
-        import shutil
         if stem_type not in self.STEM_TYPES:
             raise ValueError(f"未知轨道类型: {stem_type}")
         stems = self.stems_dir()
@@ -648,7 +651,6 @@ class VoiceHandlers:
 
     def delete_stem(self, path: str) -> None:
         """删除素材库条目：移入系统回收站（文件级，不直接删除），预览小件一并回收。"""
-        from history import delete_files_to_recycle
         p = Path(path)
         if not p.exists():
             raise FileNotFoundError(f"文件不存在: {path}")
@@ -680,7 +682,6 @@ class VoiceHandlers:
 
 def _probe_duration(path: str) -> float:
     """用 ffmpeg/音速获取音频时长；失败返回 0。仅做展示用途，异常不抛出。"""
-    import subprocess
     if not path or not Path(path).exists():
         return 0.0
     try:
@@ -785,7 +786,6 @@ def detect_voice(path: str, max_seconds: float = 30.0,
     让用户配置优先（缺失的键再回退默认）。秒级完成、不占显存（粗判）；
     解码或分析失败返回 None（不判定、不拦截）。
     """
-    import subprocess
     from voice_config import load_voice_config
     cfg = _parse_cfg_defaults(load_voice_config(project_root)) \
         if project_root is not None else _parse_cfg_defaults()

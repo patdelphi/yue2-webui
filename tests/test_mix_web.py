@@ -172,6 +172,35 @@ def test_compute_peaks_cached(webui_root: Path):
     assert first is second
 
 
+def test_compute_peaks_per_key_lock_single_decode(webui_root: Path, monkeypatch):
+    """A10：并发请求同一 key——per-key 锁 + 双重检查，只真正解码一次。"""
+    import threading
+    from array import array
+    path = webui_root / "outputs" / "separations_20260927_104930" / "demo_20260927_104930_vocals.wav"
+    monkeypatch.setattr(mix_web, "_peak_cache", type(mix_web._peak_cache)())
+    monkeypatch.setattr(mix_web, "_peak_key_locks", {})
+    calls = {"n": 0}
+
+    def _fake_decode(_p):
+        calls["n"] += 1
+        time.sleep(0.15)  # 放大竞态窗口，让并发线程真正重叠
+        return array("h", [1000] * 8000)
+
+    monkeypatch.setattr(mix_web, "_decode_mono", _fake_decode)
+    results = []
+
+    def _worker():
+        results.append(mix_web.compute_peaks(path, 400))
+
+    ths = [threading.Thread(target=_worker) for _ in range(5)]
+    for t in ths:
+        t.start()
+    for t in ths:
+        t.join()
+    assert calls["n"] == 1, f"同 key 应只解码一次，实际 {calls['n']}"
+    assert len(results) == 5 and all(r["peaks"] for r in results)
+
+
 # ------------------------------------------------------------------ 3. 素材清单
 def test_list_sources_separation_and_mix(webui_root: Path, history_mgr: HistoryManager):
     """分离记录进入 sources（含全部轨道），混音记录进入 mixes。"""

@@ -250,8 +250,17 @@ class QueueManager:
             for t in self._queue:
                 if t.task_id == task_id:
                     t.status = TaskStatus.CANCELLED
+                    t.completed_at = time.time()
                     t.cancel_event.set()
                     self._queue.remove(t)
+                    # 与运行中取消一致：记入历史环形缓冲，保证设置页"最近任务"展示一致
+                    self._history.append({
+                        "task_id": t.task_id,
+                        "task_type": t.task_type.value,
+                        "status": TaskStatus.CANCELLED.value,
+                        "elapsed": 0.0,  # 排队取消：从未开始执行
+                        "error": None,
+                    })
                     logger.info(f"Task {task_id} cancelled (was queued)")
                     return True
 

@@ -219,12 +219,14 @@ class VoiceClient:
         timeout 为 None 时用默认 300s；长任务（分离/翻唱）应传按源时长估算的动态值。
         cancel_event 触发时通过后台线程尽力通知 worker 协作中止（worker 在阶段边界检查）。
         """
+        done_event = threading.Event()
         try:
             self.ensure_running()
-            # 取消监视线程：阻塞等 cancel_event，触发后 POST /api/cancel 通知 worker
-            # 尽快中止（daemon 线程，任务正常结束最多空等 30 分钟后自行退出，不阻碍进程）
+            # 取消监视线程：收到 cancel_event 或任务结束事件即退出
+            # （原实现只等 cancel_event，任务正常结束时线程仍空等最多 30 分钟并随高频任务堆积）
             if cancel_event is not None:
-                threading.Thread(target=self._cancel_notify, args=(cancel_event,),
+                threading.Thread(target=self._cancel_notify,
+                                 args=(cancel_event, done_event),
                                  daemon=True).start()
             data = self._request("POST", f"http://127.0.0.1:{self.port}{api}", payload,
                                  timeout=timeout if timeout else 300)
@@ -238,11 +240,21 @@ class VoiceClient:
         except Exception as e:  # 兜底：任何未预期异常都不应打断主 app
             logger.exception("voice task failed unexpectedly")
             return VoiceResult(ok=False, error=f"音色工坊任务异常: {e}")
+        finally:
+            done_event.set()  # 唤醒监视线程立即退出，避免空等
 
-    def _cancel_notify(self, cancel_event: threading.Event) -> None:
-        """等待取消信号并尽力通知 worker 中止（协作式取消的客户端半边）。"""
-        if not cancel_event.wait(timeout=1800):
-            return  # 任务已正常结束（事件未触发），空等超时自然退出
+    def _cancel_notify(self, cancel_event: threading.Event,
+                       done_event: Optional[threading.Event] = None) -> None:
+        """等待取消信号并尽力通知 worker 中止（协作式取消的客户端半边）。
+
+        以 0.5s 短轮询同时监视 cancel_event 与任务结束事件 done_event：
+        任务正常结束时 done_event 被置位，监视线程立即退出，不再空等 30 分钟。
+        """
+        while True:
+            if cancel_event.wait(0.5):
+                break
+            if done_event is not None and done_event.is_set():
+                return
         try:
             self._request("POST", f"http://127.0.0.1:{self.port}/api/cancel", {}, timeout=5)
             logger.info("已通知 worker 取消当前任务")
@@ -376,7 +388,7 @@ class VoiceClient:
            cancel_event=cancel_event)
 
 
-# 兼容 from voice_client import tr 的场景不存在；此处避免误导
+# ffmpeg 可用性检查工具函数（供 UI 预检提示；tests/test_voice_client.py 仍引用）
 def heal_ffmpeg_check() -> str:
     """返回 ffmpeg 可用性检查文案（空串=可用）。"""
     return "" if shutil.which("ffmpeg") else "未找到 ffmpeg，请加入系统 PATH"

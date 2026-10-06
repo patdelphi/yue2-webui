@@ -12,6 +12,8 @@
 
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -207,6 +209,38 @@ def test_cancelled_flag_parsed(monkeypatch):
     res2 = client.convert("s.wav", "ref.wav", output_dir=str(tmp / "cov"))
     assert res2.ok is False
     assert res2.cancelled is False
+
+
+def test_cancel_notify_exits_when_done_event_set(monkeypatch):
+    """任务结束（done_event 置位）后监视线程应立即退出，不空等 30 分钟，且不误发取消。"""
+    tmp, webui = _make_roots()
+    (tmp / "seed-vc").mkdir()
+    (webui / "config.cfg").write_text("\n[voice]\nseedvc_dir = seed-vc\n", encoding="utf-8")
+    client = _make_client(tmp)
+    called = []
+    monkeypatch.setattr(client, "_request",
+                        lambda *a, **k: (called.append(a), {"ok": True})[1])
+    done = threading.Event()
+    done.set()
+    t0 = time.time()
+    client._cancel_notify(threading.Event(), done)  # 直接调用应快速返回
+    assert time.time() - t0 < 3
+    assert called == []  # 未取消：不应 POST /api/cancel
+
+
+def test_cancel_notify_posts_when_cancel_set(monkeypatch):
+    """cancel_event 置位时应 POST /api/cancel 通知 worker 协作中止。"""
+    tmp, webui = _make_roots()
+    (tmp / "seed-vc").mkdir()
+    (webui / "config.cfg").write_text("\n[voice]\nseedvc_dir = seed-vc\n", encoding="utf-8")
+    client = _make_client(tmp)
+    urls = []
+    monkeypatch.setattr(client, "_request",
+                        lambda method, url, payload, timeout=300: (urls.append(url), {"ok": True})[1])
+    cancel = threading.Event()
+    cancel.set()
+    client._cancel_notify(cancel, threading.Event())
+    assert urls and urls[0].endswith("/api/cancel")
 
 
 # ---------------------------------------------------------------- 模型状态检查

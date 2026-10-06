@@ -233,6 +233,8 @@ EN_TABLE: Dict[str, str] = {
     # —— backend_gguf 推理后端文案（generate/transcribe 的错误与进度，随任务语言）——
     "已取消": "Cancelled",
     "退出码": "exit code",
+    "生成超时（超过 {n} 分钟）": "Generation timed out (over {n} min)",
+    "转谱超时（超过 {n} 分钟）": "Transcription timed out (over {n} min)",
     "生成完成但输出文件不存在": "Generation finished but the output file is missing",
     "SheetSage2 模型未找到，请检查 config.cfg 中 sheetsage2_path 配置": "SheetSage2 model not found; check sheetsage2_path in config.cfg",
     "转谱完成但未生成乐谱": "Transcription finished but no score was generated",

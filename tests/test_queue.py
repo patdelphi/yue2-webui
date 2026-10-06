@@ -180,11 +180,30 @@ def test_queue_snapshot():
     print("PASS: queue snapshot (running/queued/recent)\n")
 
 
+def test_cancel_queued_records_history():
+    """排队取消的任务应写入"最近任务"历史（与运行中取消展示一致）。"""
+    print("=== Testing queued cancel recorded in history ===\n")
+    blocker = queue_manager.submit(TaskType.GENERATION, task_worker, duration=3, name="QBlock")
+    queued = queue_manager.submit(TaskType.TRANSCRIPTION, task_worker, duration=1, name="QTarget")
+    time.sleep(0.4)  # 等 blocker 进入运行、queued 落入排队
+    assert queue_manager.cancel_task_by_id(queued.task_id) is True, "排队任务应取消成功"
+    snap = queue_manager.get_queue_snapshot()
+    rec = [h for h in snap["recent"] if h["task_id"] == queued.task_id]
+    assert rec and rec[0]["status"] == "cancelled", snap["recent"]
+    # 等 blocker 结束，避免影响后续测试
+    deadline = time.time() + 10
+    while time.time() < deadline and \
+            queue_manager.get_status(blocker)["status"] != TaskStatus.COMPLETED:
+        time.sleep(0.2)
+    print("PASS: queued cancel appears in recent history\n")
+
+
 if __name__ == "__main__":
     test_queue()
     test_cancel_running()
     test_cancel_queued()
     test_failed()
     test_queue_snapshot()
+    test_cancel_queued_records_history()
     print("=== All queue manager tests passed ===")
 

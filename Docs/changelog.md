@@ -1095,3 +1095,24 @@ o-store`、`sources` 列出 4 组分离素材、`peaks` 400 桶/时长 171.6s、
 
 - README.md 增加完整英文版本，顶部「中文 | English」锚点双向切换，GitHub 与本地 Markdown 均适用。
 - 同步更新中英文内容：补充「当前队列」窗口说明、参数预设覆盖 23 项参数说明、tests 目录预设测试套件注释。
+
+## 2026-10-06 — 代码审计修复：A 类 Bug 全修 + B 类冗余清理
+
+> 来源 `Docs/code-audit-2026-10-06.md`（逐条复核：删 1 条误报 A11、订正数字）。范围：A1–A10 全部 + B4/B5/B6/B7/B8；未做 B1/B2/B3/C1/C6/C7。
+
+- **A1**（backend_gguf.py）：generate/transcribe 子进程改用看门狗线程——`poll()` 中检测取消/超时即 `kill()`，主循环读到 EOF 后 `process.wait()` 回收；新增宽松总超时 1800s，超时即 kill 并返回超时错误；`cancel()` 同补 `wait()`，消除「循环内阻塞读导致取消失灵」与「kill 后不回收句柄」。
+- **A2**（app.py + postprocess.py）：`postprocess_audio` 调用包 try/except，失败记 `logger.exception` 但仍写历史（音频已落盘可查）；`_embed_metadata` 的 `except: pass` 改为 `logger.warning`。
+- **A3**（app.py + history.py）：生成全部变体失败（非取消）时调用 `_recycle_output_dir` 回收 `song_<ts>` 目录（委托 `recycle_dir` 走回收站），与 voice 侧行为一致，不再留孤儿目录。
+- **A4 / C2**（history.py + app.py）：历史读路径不再触发 `prune_missing`（改由 `auto_prune` 写后统一收尾）；新增 `count_rows` / `task_id_at` / `to_dataframe_rows(limit, offset)` 走 SQL 指定列（不含 lyrics 全文）；历史页四处读改为 COUNT + LIMIT-OFFSET + 单行取 task_id，消除「全表 ×2 + 全记录 stat」。
+- **A5**（voice_client.py）：`_run` 结束主动 set done 事件，监视线程按 0.5s 短轮询退出，不再 1800s 空等堆积。
+- **A6**（queue_manager.py）：排队任务取消同样写入 `_history` 环形缓冲，与运行中取消一致。
+- **A7**（voice_ui_handlers.py + app.py）：`ensure_separation` 透传 `cancel_event`；cover 原唱路径在进入队列前的同步分离阶段登记 `_pending_cancel`，取消按钮此阶段亦立即生效。
+- **A8**（app.py）：`_generate_worker` 对 seeds/批量数做防御（空种子补随机、批量数不超过种子数），消除 `seeds[i]` 越界；顺带删除重复的 `batch_count = int(batch_count)`（B5）。
+- **A9**（voice_ui_handlers.py）：上传去重先比 size、相同才重算 md5，消除 O(N×文件大小) 全量重算。
+- **A10**（mix_web.py）：波形峰值缓存加 per-key 锁 + 双重检查，同 key 并发只解码一次。
+- **B4**（voice_ui_handlers.py）：局部 import（shutil/subprocess/history）上提模块顶部，删除 11 处冗余。
+- **B6**（history.py）：`rename_project` 逐条 `_update` 合并为单事务 `executemany`。
+- **B7**（voice_client.py）：修正 `heal_ffmpeg_check` 自相矛盾注释。
+- **B8**：删除根目录 pip 误装产物 `=1.47`。
+- **测试**：新增 `test_backend_watchdog.py`/`test_postprocess.py`/`test_generate_defense.py`；扩展 `test_history_filter.py`（SQL 分页/计数/legacy 空类型/prune 时机）、`test_voice_handlers.py`（cancel 透传、去重先比 size）、`test_mix_web.py`（per-key 单次解码）、`test_queue.py`/`test_history_recycle.py`。
+- **验证**：全量 `pytest tests/ --ignore=tests/test_i18n.py -q` **219 passed**。

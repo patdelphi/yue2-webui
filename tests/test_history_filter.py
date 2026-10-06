@@ -56,18 +56,74 @@ def test_to_dataframe_rows_filters_by_record_type():
 
 
 def test_app_history_page_uses_generation_filter():
-    """app 侧历史页四处取数均应传 record_types=("generation",)。
+    """app 侧历史页数据访问均应传 record_types=("generation",)。
 
-    四处：refresh_history / _get_history_page（表格取数与分页）、
-    on_history_next_page（总页数计算）、_load_history_entry（行号映射）。
-    其中 _load_history_entry 若不过滤会导致表格行号与全量记录错位
-    （点击生成记录实际选中 separation 记录）。
+    重构后（A4）历史页走 SQL：count_rows 统计、to_dataframe_rows 分页取数、
+    task_id_at 按行号取 task_id——共 6 处均须带 generation 过滤，且不再有
+    无过滤的全表 to_dataframe_rows() 调用（避免行号/页数与表格错位）。
     """
     app_path = Path(__file__).parent.parent / "app.py"
     src = app_path.read_text(encoding="utf-8-sig")
-    assert 'to_dataframe_rows(record_types=("generation",))' in src
-    # 四处调用都必须带过滤（与表格显示的记录集一致）
-    assert src.count('to_dataframe_rows(record_types=("generation",))') == 4
+    assert 'record_types=("generation",)' in src
+    # 六处数据访问都必须带过滤（与表格显示的记录集一致）
+    assert src.count('record_types=("generation",)') == 6
+    # 不再有无过滤的全表调用
+    assert "to_dataframe_rows()" not in src
+
+
+def test_sql_paging_count_and_task_id_at():
+    """A4：count_rows / to_dataframe_rows(limit,offset) / task_id_at 走 SQL，行为与全量一致。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        mgr = H.HistoryManager(db_file=root / "history.db", outputs_root=root / "outputs")
+        for i in range(7):
+            _add_record(mgr, f"gen_{i}", "generation")
+        _add_record(mgr, "sep_x", "separation")
+
+        # COUNT 只统计 generation
+        assert mgr.count_rows(record_types=("generation",)) == 7
+        assert mgr.count_rows() == 8
+        # 分页：第一页 3 条、第二页 3 条，且与全量切片一致
+        full = mgr.to_dataframe_rows(record_types=("generation",))
+        assert mgr.to_dataframe_rows(record_types=("generation",), limit=3, offset=0) == full[:3]
+        assert mgr.to_dataframe_rows(record_types=("generation",), limit=3, offset=3) == full[3:6]
+        # task_id_at 与全量第 offset 行的 task_id 一致（含跨页/越界）
+        for off in range(7):
+            assert mgr.task_id_at(record_types=("generation",), offset=off) == full[off][6]
+        assert mgr.task_id_at(record_types=("generation",), offset=99) is None
+        assert mgr.task_id_at(record_types=("generation",), offset=-1) is None
+        # 排序为 id 倒序：最后追加的 gen_6 在第 0 行
+        assert full[0][6] == "gen_6"
+        mgr.close()
+
+
+def test_legacy_blank_record_type_counts_as_generation():
+    """历史遗留数据 record_type 为空时按 generation 处理（SQL 过滤需兼容）。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        mgr = H.HistoryManager(db_file=root / "history.db", outputs_root=root / "outputs")
+        _add_record(mgr, "legacy_1", "")  # 模拟旧记录无 record_type
+        assert mgr.count_rows(record_types=("generation",)) == 1
+        assert len(mgr.to_dataframe_rows(record_types=("generation",))) == 1
+        assert mgr.task_id_at(record_types=("generation",), offset=0) == "legacy_1"
+        mgr.close()
+
+
+def test_prune_missing_runs_on_auto_prune_not_on_read():
+    """A4：读取路径不触发 prune_missing（避免每次读全表 stat），改由 auto_prune（写后）触发。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        mgr = H.HistoryManager(db_file=root / "history.db", outputs_root=root / "outputs")
+        _add_record(mgr, "gen_1", "generation")
+        # 手动删掉音频文件（模拟磁盘文件被清理）
+        (mgr.outputs_root / "gen_1" / "audio.wav").unlink()
+        # 读取：记录仍在（不再顺手 prune）
+        assert len(mgr.to_dataframe_rows(record_types=("generation",))) == 1
+        assert mgr.count_rows(record_types=("generation",)) == 1
+        # 写后收尾钩子：auto_prune 触发 prune_missing，缺失记录被清除
+        mgr.auto_prune()
+        assert mgr.count_rows(record_types=("generation",)) == 0
+        mgr.close()
 
 
 def test_history_row_click_uses_role_row_not_tbody_tr():

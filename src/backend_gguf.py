@@ -23,6 +23,9 @@ DEFAULT_MODEL_CONFIG = {
     "sheetsage2_path": "audio-cpp/models/SheetSage2-GGUF/sheetsage2-orig.gguf",  # 转谱模型路径
 }
 
+# CLI 子进程宽松总超时（秒）：CLI 静默挂死时兜底 kill，避免永久阻塞串行队列
+CLI_TIMEOUT_SECONDS = 1800
+
 
 def load_model_config(project_root: Path) -> dict:
     """读取 yue2-webui 目录下外置 config.cfg 的 [models] 段，返回模型路径配置。
@@ -199,38 +202,36 @@ class GGUFBackend:
         start_time = time.time()
         
         try:
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                cwd=str(self.project_root),
-            )
-            
-            self._current_process = process
             parser = LogParser()
             output_lines = []
 
-            for line in process.stdout:
-                if cancel_event and cancel_event.is_set():
-                    process.kill()
-                    return GenerationResult(success=False, error_message=tr(lang, "已取消"))
-
+            def _on_line(line: str) -> None:
                 output_lines.append(line)
                 progress = parser.parse_line(line)
                 if progress and on_progress:
                     on_progress(progress)
 
-            process.wait()
+            # 看门狗托管：取消/超时立即 kill（消除阻塞读取消失灵 + 无超时挂死）
+            returncode, cancelled, timed_out = self._pump_cli(
+                cmd, cancel_event, CLI_TIMEOUT_SECONDS, _on_line)
             elapsed = time.time() - start_time
-            
-            if process.returncode != 0:
-                logger.error(f"audiocpp_cli failed with exit code {process.returncode}")
+
+            if cancelled:
+                return GenerationResult(success=False, error_message=tr(lang, "已取消"),
+                                        generation_time_seconds=elapsed)
+            if timed_out:
                 return GenerationResult(
                     success=False,
-                    error_message=f"audiocpp_cli {tr(lang, '退出码')} {process.returncode}",
+                    error_message=tr(lang, "生成超时（超过 {n} 分钟）").replace(
+                        "{n}", str(CLI_TIMEOUT_SECONDS // 60)),
+                    generation_time_seconds=elapsed,
+                )
+
+            if returncode != 0:
+                logger.error(f"audiocpp_cli failed with exit code {returncode}")
+                return GenerationResult(
+                    success=False,
+                    error_message=f"audiocpp_cli {tr(lang, '退出码')} {returncode}",
                     generation_time_seconds=elapsed,
                 )
             
@@ -296,9 +297,65 @@ class GGUFBackend:
             self._current_process = None
     
     def cancel(self):
-        """Cancel current generation."""
-        if self._current_process:
-            self._current_process.kill()
+        """取消当前生成/转谱子进程：kill 后回收进程，避免句柄/管道泄漏。"""
+        proc = self._current_process
+        if not proc:
+            return
+        try:
+            proc.kill()
+            proc.wait(timeout=5)  # 主动 wait 回收（与 _pump_cli 的 wait 重复调用安全）
+        except Exception:
+            logger.exception("取消 CLI 子进程失败(已忽略)")
+
+    def _pump_cli(self, cmd: list, cancel_event: Optional[threading.Event],
+                  timeout_seconds: float, on_line: Callable[[str], None]) -> tuple:
+        """运行 CLI 子进程并逐行回调 on_line(line)；返回 (returncode, cancelled, timed_out)。
+
+        取消/超时由独立看门狗线程负责：每 0.5s 检查 cancel_event 与总耗时，命中即 kill
+        子进程 —— 使阻塞的 stdout 读立即返回。此前只在读到新日志行时才检查取消，CLI
+        长时间静默（写日志前/挂死）时取消完全失灵，且无超时会永久阻塞串行队列。
+        读尽输出后统一 process.wait() 回收进程（原实现 kill 后直接 return，不回收）。
+        """
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=str(self.project_root),
+        )
+        self._current_process = process
+        stop = threading.Event()
+        state = {"cancelled": False, "timed_out": False}
+
+        def _watchdog():
+            """轮询取消/超时；命中即 kill 子进程并退出。"""
+            start = time.time()
+            while not stop.wait(0.5):
+                if cancel_event is not None and cancel_event.is_set():
+                    state["cancelled"] = True
+                elif time.time() - start > timeout_seconds:
+                    state["timed_out"] = True
+                else:
+                    continue
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+                return
+
+        threading.Thread(target=_watchdog, daemon=True, name="cli-watchdog").start()
+        try:
+            for line in process.stdout:
+                on_line(line)
+        finally:
+            stop.set()
+            try:
+                process.wait()  # 回收进程（kill 后管道关闭，阻塞读已返回）
+            except Exception:
+                logger.exception("CLI 子进程回收失败(已忽略)")
+        return process.returncode, state["cancelled"], state["timed_out"]
 
     def _extract_abc_from_output(self, output_lines: list[str]) -> Optional[str]:
         """Extract ABC notation from CLI output lines."""
@@ -462,24 +519,9 @@ class GGUFBackend:
         start_time = time.time()
         
         try:
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                cwd=str(self.project_root),
-            )
-            
-            self._current_process = process
             output_lines = []
-            
-            for line in process.stdout:
-                if cancel_event and cancel_event.is_set():
-                    process.kill()
-                    return TranscriptionResult(success=False, error_message=tr(lang, "已取消"))
-                
+
+            def _on_line(line: str) -> None:
                 line_stripped = line.strip()
                 output_lines.append(line_stripped)
                 logger.debug(f"SheetSage2: {line_stripped}")
@@ -490,17 +532,30 @@ class GGUFBackend:
                         on_progress({"phase": "transcribing", "message": tr(lang, "转谱中...")})
                     elif "Total:" in line_stripped or "completed" in line_stripped.lower():
                         on_progress({"phase": "done", "message": tr(lang, "转谱完成")})
-            
-            process.wait()
+
+            # 看门狗托管：取消/超时立即 kill（消除阻塞读取消失灵 + 无超时挂死）
+            returncode, cancelled, timed_out = self._pump_cli(
+                cmd, cancel_event, CLI_TIMEOUT_SECONDS, _on_line)
             elapsed = time.time() - start_time
-            
-            if process.returncode != 0:
-                last_lines = [l for l in output_lines if l][-10:]
-                error_detail = "\n".join(last_lines) if last_lines else tr(lang, "无输出")
-                logger.error(f"SheetSage2 failed with exit code {process.returncode}:\n{error_detail}")
+
+            if cancelled:
+                return TranscriptionResult(success=False, error_message=tr(lang, "已取消"),
+                                           transcription_time_seconds=elapsed)
+            if timed_out:
                 return TranscriptionResult(
                     success=False,
-                    error_message=f"{tr(lang, '转谱失败，退出码')} {process.returncode}: {error_detail}",
+                    error_message=tr(lang, "转谱超时（超过 {n} 分钟）").replace(
+                        "{n}", str(CLI_TIMEOUT_SECONDS // 60)),
+                    transcription_time_seconds=elapsed,
+                )
+
+            if returncode != 0:
+                last_lines = [l for l in output_lines if l][-10:]
+                error_detail = "\n".join(last_lines) if last_lines else tr(lang, "无输出")
+                logger.error(f"SheetSage2 failed with exit code {returncode}:\n{error_detail}")
+                return TranscriptionResult(
+                    success=False,
+                    error_message=f"{tr(lang, '转谱失败，退出码')} {returncode}: {error_detail}",
                     transcription_time_seconds=elapsed,
                 )
             
