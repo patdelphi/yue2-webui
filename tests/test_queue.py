@@ -6,7 +6,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from queue_manager import queue_manager, TaskType, TaskStatus, TaskCancelledError
+from queue_manager import (queue_manager, TaskType, TaskStatus, TaskCancelledError,
+                           DEFAULT_MAX_RUNTIME, TIMEOUT_ERROR)
 
 
 def task_worker(_task, duration, name):
@@ -198,6 +199,69 @@ def test_cancel_queued_records_history():
     print("PASS: queued cancel appears in recent history\n")
 
 
+def _wait_terminal(task, timeout=15):
+    """轮询等待任务进入终态（completed/failed/cancelled），返回最终状态。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        st = queue_manager.get_status(task)["status"]
+        if st in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
+            return st
+        time.sleep(0.1)
+    return queue_manager.get_status(task)["status"]
+
+
+def test_submit_assigns_default_max_runtime():
+    """任务级超时兜底：未指定 max_runtime 时按任务类型取默认值；显式值优先。"""
+    print("=== Testing default max_runtime ===\n")
+    t = queue_manager.submit(TaskType.GENERATION, task_worker, duration=0.1, name="DefRT")
+    assert t.max_runtime == DEFAULT_MAX_RUNTIME[TaskType.GENERATION], t.max_runtime
+    t2 = queue_manager.submit(TaskType.MIX, task_worker, duration=0.1, name="DefRT2",
+                              max_runtime=123.0)
+    assert t2.max_runtime == 123.0, t2.max_runtime
+    _wait_terminal(t)
+    _wait_terminal(t2)
+    print("PASS: default/override max_runtime\n")
+
+
+def test_task_timeout_marks_failed_and_signals_cancel():
+    """超时（协作式）：监控线程置 timed_out 并下发 cancel_event；不配合的 worker 正常返回也判 FAILED。"""
+    print("=== Testing task-level timeout ===\n")
+
+    def slow_ignoring_cancel(_task, secs):
+        # 故意不检查 cancel_event，模拟挂死/不配合，验证收尾仍判定为超时失败
+        time.sleep(secs)
+        return "done"
+
+    t = queue_manager.submit(TaskType.MIX, slow_ignoring_cancel, secs=1.2, max_runtime=0.4)
+    st = _wait_terminal(t, timeout=15)
+    assert st == TaskStatus.FAILED, f"expected FAILED, got {st}"
+    assert t.timed_out is True, "timed_out 标记应为 True"
+    assert t.cancel_event.is_set(), "超时应下发 cancel_event"
+    assert queue_manager.get_status(t)["error"] == TIMEOUT_ERROR, queue_manager.get_status(t)
+    print("PASS: timeout -> FAILED + cancel_event\n")
+
+
+def test_task_timeout_overrides_cancelled_status():
+    """超时导致 worker 抛 TaskCancelledError 时，状态应为 FAILED（超时）而非 CANCELLED。"""
+    print("=== Testing timeout vs cancelled status ===\n")
+    t = queue_manager.submit(TaskType.MIX, cooperative_task, duration=3, name="TOCancel",
+                             max_runtime=0.4)
+    st = _wait_terminal(t, timeout=15)
+    assert st == TaskStatus.FAILED, f"expected FAILED(timeout), got {st}"
+    assert queue_manager.get_status(t)["error"] == TIMEOUT_ERROR
+    print("PASS: timeout wins over cancelled\n")
+
+
+def test_app_localizes_timeout_error():
+    """app.py 三处失败分支必须把队列超时哨兵翻译为当前语言文案（i18n 约束）。"""
+    from _app_bundle import app_bundle  # C1 拆分后源码级断言读 app bundle
+    src = app_bundle()
+    assert "def _localize_task_error(" in src
+    assert src.count('localize_task_error(lang, status_info.get("error"))') == 3, \
+        "生成/重新合成/转谱三处失败分支都应走 _localize_task_error"
+    assert "TIMEOUT_ERROR" in src
+
+
 if __name__ == "__main__":
     test_queue()
     test_cancel_running()
@@ -205,5 +269,9 @@ if __name__ == "__main__":
     test_failed()
     test_queue_snapshot()
     test_cancel_queued_records_history()
+    test_submit_assigns_default_max_runtime()
+    test_task_timeout_marks_failed_and_signals_cancel()
+    test_task_timeout_overrides_cancelled_status()
+    test_app_localizes_timeout_error()
     print("=== All queue manager tests passed ===")
 

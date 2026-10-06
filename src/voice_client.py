@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from audio_probe import probe_duration
 from voice_config import load_voice_config
 
 logger = logging.getLogger(__name__)
@@ -263,18 +264,12 @@ class VoiceClient:
 
     @staticmethod
     def _probe_duration(path: str) -> float:
-        """用 ffprobe 测音频时长（秒）；失败/文件不存在返回 0。仅用于超时估算。"""
-        if not path or not Path(path).exists():
-            return 0.0
-        try:
-            out = subprocess.run(
-                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                 "-of", "csv=p=0", path],
-                capture_output=True, text=True, timeout=15,
-            )
-            return float(out.stdout.strip()) if out.stdout.strip() else 0.0
-        except Exception:
-            return 0.0
+        """用 ffprobe 测音频时长（秒）；失败/文件不存在返回 0。仅用于超时估算。
+
+        实现已统一到 audio_probe.probe_duration（B1）；保留此静态方法名以兼容
+        tools/cover_ab.py 等外部调用方。
+        """
+        return probe_duration(path)
 
     def _timeout_for(self, *paths: str) -> float:
         """按源音频时长估算 HTTP 超时：每秒音频给 20s 处理预算，下限 900s。

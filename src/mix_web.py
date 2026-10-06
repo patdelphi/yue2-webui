@@ -37,7 +37,7 @@ from pathlib import Path
 
 from i18n import tr
 from mix_render import MixProjectError, mix_worker, parse_mix_project
-from queue_manager import TaskStatus, TaskType, queue_manager
+from queue_manager import TaskStatus, TaskType, queue_manager, TIMEOUT_ERROR
 
 logger = logging.getLogger(__name__)
 
@@ -515,7 +515,11 @@ def task_status(task_id, webui_root) -> dict:
             out["status"] = TaskStatus.FAILED.value
             out["error"] = result.get("error") or "渲染失败"
     elif status == TaskStatus.FAILED.value:
-        out["error"] = info.get("error") or task.error or "渲染失败"
+        err = info.get("error") or task.error or ""
+        # 队列层超时哨兵转成可读文案（本模块无 lang 上下文，沿用文件内既有中文兜底风格）
+        if err == TIMEOUT_ERROR:
+            err = "任务超时"
+        out["error"] = err or "渲染失败"
     return out
 
 

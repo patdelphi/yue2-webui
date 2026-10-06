@@ -60,7 +60,7 @@ class _FakeBackend:
 
 
 def _run_worker(tmp, seeds, batch_count):
-    """在临时 WEBUI_ROOT 下跑一次 _generate_worker，返回 (假后端, 历史记录数)。"""
+    """在临时 WEBUI_ROOT 下跑一次 _generate_worker，返回 (假后端, 历史记录数, 返回值)。"""
     webui = tmp / "yue2-webui"
     (webui / "outputs").mkdir(parents=True, exist_ok=True)
 
@@ -75,7 +75,7 @@ def _run_worker(tmp, seeds, batch_count):
     app.history_mgr = hm
     app.refresh_history = lambda: ([], "")
     try:
-        app._generate_worker(
+        outcome = app._generate_worker(
             _FakeTask(), "项目", "pop", "la la", "off", seeds,
             None, 8, "pcm16", batch_count,
             False, False, False, False, "",
@@ -83,7 +83,7 @@ def _run_worker(tmp, seeds, batch_count):
             1.0, 0.95, 100, 1.2, 50, 200, 9000,
             lang="zh",
         )
-        return fake_backend, len(hm.list_all())
+        return fake_backend, len(hm.list_all()), outcome
     finally:
         (app.WEBUI_ROOT, app.LAST_INPUTS_FILE, app.backend, app.history_mgr,
          app.refresh_history) = orig
@@ -93,7 +93,7 @@ def _run_worker(tmp, seeds, batch_count):
 def test_seeds_shorter_than_batch_is_clamped():
     """seeds 只有 1 个、batch_count=3：收敛为 1 个变体，不抛 IndexError。"""
     with tempfile.TemporaryDirectory() as td:
-        backend, n = _run_worker(Path(td), [7], 3)
+        backend, n, _ = _run_worker(Path(td), [7], 3)
         assert len(backend.calls) == 1
         assert backend.calls[0][0] == 7
         assert n == 1  # 只登记 1 条历史记录（batch_count 已被收敛）
@@ -102,10 +102,29 @@ def test_seeds_shorter_than_batch_is_clamped():
 def test_empty_seeds_uses_random_seed():
     """seeds 为空：给随机种子兜底，不崩且只生成 1 个变体。"""
     with tempfile.TemporaryDirectory() as td:
-        backend, n = _run_worker(Path(td), [], 2)
+        backend, n, _ = _run_worker(Path(td), [], 2)
         assert len(backend.calls) == 1
         assert backend.calls[0][0] >= 0  # 随机种子非负（validate_params 要求）
         assert n == 1
+
+
+def test_worker_returns_named_outcome_with_12_field_order():
+    """C5：worker 返回 GenerationOutcome 结构，to_gradio() 展开 12 项且顺序与
+    on_generate 的 outputs 绑定一致（单变体下变体组隐藏、下载位在 mp3_download）。"""
+    with tempfile.TemporaryDirectory() as td:
+        _, _, outcome = _run_worker(Path(td), [11], 1)
+        assert isinstance(outcome, app.GenerationOutcome)
+        fields = outcome.to_gradio()
+        assert len(fields) == 12
+        # 顺序：audio, duration, abc, abc_file, mp3_file, lyrics_html,
+        #       history_rows, history_info, history_page, variants_visible,
+        #       variants_dropdown, variants_payload
+        assert fields[0] == outcome.audio_path
+        assert fields[2] == outcome.abc_display
+        assert fields[4] == outcome.mp3_download
+        assert fields[8] == 0                       # 历史页码重置
+        assert fields[11] == []                     # 单变体：无变体载荷
+        assert isinstance(fields[9], dict)          # gr.update 形态
 
 
 def test_no_duplicate_batch_count_conversion():
@@ -114,5 +133,6 @@ def test_no_duplicate_batch_count_conversion():
     注：on_generate（UI 入口）仍保留一处 `batch_count = int(batch_count) if ... else 1`，
     属正常归一化，故按整行精确匹配而非子串匹配。
     """
-    src = (Path(__file__).parent.parent / "app.py").read_text(encoding="utf-8-sig")
+    from _app_bundle import app_bundle  # C1 拆分后源码级断言读 app bundle
+    src = app_bundle()
     assert "\n    batch_count = int(batch_count)\n" not in src

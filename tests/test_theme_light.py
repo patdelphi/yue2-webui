@@ -14,13 +14,20 @@
 
 运行方式：pytest tests/test_theme_light.py
 """
+import sys
 from pathlib import Path
 
 WEBUI_DIR = Path(__file__).parent.parent
 
+sys.path.insert(0, str(Path(__file__).parent))
+from _app_bundle import app_bundle  # noqa: E402  C1 拆分后源码级断言读 app bundle
+
 JS = (WEBUI_DIR / "static" / "js" / "app.js").read_text(encoding="utf-8")
-APP = (WEBUI_DIR / "app.py").read_text(encoding="utf-8")
-PAGE = (WEBUI_DIR / "static" / "multitrack" / "index.html").read_text(encoding="utf-8")
+APP = app_bundle()
+# 多轨编辑页已拆为 html + 外链 css/js（C6）：断言需合并读取三份资源
+_MIX_DIR = WEBUI_DIR / "static" / "multitrack"
+PAGE = "\n".join((_MIX_DIR / name).read_text(encoding="utf-8")
+                 for name in ("index.html", "multitrack.css", "multitrack.js"))
 
 
 def test_player_selectors_are_wrapped_in_is():

@@ -32,6 +32,14 @@ HAS_FFMPEG = shutil.which("ffmpeg") is not None
 WEBUI_DIR = Path(__file__).parent.parent
 SRC_DIR = WEBUI_DIR / "src"
 
+# 多轨编辑页已拆为 html + 外链 css/js（C6）：源码级断言合并读取三份资源
+_EDITOR_ASSETS = ("index.html", "multitrack.css", "multitrack.js")
+
+
+def _editor_page() -> str:
+    base = WEBUI_DIR / "static" / "multitrack"
+    return "\n".join((base / name).read_text(encoding="utf-8") for name in _EDITOR_ASSETS)
+
 
 # ------------------------------------------------------------------ 夹具工具
 def _make_wav(path: Path, seconds: float = 1.0, freq: float = 440.0, sr: int = 48000) -> Path:
@@ -467,7 +475,8 @@ def test_page_texts_complete():
 # ------------------------------------------------------------------ 8. 源码接线
 def test_app_registers_mix_routes_and_entry():
     """app.py 必须注册静态页/接口路由，并以独立「多轨编辑」Tab 内嵌编辑页。"""
-    app_src = (WEBUI_DIR / "app.py").read_text(encoding="utf-8")
+    from _app_bundle import app_bundle  # C1 拆分后源码级断言读 app bundle
+    app_src = app_bundle()
     for path in ("/static/multitrack/", "/api/mix/sources", "/api/mix/peaks",
                  "/api/mix/audio", "/api/mix/render", "/api/mix/status",
                  "/api/mix/cancel", "/api/mix/projects", "/api/mix/project",
@@ -484,7 +493,7 @@ def test_app_registers_mix_routes_and_entry():
 
 def test_editor_page_calls_expected_endpoints():
     """静态编辑页必须引用后端接口，且从后端文案表取词（无硬编码中文界面文案）。"""
-    page = (WEBUI_DIR / "static" / "multitrack" / "index.html").read_text(encoding="utf-8")
+    page = _editor_page()
     for path in ("/api/mix/sources", "/api/mix/peaks", "/api/mix/audio",
                  "/api/mix/render", "/api/mix/status", "/api/mix/cancel",
                  "/api/mix/projects", "/api/mix/project", "/api/mix/record"):
@@ -503,7 +512,7 @@ def test_editor_page_calls_expected_endpoints():
 
 def test_editor_download_progress_for_large_stems():
     """大轨远端下载耗时是主瓶颈：需按 Content-Length 显示下载百分比 + 解码提示。"""
-    page = (WEBUI_DIR / "static" / "multitrack" / "index.html").read_text(encoding="utf-8")
+    page = _editor_page()
     assert "async function fetchWithProgress(" in page
     assert "getReader()" in page                       # 流式读取以报进度
     assert 'resp.headers.get("Content-Length")' in page
@@ -514,7 +523,7 @@ def test_editor_download_progress_for_large_stems():
 
 def test_editor_page_has_transport_playback():
     """统一播放（transport）：单一播放/暂停、同步调度、播放头、空格键与循环。"""
-    page = (WEBUI_DIR / "static" / "multitrack" / "index.html").read_text(encoding="utf-8")
+    page = _editor_page()
     # UI：只有一套 transport 控件（每轨不再各播各的），播放按钮前有 label 说明
     for elem in ('id="tp-play"', 'id="tp-stop"', 'id="tp-loop"', 'id="tp-time"',
                  'id="t-transport"'):
@@ -559,7 +568,7 @@ def test_editor_page_has_transport_playback():
 
 def test_editor_defaults_hotkey_and_stepper():
     """交互细化：循环默认勾选、空格为全局热键、音效参数默认中性、旋钮/推子控件齐全。"""
-    page = (WEBUI_DIR / "static" / "multitrack" / "index.html").read_text(encoding="utf-8")
+    page = _editor_page()
     # 循环默认勾选，且状态初值与复选框一致
     assert 'id="tp-loop" type="checkbox" checked' in page
     assert "loop: true" in page
@@ -595,7 +604,7 @@ def test_editor_defaults_hotkey_and_stepper():
 
 def test_editor_fx_reset_tools_presets_and_embed_fit():
     """第三批：内嵌自适应高度、音质/压缩/回声一键归零、FX 工具模块（旁通/预设/复制）。"""
-    page = (WEBUI_DIR / "static" / "multitrack" / "index.html").read_text(encoding="utf-8")
+    page = _editor_page()
     # 内嵌自适应高度：同源反向改写自身 iframe 高度 + ResizeObserver 跟随内容
     for token in ("fitParentHeight", "watchEmbedHeight", "window.frameElement",
                   "ResizeObserver", "getBoundingClientRect().height"):
@@ -636,7 +645,7 @@ def test_editor_fx_reset_tools_presets_and_embed_fit():
 
 def test_editor_meters_wiring_is_bypass_only():
     """电平表/GR 表接线：取样链必须旁路（不串进音频链路），播放后启动刷新、停止后释放。"""
-    page = (WEBUI_DIR / "static" / "multitrack" / "index.html").read_text(encoding="utf-8")
+    page = _editor_page()
     # 旁路取样：分析器挂在 ChannelSplitter 上，源节点额外 connect 一路，不改动主链路
     assert "split.connect(anL, 0, 0)" in page and "split.connect(anR, 1, 0)" in page
     assert "g.connect(t.meter.out.split)" in page            # OUT 取轨增益之后

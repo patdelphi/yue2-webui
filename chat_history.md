@@ -789,3 +789,24 @@ ode --check static/js/app.js` OK；全量 `pytest tests/ --ignore=tests/test_i18
 - **改动文件**：app.py、src/backend_gguf.py、src/history.py、src/postprocess.py、src/queue_manager.py、src/voice_client.py、src/voice_ui_handlers.py、src/mix_web.py、src/i18n.py；tests/test_backend_watchdog.py（新）、tests/test_postprocess.py（新）、tests/test_generate_defense.py（新）、tests/test_history_filter.py、tests/test_history_recycle.py、tests/test_mix_web.py、tests/test_queue.py、tests/test_voice_client.py、tests/test_voice_handlers.py；删除根目录 `=1.47`。
 - **验证**：全量 `pytest tests/ --ignore=tests/test_i18n.py -q` → **219 passed**。
 - **未执行**：未 git commit / push（等用户明确批准）；未做 B1/B2/B3/C1/C6/C7。
+
+## 2026-10-06 10:16 — 代码审计后续优化 C3/C4/C5（任务级超时 / 预览转码后台化 / 长参数重构）
+
+- **用户诉求**：「commit，后续优化继续执行」；经确认后续优化全做 C3+C4+C5，C3 采用协作式（监控线程 set cancel_event + 标记 timed_out，不硬 kill）。
+- **C3 任务级超时**（`src/queue_manager.py`、`app.py`、`src/i18n.py`、`src/mix_web.py`）：新增 `DEFAULT_MAX_RUNTIME`（生成 6h / 转录·分离·混音 2h）与哨兵 `TIMEOUT_ERROR`；`Task` 增 `cancel_event`/`max_runtime`/`timed_out`/`_done_event`；`_worker_loop` 启 daemon `_watchdog`（`_done_event.wait(max_runtime)` 超时→置 timed_out + `cancel_event.set()`），收尾 `finally` 置 `_done_event` 立刻唤醒监控线程；超时导致被取消的任务统一改写为 `FAILED`+`TIMEOUT_ERROR`（覆盖 CANCELLED）。UI 文案国际化：`_localize_task_error` 3 处统一、i18n 增「任务超时」、mix_web 就地翻译。
+- **C4 预览转码后台化**（`src/voice_ui_handlers.py`）：新增单线程转码队列（`deque`+去重 set+Lock+懒启动 daemon）；`_transcode_preview`/`_preview_loop`/`_enqueue_preview`/`schedule_preview`（非阻塞，已有且不旧直接复用）；`_build_stems` 改用 `schedule_preview`，回放缺失预览件自动退回原件（存量按 `<原名>_preview.mp3` 推导）；`_make_preview` 保留同步语义供点选即时试听。
+- **C5 长参数重构**（`app.py`）：新增 `PRESET_PARAM_KEYS`（23 键单一来源），`on_preset_save(name, *values)` → `dict(zip(...))` + 数量不符 `raise ValueError`；`on_preset_load` 复用同常量；新增 `@dataclass GenerationOutcome`（12 字段 + `to_gradio()`），`_generate_worker` 两处返回改结构，`on_generate` 侧 `(*outcome.to_gradio(), seed)`。
+- **改动文件**：app.py、src/queue_manager.py、src/i18n.py、src/mix_web.py、src/voice_ui_handlers.py；tests/test_queue.py、tests/test_voice_handlers.py、tests/test_preset.py、tests/test_generate_defense.py；Docs/todo.md、Docs/changelog.md、chat_history.md。
+- **验证**：`py_compile` 通过；相关用例 51 passed；全量 `pytest tests/ --ignore=tests/test_i18n.py -q` → **227 passed**（2 条既有 deprecation 警告，与本次无关）。
+- **未执行**：未 git commit / push（等用户明确批准）；未做 B1/B2/B3/C1/C2/C6/C7；真实浏览器端到端未复测。
+## 2026-10-06 11:20 — 完成全部优化 B1/B2/B3/C1/C6 并做前端回归
+
+- **用户诉求**：「先完成全部优化，再进行前端测试」；C1 经确认做「完整 Phase 2+3」（拆分 app.py）。
+- **执行**：
+  - B1 抽 `src/audio_probe.py::probe_duration`（3 处复用）；B2 合并 `voice_ui_handlers` 三段管线共享逻辑；B3 `app.js` 三套 ABC 预览合并为 `initAbcPreviewCore` 并升版本号 v=18；C6 多轨 `index.html` 拆出 `multitrack.css`/`multitrack.js`。
+  - C1 三阶段：`src/app_utils.py`（纯常量）→ `src/ui_tabs.py`(1511)（CSS/JS 常量 + `build_ui`，调用时注入 app 命名空间）→ `src/callbacks_generate.py`(780)/`callbacks_transcribe.py`/`callbacks_history.py`/`callbacks_voice.py`(759)/`callbacks_settings.py`（`@dataclass XxxDeps` 注入 + app.py 薄封装）。app.py 3699 → **842 行**。
+  - 测试改造：新增 `tests/_app_bundle.py::app_bundle()`，源码级断言统一改读 bundle。
+- **改动文件**：app.py；src/ 下 app_utils、audio_probe、ui_tabs、callbacks_generate/transcribe/history/voice/settings、i18n、mix_render、mix_web、queue_manager、voice_client、voice_ui_handlers；static/js/app.js、static/multitrack/index.html + multitrack.css/js；tests/ 多个（含新增 _app_bundle.py、test_audio_probe.py）；Docs/todo.md、Docs/changelog.md、chat_history.md。
+- **验证**：`py_compile` 全通过；UI 冒烟 `blocks=468`；symtable 静态检查无缺失全局名；全量 `pytest tests/ --ignore=tests/test_i18n.py -q` → **236 passed**。
+- **前端回归**：重启 9898 服务（pid 56352）后浏览器实测——7 Tab 全渲染；静态资源 `app.js?v=18`/wavesurfer/多轨 iframe 均 200；控制台无新增错误（仅既有 manifest.json 404）；语言切换 zh↔en 双向生效（Tab + lang-signal + 服务端 _CUR_LANG）；多轨编辑器 `multitrack.css?v=1`/`multitrack.js?v=1` 加载正常；三处 ABC 预览容器均在 DOM。
+- **未执行**：未 git commit / push（等用户明确批准）；未测真实生成/分离/翻唱任务与预设保存写盘；未跑 tests/test_i18n.py（按既有约定忽略）。

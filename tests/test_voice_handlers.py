@@ -13,6 +13,8 @@
 
 import sys
 import tempfile
+import time
+from collections import deque
 from pathlib import Path
 
 import pytest
@@ -21,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import voice_ui_handlers  # noqa: E402  供 monkeypatch 替换模块级 queue_manager
 from voice_ui_handlers import (VoiceHandlers, new_short_id, detect_voice,  # noqa: E402
-                               _voice_score, _build_stems, _make_preview)
+                               _voice_score, _build_stems, _make_preview, schedule_preview)
 from history import HistoryManager  # noqa: E402
 from queue_manager import TaskType, TaskStatus, TaskCancelledError  # noqa: E402
 
@@ -412,7 +414,8 @@ def test_build_stems_carries_preview_key(tmp_path, monkeypatch):
     """_build_stems 每条 stem 含 preview（回放用）与 path（合成用），缺失文件不入列。"""
     v = tmp_path / "vocals.wav"
     v.write_bytes(b"\x00")
-    monkeypatch.setattr(voice_ui_handlers, "_make_preview", lambda p: str(p) + ".mp3")
+    # 产物入库走非阻塞的 schedule_preview（后台转码，不拖慢 worker）
+    monkeypatch.setattr(voice_ui_handlers, "schedule_preview", lambda p: str(p) + ".mp3")
     stems = _build_stems({"vocals": str(v), "missing": str(tmp_path / "nope.wav")})
     assert len(stems) == 1  # 不存在的产物被剔除
     s = stems[0]
@@ -421,9 +424,36 @@ def test_build_stems_carries_preview_key(tmp_path, monkeypatch):
     assert s["preview"] == str(v) + ".mp3"     # 小件：历史回放用
 
 
+def test_schedule_preview_nonblocking_and_dedup(tmp_path, monkeypatch):
+    """schedule_preview：不阻塞（转码未完成返回空串）、同一目标去重只排一次队。"""
+    src = tmp_path / "vocals.wav"
+    src.write_bytes(b"\x00")
+    calls = []
+    # 用一个"慢转码"替身：确认 schedule_preview 不会同步等待它完成
+    monkeypatch.setattr(voice_ui_handlers, "_transcode_preview",
+                        lambda s, d: (calls.append(str(s)), time.sleep(0.3),
+                                      Path(d).write_bytes(b"\x00")))
+    monkeypatch.setattr(voice_ui_handlers, "_preview_pending", set())
+    monkeypatch.setattr(voice_ui_handlers, "_preview_queue", deque())
+    t0 = time.time()
+    assert schedule_preview(str(src)) == ""            # 尚未转码 → 空串（回放退回原件）
+    assert time.time() - t0 < 0.2, "schedule_preview 不应同步等待转码"
+    # 立即再登记：同一目标已 pending，不重复入队
+    schedule_preview(str(src))
+    assert len(voice_ui_handlers._preview_queue) <= 1, voice_ui_handlers._preview_queue
+    # 等后台线程完成，预览件生成后再次调用应直接返回路径（复用）
+    deadline = time.time() + 5
+    while time.time() < deadline and not (tmp_path / "vocals_preview.mp3").exists():
+        time.sleep(0.1)
+    assert (tmp_path / "vocals_preview.mp3").exists(), "后台转码应生成预览件"
+    assert schedule_preview(str(src)) == str(tmp_path / "vocals_preview.mp3")
+    assert len(calls) == 1, f"同一目标只应转码一次，实际 {calls}"
+
+
 def test_voice_stem_items_prefers_preview_keeps_full_for_mix():
-    """app.py 源码断言：回放优先取 preview，合成链路仍读 path；切 Tab 自动回填播放器组。"""
-    src = (Path(__file__).resolve().parent.parent / "app.py").read_text(encoding="utf-8-sig")
+    """app 源码断言：回放优先取 preview，合成链路仍读 path；切 Tab 自动回填播放器组。"""
+    from _app_bundle import app_bundle  # C1 拆分后源码级断言读 app bundle
+    src = app_bundle()
     assert 'play = preview if preview and Path(preview).exists() else full' in src
     assert 'full = s.get("path", "")' in src          # 合成链路取原件
     # 存量记录无 preview 键：按 <原名>_preview.mp3 命名约定推导（免 DB 迁移）
@@ -436,12 +466,13 @@ def test_voice_stem_items_prefers_preview_keeps_full_for_mix():
 
 
 def test_tab_switch_refreshes_library_previews():
-    """app.py 源码断言：切 Tab 刷新下拉时同步刷新「试听」播放器。
+    """app 源码断言：切 Tab 刷新下拉时同步刷新「试听」播放器。
 
     Gradio 的 .change 只在用户交互时触发，切 Tab 用 gr.update 程序化设值不会触发它；
     若不同步刷新试听，就会出现「下拉显示着选中项、试听却是空的」假选中。
     """
-    src = (Path(__file__).resolve().parent.parent / "app.py").read_text(encoding="utf-8-sig")
+    from _app_bundle import app_bundle  # C1 拆分后源码级断言读 app bundle
+    src = app_bundle()
     assert "def _preview_first_update(" in src
     assert "lib_stem_preview, lib_ref_preview," in src       # 分离 Tab：素材库/音色库试听
     assert "cover_ref_preview, cover_acc_preview," in src    # 翻唱 Tab：音色库/自定义伴奏试听
@@ -492,17 +523,21 @@ def test_rename_and_delete_move_preview_sibling(tmp_path, monkeypatch):
 
 def test_app_prefers_small_audio_for_all_players():
     """app.py 源码断言：主播放器/分离翻唱任务历史回放/库试听统一走小件；后端链路仍用原件。"""
-    src = (Path(__file__).resolve().parent.parent / "app.py").read_text(encoding="utf-8-sig")
+    from _app_bundle import app_bundle  # C1 拆分后源码级断言读 app bundle
+    src = app_bundle()
     assert "def _prefer_mp3(path):" in src
     assert "def _preview_for_library(path):" in src
     assert "from voice_ui_handlers import VoiceHandlers, detect_voice, _make_preview" in src
     # 主播放器：生成 / 重合成 / 批量变体 / 历史页 四处均优先取同目录同名 MP3
-    assert "_prefer_mp3(str(first_result.audio_path))" in src
-    assert "return _prefer_mp3(str(result.audio_path)), duration_info" in src
-    assert '"audio_path": _prefer_mp3(str(result.audio_path))' in src
-    assert "_prefer_mp3(str(audio_path))" in src
-    # 分离/翻唱任务历史回放用 _voice_stem_items（preview 优先 + 命名推导）
-    assert '_voice_stem_items(getattr(entry, "stems", None)' in src
+    # （生成组回调拆分后调用形式为 d.prefer_mp3(...)，故按不含前缀的名字断言）
+    assert "prefer_mp3(str(first_result.audio_path))" in src
+    assert "prefer_mp3(str(result.audio_path)), duration_info" in src
+    assert src.count("prefer_mp3(str(result.audio_path))") >= 2  # 重合成返回值 + 批量变体载荷
+    assert "prefer_mp3(str(audio_path))" in src
+    # 分离/翻唱任务历史回放用 _voice_stem_items（preview 优先 + 命名推导）；
+    # 音色组搬迁后调用注入 deps（_voice_stem_items(d, getattr(...))），故分两段等价匹配
+    assert "_voice_stem_items(" in src
+    assert 'getattr(entry, "stems", None)' in src
     # 歌曲历史页表格只列 generation 记录，无 stems 可回放 → 相关轨道回放 UI 已整体移除
     assert "history-stem-audio" not in src
     assert "history_stem" not in src
@@ -513,12 +548,13 @@ def test_app_prefers_small_audio_for_all_players():
 def test_cover_tab_management_moved_to_separation():
     """翻唱页仅保留选择+试听；删除/重命名管理功能移至分离页库管理区。
 
-    断言 app.py 源码：
+    断言 app 源码：
     1. 翻唱页的管理组件（cover_ref_del/cover_acc_del/重命名）已移除；
     2. 分离页存在库管理组件（lib_stem_*/lib_ref_*）并绑定现有删除/重命名回调；
     3. 翻唱页保留试听播放器（cover_ref_preview/cover_acc_preview）。
     """
-    src = (Path(__file__).resolve().parent.parent / "app.py").read_text(encoding="utf-8-sig")
+    from _app_bundle import app_bundle  # C1 拆分后源码级断言读 app bundle
+    src = app_bundle()
     # 翻唱页管理组件移除
     for token in ("cover_ref_del_btn", "cover_acc_del_btn",
                   "cover_ref_rename_input", "cover_acc_rename_input"):
@@ -544,13 +580,15 @@ def test_separation_tracks_can_be_saved_to_stem_library():
     2. 保存按钮调用 on_voice_save_stem_to_lib，且该回调调用 voice_handlers.save_stem；
     3. 分离完成时回填「待入库轨道」下拉并缓存 stems（供保存时回查轨道类型）。
     """
-    src = (Path(__file__).resolve().parent.parent / "app.py").read_text(encoding="utf-8-sig")
+    from _app_bundle import app_bundle  # C1 拆分后源码级断言读 app bundle
+    src = app_bundle()
     for token in ("lib_stem_pick", "lib_stem_save_name", "lib_stem_save_btn", "sep_stems_state"):
         assert token in src, f"分离页应有入库组件: {token}"
     assert "def on_voice_save_stem_to_lib(" in src
     assert "lib_stem_save_btn.click(fn=on_voice_save_stem_to_lib" in src
     assert "voice_handlers.save_stem(" in src                      # 后端写入能力已被接线
-    assert "_dd_update(_stem_pick_choices(stems))" in src          # 分离完成回填待入库下拉
+    # 分离完成回填待入库下拉；音色组搬迁后调用注入 deps，故按组合调用前半段等价匹配
+    assert "_dd_update(_stem_pick_choices(" in src
     assert "def _stem_pick_choices(" in src
     # 人声归音色库：待入库下拉须排除 vocals（与素材库下拉一致）
     assert 's.get("type") == "vocals"' in src

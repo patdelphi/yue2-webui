@@ -1,0 +1,448 @@
+  :root {
+    color-scheme: light;
+    --bg: #ffffff; --fg: #1f2328; --muted: #6b7280; --line: #d8dee4;
+    --card: #f7f8fa; --card-2: #ffffff; --accent: #3b82f6; --accent-fg: #ffffff;
+    --wave: #3b82f6; --sel: rgba(59,130,246,.18); --sec: #eef2f7;
+    --danger: #ef4444; --ok: #16a34a;
+    /* —— 设计令牌：间距 / 圆角 / 控件高度 / 分层阴影 / 聚焦光圈 —— */
+    --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 18px; --sp-5: 24px;
+    --r-lg: 14px; --r-md: 10px; --r-sm: 7px;
+    --h-ctl: 28px;
+    --shadow-sm: 0 1px 2px rgba(16,24,40,.06);
+    --shadow: 0 1px 2px rgba(16,24,40,.05), 0 4px 12px -6px rgba(16,24,40,.14);
+    --shadow-lg: 0 16px 32px -16px rgba(16,24,40,.30);
+    --ring: 0 0 0 3px rgba(59,130,246,.22);
+    --accent-soft: rgba(59,130,246,.10);
+    /* FX 面板（专业效果器风）：面板底/描边/旋钮盘面/推子轨道 + 三个模块主色 */
+    --panel: #eef1f5; --panel-line: #dde3ea; --knob-bg: #ffffff; --knob-track: #cfd8e3;
+    --mod-eq: #3b82f6; --mod-dyn: #d97706; --mod-echo: #7c3aed; --mod-tool: #0d9488;
+    /* 轨道色板（按轨索引循环）+ 波形网格线 */
+    --trk-1: #3b82f6; --trk-2: #8b5cf6; --trk-3: #0ea5e9;
+    --trk-4: #f59e0b; --trk-5: #ec4899; --trk-6: #10b981;
+    --grid: rgba(16,24,40,.10);
+  }
+  /* 深色变量：系统偏好（父页面未指定主题时生效）+ 父页面显式指定 data-theme="dark" */
+  @media (prefers-color-scheme: dark) {
+    html:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #16181d; --fg: #e6e8eb; --muted: #9aa4b2; --line: #3a414c;
+      --card: #1d2026; --card-2: #22262e; --accent: #3b82f6; --accent-fg: #ffffff;
+      --wave: #60a5fa; --sel: rgba(96,165,250,.22); --sec: #262a32;
+      --panel: #22262e; --panel-line: #343a45; --knob-bg: #2b303a; --knob-track: #414857;
+      --mod-eq: #60a5fa; --mod-dyn: #f59e0b; --mod-echo: #a855f7; --mod-tool: #2dd4bf;
+      --trk-1: #60a5fa; --trk-2: #a78bfa; --trk-3: #38bdf8;
+      --trk-4: #fbbf24; --trk-5: #f472b6; --trk-6: #34d399;
+      --grid: rgba(255,255,255,.10);
+      --accent-soft: rgba(96,165,250,.14);
+      --shadow: 0 1px 2px rgba(0,0,0,.35), 0 6px 18px -8px rgba(0,0,0,.55);
+      --shadow-lg: 0 18px 36px -18px rgba(0,0,0,.75);
+    }
+  }
+  /* 内嵌进 Gradio 时由父页面主题驱动（见 syncParentTheme） */
+  html[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #16181d; --fg: #e6e8eb; --muted: #9aa4b2; --line: #3a414c;
+    --card: #1d2026; --card-2: #22262e; --accent: #3b82f6; --accent-fg: #ffffff;
+    --wave: #60a5fa; --sel: rgba(96,165,250,.22); --sec: #262a32;
+    --panel: #22262e; --panel-line: #343a45; --knob-bg: #2b303a; --knob-track: #414857;
+    --mod-eq: #60a5fa; --mod-dyn: #f59e0b; --mod-echo: #a855f7; --mod-tool: #2dd4bf;
+    --trk-1: #60a5fa; --trk-2: #a78bfa; --trk-3: #38bdf8;
+    --trk-4: #fbbf24; --trk-5: #f472b6; --trk-6: #34d399;
+    --grid: rgba(255,255,255,.10);
+    --accent-soft: rgba(96,165,250,.14);
+    --shadow: 0 1px 2px rgba(0,0,0,.35), 0 6px 18px -8px rgba(0,0,0,.55);
+    --shadow-lg: 0 18px 36px -18px rgba(0,0,0,.75);
+  }
+  html[data-theme="light"] {
+    color-scheme: light;
+    --bg: #ffffff; --fg: #1f2328; --muted: #6b7280; --line: #d8dee4;
+    --card: #f7f8fa; --card-2: #ffffff; --accent: #3b82f6; --accent-fg: #ffffff;
+    --wave: #3b82f6; --sel: rgba(59,130,246,.18); --sec: #eef2f7;
+    --danger: #ef4444; --ok: #16a34a;
+    --panel: #eef1f5; --panel-line: #dde3ea; --knob-bg: #ffffff; --knob-track: #cfd8e3;
+    --mod-eq: #3b82f6; --mod-dyn: #d97706; --mod-echo: #7c3aed; --mod-tool: #0d9488;
+    --trk-1: #3b82f6; --trk-2: #8b5cf6; --trk-3: #0ea5e9;
+    --trk-4: #f59e0b; --trk-5: #ec4899; --trk-6: #10b981;
+    --grid: rgba(16,24,40,.10);
+    --accent-soft: rgba(59,130,246,.10);
+    --shadow: 0 1px 2px rgba(16,24,40,.05), 0 4px 12px -6px rgba(16,24,40,.14);
+    --shadow-lg: 0 16px 32px -16px rgba(16,24,40,.30);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: var(--sp-4) var(--sp-4) 48px; background: var(--bg); color: var(--fg);
+    font: 13px/1.5 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  /* 内嵌模式：收紧内边距，避免与外层 Tab 的留白叠加 */
+  html[data-embed="1"] body { padding: var(--sp-2) var(--sp-3) 28px; }
+  html[data-embed="1"] h1 { font-size: 15px; }
+  html[data-embed="1"] .hint { margin-bottom: var(--sp-2); }
+  /* 页头：标题 + 说明，一条分隔线与下方卡片区分层级 */
+  .pagehead { margin-bottom: var(--sp-3); }
+  h1 { font-size: 18px; font-weight: 650; letter-spacing: .01em; margin: 0 0 4px; }
+  .hint { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 0; }
+  /* 卡片：外层容器底色，内部控件用 --card-2（更亮）形成层次 */
+  .card {
+    border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--card);
+    padding: var(--sp-3) var(--sp-4); margin-bottom: var(--sp-3); box-shadow: var(--shadow-sm);
+  }
+  /* 并排卡片组：素材 / 工程同排，避免两块窄卡片叠出大片空白 */
+  .cardgrid {
+    display: grid; grid-template-columns: minmax(300px, 1fr) minmax(300px, 1fr);
+    gap: var(--sp-3); margin-bottom: var(--sp-3);
+  }
+  .cardgrid > .card { margin-bottom: 0; }
+  @media (max-width: 720px) { .cardgrid { grid-template-columns: 1fr; } }
+  .row { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+  .row + .row { margin-top: var(--sp-3); }
+  label.lb { color: var(--muted); font-size: 12px; min-width: 76px; font-weight: 500; }
+  /* —— 表单控件：统一高度与圆角，聚焦时主题色描边 + 光圈 —— */
+  select, input[type=text], input[type=number] {
+    background: var(--card-2); color: var(--fg); border: 1px solid var(--line);
+    border-radius: var(--r-sm); padding: 0 8px; height: var(--h-ctl); font-size: 12px;
+    min-width: 0; font-family: inherit;
+    transition: border-color .15s, box-shadow .15s, background .15s;
+  }
+  select { max-width: 420px; cursor: pointer; }
+  input[type=number] { width: 88px; }
+  input[type=text] { background: var(--card-2); }
+  select:focus, input[type=text]:focus, input[type=number]:focus {
+    outline: none; border-color: var(--accent); box-shadow: var(--ring);
+  }
+  /* —— 按钮：默认次级（幽灵），.primary 为主操作，.ghost/.danger 为变体 —— */
+  button {
+    display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+    /* 控件底比卡片底略亮一层（color-mix），避免按钮/芯片与所在卡片糊成一片 */
+    background: color-mix(in srgb, var(--fg) 8%, var(--card-2));
+    color: var(--fg); border: 1px solid var(--line);
+    border-radius: var(--r-sm); padding: 0 12px; height: var(--h-ctl); font-size: 12px;
+    font-family: inherit; cursor: pointer; white-space: nowrap;
+    transition: background .15s, border-color .15s, box-shadow .15s, filter .15s, transform .1s;
+  }
+  button:hover { border-color: var(--accent); background: var(--accent-soft); }
+  button:active { transform: translateY(.5px); }
+  button:focus-visible { outline: none; box-shadow: var(--ring); }
+  button.primary {
+    background: var(--accent); color: var(--accent-fg); border-color: var(--accent);
+    box-shadow: 0 1px 2px rgba(16,24,40,.16);
+  }
+  button.primary:hover { background: var(--accent); filter: brightness(1.08); }
+  button.ghost { background: transparent; border-color: transparent; color: var(--muted); }
+  button.ghost:hover { color: var(--fg); background: var(--accent-soft); border-color: transparent; }
+  button.danger { color: var(--danger); }
+  button.danger:hover { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, transparent); }
+  button:disabled { opacity: .45; cursor: default; transform: none; }
+  .msg { font-size: 12px; color: var(--muted); }
+  .msg.err { color: var(--danger); }
+  .msg.ok { color: var(--ok); }
+  /* 空状态：列表无内容时的占位提示 */
+  .empty { color: var(--muted); font-size: 12px; padding: 10px 2px; }
+  /* ===== 轨道卡片：左侧轨色条（--trk）+ 头部控制分组 + 波形区 ===== */
+  .track {
+    position: relative; border: 1px solid var(--line); border-radius: var(--r-md);
+    padding: var(--sp-2) var(--sp-3) var(--sp-3) calc(var(--sp-3) + 4px);
+    margin-bottom: var(--sp-2); background: var(--card-2); overflow: hidden;
+    transition: box-shadow .18s, border-color .18s;
+  }
+  .track::before {                                 /* 轨色条：标识本轨身份 */
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+    background: var(--trk, var(--accent));
+  }
+  .track:hover { box-shadow: var(--shadow); border-color: color-mix(in srgb, var(--trk) 45%, var(--line)); }
+  .thead { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; margin-bottom: var(--sp-2); }
+  .tgrp { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+  .tgrp.right { margin-left: auto; }              /* 右侧控制组：靠行尾对齐 */
+  .tname { font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
+  .tname::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--trk, var(--accent)); }
+  .tstate { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .sep { width: 1px; height: 18px; background: var(--line); }
+  /* 波形区：加共享时间刻度尺，网格线与刻度对齐（见 drawTrack / renderRuler）
+     左右内缩量与 .track 的边框+内边距一致，保证刻度尺与下方波形严格对齐 */
+  .ruler {
+    position: relative; height: 20px;
+    margin: 0 calc(var(--sp-3) + 1px) var(--sp-1) calc(var(--sp-3) + 5px);
+  }
+  .ruler .tk {
+    position: absolute; bottom: 0; height: 7px; border-left: 1px solid var(--grid);
+  }
+  .ruler .tk span {
+    position: absolute; left: 3px; bottom: 9px; font-size: 9px; line-height: 1;
+    color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums;
+  }
+  .ruler .tk.last span { left: auto; right: 2px; }
+  .wave {
+    display: block; width: 100%; height: 78px; cursor: crosshair; touch-action: none;
+    border-radius: var(--r-sm); background: var(--sec);
+    box-shadow: inset 0 0 0 1px var(--line);
+  }
+  /* 波形外层：承载播放头覆盖层（绝对定位，避免每帧整幅重绘 canvas） */
+  .wave-wrap { position: relative; }
+  .playhead {
+    position: absolute; top: 0; bottom: 0; left: 0; width: 2px; margin-left: -1px;
+    background: var(--danger); pointer-events: none; box-shadow: 0 0 6px color-mix(in srgb, var(--danger) 55%, transparent);
+  }
+  /* —— 增益推子：细轨道 + 主题色填充 + 圆形滑块；数值徽标两侧配 ± 步进按钮 —— */
+  .gain {
+    -webkit-appearance: none; appearance: none; width: 140px; height: 18px;
+    background: transparent; cursor: pointer; margin: 0;
+  }
+  .gain::-webkit-slider-runnable-track {
+    height: 5px; border-radius: 3px; border: 1px solid var(--line); background: var(--sec);
+  }
+  .gain::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; width: 14px; height: 14px; border-radius: 50%;
+    background: var(--card-2); border: 2px solid var(--trk, var(--accent)); margin-top: -5.5px;
+    box-shadow: var(--shadow-sm); transition: transform .12s;
+  }
+  .gain:hover::-webkit-slider-thumb { transform: scale(1.1); }
+  .gain:focus-visible { outline: none; }
+  .gain:focus-visible::-webkit-slider-thumb { box-shadow: var(--ring); }
+  .gain::-moz-range-track { height: 5px; border-radius: 3px; background: var(--sec); border: 1px solid var(--line); }
+  .gain::-moz-range-thumb { width: 12px; height: 12px; border-radius: 50%; background: var(--card-2); border: 2px solid var(--trk, var(--accent)); }
+  .gstep { display: inline-flex; align-items: center; gap: 3px; }
+  .gain-val {
+    font-size: 11px; color: var(--fg); width: 58px; text-align: center;
+    font-variant-numeric: tabular-nums;
+    background: color-mix(in srgb, var(--fg) 8%, var(--card-2)); border: 1px solid var(--line);
+    border-radius: var(--r-sm); padding: 2px 0;
+  }
+  .stp {
+    width: 22px; height: 22px; padding: 0; font-size: 13px; line-height: 1;
+    border-radius: var(--r-sm); color: var(--muted);
+    background: color-mix(in srgb, var(--fg) 8%, var(--card-2));
+  }
+  .stp:hover { color: var(--accent); }
+  /* —— 复选框：原生框隐藏，label 变成芯片按钮（选中时主题色高亮） —— */
+  .chk {
+    font-size: 12px; color: var(--muted); display: inline-flex; align-items: center;
+    gap: 4px; cursor: pointer; user-select: none;
+  }
+  .chk input[type=checkbox] { accent-color: var(--accent); width: 14px; height: 14px; cursor: pointer; }
+  .chk.pill {
+    height: 22px; padding: 0 9px; border-radius: 11px; gap: 0;
+    border: 1px solid var(--line); background: color-mix(in srgb, var(--fg) 8%, var(--card-2));
+    color: var(--muted);
+    font-weight: 600; letter-spacing: .04em; transition: all .15s;
+  }
+  .chk.pill input[type=checkbox] { display: none; }
+  .chk.pill:hover { color: var(--fg); border-color: var(--accent); }
+  .chk.pill:has(input:checked) { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+  .chk.pill.mute:has(input:checked) { background: var(--danger); border-color: var(--danger); }
+  /* —— 淡入/淡出：标签 + 等宽数字输入，紧凑成组 —— */
+  .fades { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; }
+  .fades input { width: 62px; height: 22px; padding: 0 6px; font-size: 11px; text-align: center; }
+  .tbtn { height: 22px; padding: 0 9px; font-size: 11px; }
+  audio { height: 30px; vertical-align: middle; }
+  .mixitem {
+    display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; padding: 9px 0;
+    border-top: 1px solid var(--line);
+  }
+  .mixitem:first-child { border-top: none; }
+  .mixname { min-width: 200px; font-size: 12px; font-weight: 500; }
+  a.dl { font-size: 12px; color: var(--accent); text-decoration: none; }
+  a.dl:hover { text-decoration: underline; }
+  /* 单轨试听按钮：仅显示 ▶/⏸ 符号，紧凑排版 */
+  button.pl { padding: 0 10px; height: 24px; font-size: 12px; line-height: 1; }
+  /* 自定义滚动条（内容区超长时与主题一致） */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: var(--knob-track); border-radius: 5px; border: 2px solid transparent; background-clip: padding-box; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: padding-box; }
+  /* 统一 transport 工具条：左侧「播放/停止/循环」控制簇，中部时钟读数，右侧状态消息 */
+  .transport {
+    border: 1px solid var(--line); border-radius: var(--r-md); background: var(--card-2);
+    padding: var(--sp-2) var(--sp-3); gap: var(--sp-3); margin-top: var(--sp-1);
+    box-shadow: var(--shadow-sm);
+  }
+  .transport label.lb { min-width: auto; }
+  /* 控制簇：三件套共用相邻边框（负间距合并），仅两端圆角，形似硬件运输键 */
+  .tp-grp { display: inline-flex; align-items: center; }
+  .tp-grp > * { height: 26px; }
+  .tp-grp > * + * { margin-left: -1px; }
+  .tp-grp > button, .tp-grp > .chk.pill { border-radius: 0; }
+  .tp-grp > :first-child { border-radius: var(--r-sm) 0 0 var(--r-sm); }
+  .tp-grp > :last-child { border-radius: 0 var(--r-sm) var(--r-sm) 0; }
+  .tp-grp > #tp-play { width: 40px; font-size: 14px; }
+  .tp-grp > #tp-stop { width: 40px; font-size: 12px; }
+  .tp-grp > .chk.pill { padding: 0 11px; }
+  /* 时钟读数：当前位置大写强调 + 「/」分隔 + 总时长弱化，等宽数字避免跳动 */
+  .tp-clock {
+    display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px;
+    border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--sec);
+    font-size: 13px; font-weight: 600; color: var(--fg);
+    font-variant-numeric: tabular-nums;
+  }
+  .tp-clock .tp-sep { color: var(--muted); font-weight: 400; }
+  .tp-clock #tp-dur { font-size: 12px; font-weight: 500; color: var(--muted); }
+  /* 播放中：当前时间码转主题色，一眼看出走带状态 */
+  .transport.on .tp-clock #tp-time { color: var(--accent); }
+  .tp-msg { margin-left: auto; }
+  /* 选区读数：起始时间码 + 选区时长（等宽数字，避免数值变化时抖动） */
+  .selinfo { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  /* ===== FX 面板（专业效果器风）：模块分组框 + 彩色标题 + 旋钮 + 垂直推子 =====
+     设计参照硬件/插件惯例：左侧模块色圆点 + 同色标题，旋钮盘面带行程弧·值弧·刻度·指针，
+     双极参数的值弧从中性点向两侧生长；推子为纵向轨道 + 模块色填充。
+     每个控件为「盘面 → 标签 → 数值徽标」三段。
+     排版约定：三个模块等高（面板 align-items:stretch），每个模块内部「可视化区 + 控件区」
+     统一为 --fx-h 高（EQ 曲线 / GR 表 / 推子轨道 / 旋钮列都吃同一高度），因此各模块的
+     顶端、底端与数值徽标基线完全对齐；控件区不足则垂直居中兜底。 */
+  .fxpanel {
+    /* --fx-h：模块内「可视化区 + 控件区」的统一高度，三个模块都吃这个高度以保证上下沿对齐 */
+    --fx-h: 122px;
+    /* --fxmod-w：音质与压缩模块的固定同宽（以音质「曲线 176 + 间隙 8 + 三旋钮 156 + 内边距」的实测宽度为准） */
+    --fxmod-w: 362px;
+    display: flex; align-items: stretch; gap: var(--sp-2); flex-wrap: wrap; margin: 0 0 var(--sp-2) 12px;
+  }
+  .fxmod {
+    display: flex; flex-direction: column; padding: 7px 10px 8px;
+    border: 1px solid var(--panel-line); border-radius: var(--r-md); background: var(--panel);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.05);
+  }
+  .fxmod[data-mod="eq"] { --mod: var(--mod-eq); }
+  .fxmod[data-mod="dyn"] { --mod: var(--mod-dyn); }
+  .fxmod[data-mod="echo"] { --mod: var(--mod-echo); }
+  .fxmod[data-mod="tool"] { --mod: var(--mod-tool); }
+  /* 音质 = 压缩 固定同宽：压缩内容（GR 表 + 两旋钮）水平居中，两块左右边框严格对齐 */
+  .fxmod[data-mod="eq"], .fxmod[data-mod="dyn"] { width: var(--fxmod-w); }
+  .fxmod[data-mod="dyn"] .fxmod-b { align-items: center; }
+  /* FX 工具模块：独占一整行（flex-basis 100% 强制换行并铺满），内部三组控件横向均布。
+     做成"工具栏"而非窄卡：音质/压缩/回声那一行只剩 ~66px（压缩加宽到与音质同宽后），
+     塞不下窄卡；若竖排三行会把面板撑到 283px，横向一行只需 ~222px。 */
+  .fxmod[data-mod="tool"] { flex: 1 1 100%; }
+  .fxmod[data-mod="tool"] .fxmod-b { flex-direction: row; align-items: center; justify-content: space-between; gap: 18px; }
+  .fxmod[data-mod="tool"] .ftrow + .ftrow { margin-top: 0; }   /* 横向排列时清掉竖排用的行距 */
+  /* 旁通：只压暗「受影响的处理模块」，FX 工具模块本身保持全亮（要能点回来） */
+  .fxpanel.fx-off .fxmod:not([data-mod="tool"]), .fxpanel.fx-off .fxmeter { opacity: .42; }
+  /* 模块标题条：左侧色点 + 着色标题 + 底部分隔线（固定高度，不参与拉伸） */
+  .fxmod-h {
+    flex: none; display: flex; align-items: center; gap: 5px; margin-bottom: 6px; padding-bottom: 4px;
+    border-bottom: 1px solid var(--panel-line);
+    font-size: 10.5px; line-height: 1; font-weight: 600; letter-spacing: .06em; color: var(--mod);
+  }
+  .fxmod-h::before {
+    content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--mod);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--mod) 70%, transparent);
+  }
+  .fxmod-h .fxmod-t { flex: 1 1 auto; }
+  /* 「归零」小按钮：平时低调，hover 才用模块色强调（音质 / 压缩各一个） */
+  .fxmod-r {
+    flex: none; margin-left: 6px; padding: 0 6px; height: 16px; line-height: 14px;
+    border: 1px solid var(--panel-line); border-radius: 4px; background: transparent;
+    color: var(--muted); font-size: 9.5px; letter-spacing: .04em; cursor: pointer;
+    transition: color .12s, border-color .12s, background .12s;
+  }
+  .fxmod-r:hover { color: var(--mod); border-color: var(--mod); background: color-mix(in srgb, var(--mod) 14%, transparent); }
+  /* —— FX 工具模块（旁通 / 预设 / 复制到其他轨）：三行紧凑控件 —— */
+  .ftrow { display: flex; align-items: center; gap: 6px; }
+  .ftrow + .ftrow { margin-top: 5px; }
+  .ftrow > .ftlbl { flex: none; min-width: 30px; font-size: 10px; color: var(--muted); white-space: nowrap; }
+  .ftsel {
+    flex: 1 1 auto; min-width: 0; height: 21px; padding: 0 4px; border-radius: 4px;
+    border: 1px solid var(--panel-line); background: var(--knob-bg); color: var(--fg); font-size: 10.5px;
+  }
+  .ftbtn {
+    flex: none; height: 21px; padding: 0 8px; border-radius: 4px; cursor: pointer;
+    border: 1px solid var(--panel-line); background: var(--sec); color: var(--fg);
+    font-size: 10.5px; white-space: nowrap;
+    transition: color .12s, border-color .12s, background .12s;
+  }
+  .ftbtn:hover { color: var(--mod); border-color: var(--mod); }
+  .ftbtn.on { color: var(--mod); border-color: var(--mod); background: color-mix(in srgb, var(--mod) 16%, transparent); }
+  .ftrow > .ftbtn.wfull { flex: 1 1 auto; }        /* 旁通行：按钮吃掉标签外的剩余宽度 */
+  /* 模块内容区：吃掉剩余高度，内容不足时垂直居中（保证与兄弟模块上下沿对齐） */
+  .fxmod-b { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; justify-content: center; }
+  .knobrow { display: flex; align-items: flex-start; gap: 6px; }
+  /* —— 旋钮：SVG 盘面（行程弧 + 值弧 + 刻度 + 指针）+ 标签 + 可编辑数值徽标 ——
+     旋钮列总高 = 盘面 32 + 间隙 2 + 标签 11 + 间隙 2 + 徽标 13 = 60，两行（+行距 2）= 122 = --fx-h */
+  .kb { width: 48px; display: flex; flex-direction: column; align-items: center; gap: 2px; outline: none; }
+  .kb-d {
+    position: relative; width: 32px; height: 32px; cursor: ns-resize; touch-action: none;
+    border-radius: 50%; filter: drop-shadow(0 1px 1px rgba(16,24,40,.18));
+  }
+  .kb-d svg { display: block; width: 32px; height: 32px; }
+  .kb-ring { fill: url(#kbFill); stroke: var(--panel-line); stroke-width: 1; }
+  .kb-track { fill: none; stroke: var(--knob-track); stroke-width: 2.5; stroke-linecap: round; opacity: .9; }
+  .kb-tk { stroke: var(--muted); stroke-width: 1; opacity: .55; }
+  .kb-arc { fill: none; stroke: var(--mod); stroke-width: 3.5; stroke-linecap: round; }
+  .kb-ptr { stroke: var(--fg); stroke-width: 2.2; stroke-linecap: round; }
+  .kb-cap { fill: var(--fg); opacity: .85; }
+  .kb:focus-visible .kb-d, .kb:focus-visible .fd-t { box-shadow: var(--ring); }
+  .kb-l, .fd-l { height: 11px; font-size: 10px; line-height: 11px; color: var(--muted); white-space: nowrap; }
+  /* 数值徽标：常态为只读文本，双击原地换成输入框（固定高度，保证各模块徽标基线齐平） */
+  .kb-v, .fd-v {
+    width: 100%; height: 13px; padding: 0; border-radius: 3px; text-align: center; cursor: text;
+    font-size: 11px; line-height: 13px; color: var(--fg); font-variant-numeric: tabular-nums;
+    white-space: nowrap; overflow: hidden;
+  }
+  .kb-v:hover, .fd-v:hover { background: var(--sec); box-shadow: inset 0 0 0 1px var(--panel-line); }
+  .fxnum {
+    width: 100%; height: 13px; padding: 0; border: none; border-radius: 3px; background: var(--knob-bg);
+    text-align: center; font-size: 11px; line-height: 13px; color: var(--fg);
+    font-variant-numeric: tabular-nums; outline: none;
+    box-shadow: inset 0 0 0 1px var(--mod);
+    -moz-appearance: textfield; appearance: textfield;
+  }
+  .fxnum::-webkit-outer-spin-button, .fxnum::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  /* —— 垂直推子：纵向轨道 + 模块色填充 + 带纹理的滑块（拖拽/点击跳转） ——
+     推子列总高 = 轨道 (--fx-h - 28) + 间隙 2 + 标签 11 + 间隙 2 + 徽标 13 = --fx-h */
+  .faderrow { display: flex; align-items: flex-start; gap: 8px; }
+  .fd { width: 48px; display: flex; flex-direction: column; align-items: center; gap: 2px; outline: none; }
+  .fd-t {
+    position: relative; width: 8px; height: calc(var(--fx-h) - 28px); border-radius: 4px;
+    background: var(--knob-track); cursor: ns-resize; touch-action: none;
+    box-shadow: inset 0 0 0 1px var(--panel-line);
+  }
+  .fd-f { position: absolute; left: 0; right: 0; bottom: 0; height: 0; border-radius: 4px; background: var(--mod); }
+  /* 滑块按「轨道高 - 滑块高」定位（--pos 由 JS 写入 0..1），两端都不越出轨道，不会压住下方标签 */
+  .fd-k {
+    --kd: 12px;
+    position: absolute; left: -5px; right: -5px; height: var(--kd);
+    top: calc((1 - var(--pos, 1)) * (100% - var(--kd)));
+    border-radius: 3px;
+    background: linear-gradient(var(--fg), color-mix(in srgb, var(--fg) 82%, #000));
+    box-shadow: 0 1px 3px rgba(0,0,0,.4);
+  }
+  .fd-k::after {                          /* 滑块中部手柄线，提升质感 */
+    content: ""; position: absolute; left: 3px; right: 3px; top: 50%; height: 1px;
+    margin-top: -.5px; background: var(--bg); opacity: .55;
+  }
+  /* —— 电平表（IN/OUT）与 GR 表 ——
+     列底即为「填充色」（电平为绿→黄→红渐变、GR 为 danger 红），用自上而下的遮罩盖住未点亮部分，
+     这样渐变的色标固定在整列上，不会随电平高低被拉伸；
+     GR 表填充自上而下（压缩越深越长），故遮罩改为从底部往上盖。 */
+  .fxmeter {
+    display: flex; flex-direction: column; align-items: center; gap: 4px;
+    align-self: stretch; min-height: 0; padding: 7px 6px;
+    border: 1px solid var(--panel-line); border-radius: var(--r-md); background: var(--panel);
+  }
+  .mt-bars { display: flex; gap: 2px; flex: 1; min-height: 0; position: relative; }
+  .mt-col { position: relative; width: 11px; border-radius: 2px; background: var(--knob-track); overflow: hidden; }
+  .mt-col.lv { background: linear-gradient(to top, #22c55e 0%, #22c55e 52%, #eab308 76%, #ef4444 94%); }
+  .mt-col.gr { background: linear-gradient(to bottom, #f59e0b 0%, var(--danger) 70%); }
+  .mt-mask { position: absolute; left: 0; right: 0; top: 0; height: 100%; background: var(--knob-track); }
+  .mt-mask.bot { top: auto; bottom: 0; }
+  .mt-peak { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: var(--fg); opacity: .8; }
+  .mt-lab { height: 11px; font-size: 9.5px; line-height: 11px; letter-spacing: .04em; color: var(--muted); }
+  /* 电平刻度：贴在表条上方的参考线（-6/-12/-24/-48 dBFS），不再需要读数字即可判断量级 */
+  .mt-tick {
+    position: absolute; left: 0; right: 0; height: 1px; background: var(--panel-line);
+    z-index: 2; pointer-events: none;
+  }
+  /* 压缩模块内的 GR 表：整列吃满 --fx-h（= 列高 + 间隙 + 「GR」标签），与左侧 EQ 曲线同高 */
+  .mt-gr { display: flex; flex-direction: column; align-items: center; gap: 2px; width: 20px; }
+  .mt-gr .mt-col { height: calc(var(--fx-h) - 13px); flex: none; }
+  /* —— 「可视化 + 控件」并排：音质模块（左 EQ 频响曲线 / 右 6 旋钮两行）、压缩模块（左 GR 表 / 右 2 旋钮两行） —— */
+  .fxside { display: flex; align-items: center; gap: 8px; }
+  .fxknobs { display: flex; flex-direction: column; gap: 2px; }
+  /* 边框用 inset 阴影而非 border：保证画布内容区尺寸与 JS 的 EQ_W/EQ_H 严格一致，曲线不被缩放 */
+  .eqc {
+    display: block; width: 176px; height: var(--fx-h); flex: none;
+    border: 0; border-radius: var(--r-sm); background: var(--knob-bg); cursor: ns-resize; touch-action: none;
+    box-shadow: inset 0 0 0 1px var(--panel-line);
+  }
+  .eqc:focus-visible { box-shadow: var(--ring), inset 0 0 0 1px var(--panel-line); }
+  /* —— 母带行：参数成组，渲染按钮与状态同排 —— */
+  .master { gap: var(--sp-3); }
+  .master .mg { display: inline-flex; align-items: center; gap: 5px; }
+  .master .mg input[type=number] { width: 76px; }
+  .master .mg input[type=text] { width: 180px; }

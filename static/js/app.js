@@ -243,92 +243,40 @@
             }
             initLyricsEditor();
 
-            function initAbcPreview() {
-                if (typeof ABCJS === 'undefined') {
-                    setTimeout(initAbcPreview, 500);
-                    return;
-                }
+            // ---------------------------------------------------------------
+            // 统一的 ABC 预览渲染器（B3：合并生成页/历史页/转谱页三套近似实现）
+            // 公共的防抖/轮询/重试/渲染逻辑只保留一份，各页差异通过 opts 参数化。
+            // ---------------------------------------------------------------
 
-                function findAbcTextarea() {
-                    var el = document.getElementById('gen-abc-output');
-                    if (el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT')) return el;
-                    if (el) {
-                        var tab = el.querySelector('textarea, input[type="text"]');
-                        if (tab) return tab;
-                    }
-                    return document.querySelector('#gen-abc-output textarea, #gen-abc-output input[type="text"]');
-                }
-
-                function ensureAccordionOpen(textarea) {
-                    if (!textarea) return;
-                    var buttons = document.querySelectorAll('button.label-wrap');
-                    for (var i = 0; i < buttons.length; i++) {
-                        var btn = buttons[i];
-                        if (btn.textContent.includes('生成的乐谱')) {
-                            if (!btn.classList.contains('open')) {
-                                btn.click();
-                            }
-                            break;
-                        }
+            // 展开「生成的乐谱」折叠区（仅生成页需要，渲染前调用）
+            function ensureAbcAccordionOpen() {
+                var buttons = document.querySelectorAll('button.label-wrap');
+                for (var i = 0; i < buttons.length; i++) {
+                    var btn = buttons[i];
+                    if (btn.textContent.includes('生成的乐谱')) {
+                        if (!btn.classList.contains('open')) { btn.click(); }
+                        break;
                     }
                 }
+            }
 
-                var abcTextarea = findAbcTextarea();
-                if (!abcTextarea) {
-                    setTimeout(initAbcPreview, 500);
-                    return;
+            // 按容器 id 定位其中的 ABC 文本框（生成页 / 历史页共用形态）
+            function findAbcTextareaById(id) {
+                var el = document.getElementById(id);
+                if (el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT')) return el;
+                if (el) {
+                    var tab = el.querySelector('textarea, input[type="text"]');
+                    if (tab) return tab;
                 }
+                return document.querySelector('#' + id + ' textarea, #' + id + ' input[type="text"]');
+            }
 
-                function renderAbc() {
-                    var current = findAbcTextarea();
-                    var abcText = current ? current.value : '';
-                    if (abcText && abcText.trim()) {
-                        ensureAccordionOpen(current);
-                        try {
-                            ABCJS.renderAbc("abc-paper", abcText, {
-                                responsive: "resize",
-                                scale: 0.7,
-                                staffwidth: 600
-                            });
-                            ABCJS.renderAudio("abc-audio", abcText, {
-                                displayLoop: true,
-                                displayRestart: true,
-                                displayPlay: true,
-                                displayProgress: true
-                            });
-                        } catch (e) {
-                            console.log("ABC render error:", e);
-                        }
-                    }
-                }
-
-                let debounceTimer;
-                function debouncedRender() {
-                    clearTimeout(debounceTimer);
-                    debounceTimer = setTimeout(renderAbc, 500);
-                }
-
-                abcTextarea.addEventListener('input', debouncedRender);
-
-                var lastValue = abcTextarea.value;
-                setInterval(function() {
-                    var current = findAbcTextarea();
-                    if (!current) return;
-                    if (current.value !== lastValue) {
-                        lastValue = current.value;
-                        if (current.value && current.value.trim()) {
-                            ensureAccordionOpen(current);
-                        }
-                        debouncedRender();
-                    }
-                }, 300);
-
-                renderAbc();
-
+            // 绑定「导出 MIDI / 导出 PNG」按钮（仅生成页）
+            function bindAbcExportButtons(findTextarea, paperId) {
                 document.querySelectorAll('button').forEach(function(btn) {
                     if (btn.textContent.includes('\u5BFC\u51FA MIDI')) {
                         btn.onclick = function() {
-                            var ta = findAbcTextarea();
+                            var ta = findTextarea();
                             const abcText = ta ? ta.value : '';
                             if (abcText && abcText.trim()) {
                                 const midiData = ABCJS.synth.createSynth(abcText);
@@ -344,7 +292,7 @@
                     }
                     if (btn.textContent.includes('\u5BFC\u51FA PNG')) {
                         btn.onclick = function() {
-                            const svg = document.querySelector('#abc-paper svg');
+                            const svg = document.querySelector('#' + paperId + ' svg');
                             if (svg) {
                                 const svgData = new XMLSerializer().serializeToString(svg);
                                 const canvas = document.createElement('canvas');
@@ -366,141 +314,150 @@
                     }
                 });
             }
-            initAbcPreview();
 
-            function initHistoryAbcPreview() {
+            // 核心渲染器。opts：
+            //   retry              重试入口（ABCJS/容器/文本框未就绪时 500ms 后重调）
+            //   paperId/audioId    ABCJS 乐谱/播放器容器 id
+            //   findTextarea       () => textarea|null，定位 ABC 文本来源
+            //   requirePaper       true 时容器缺失也重试（历史页/转谱页）
+            //   ensureAccordion    true 时渲染前展开「生成的乐谱」（生成页）
+            //   liveInput          true 时监听 input 事件并防抖渲染（生成页）
+            //   clearWhenEmpty     空文本时清空容器（历史页/转谱页）
+            //   hidePlaceholderId  非空文本时隐藏该容器内的居中占位（转谱页）
+            //   bindExports        true 时绑定导出 MIDI/PNG（生成页）
+            //   errorLabel         渲染异常时的 console 前缀
+            function initAbcPreviewCore(opts) {
                 if (typeof ABCJS === 'undefined') {
-                    setTimeout(initHistoryAbcPreview, 500);
+                    setTimeout(opts.retry, 500);
+                    return;
+                }
+                var paper = document.getElementById(opts.paperId);
+                if (opts.requirePaper && !paper) {
+                    setTimeout(opts.retry, 500);
+                    return;
+                }
+                var textarea = opts.findTextarea();
+                if (!textarea) {
+                    setTimeout(opts.retry, 500);
                     return;
                 }
 
-                var historyPaper = document.getElementById('history-abc-paper');
-                var historyAudio = document.getElementById('history-abc-audio');
-                if (!historyPaper) {
-                    setTimeout(initHistoryAbcPreview, 500);
-                    return;
+                // 转谱页：有内容时隐藏容器内的居中占位
+                function hidePlaceholder() {
+                    if (!opts.hidePlaceholderId) return;
+                    var container = document.getElementById(opts.hidePlaceholderId);
+                    if (!container) return;
+                    var ph = container.querySelector('div[style*="text-align:center"]');
+                    if (ph) ph.style.display = 'none';
                 }
 
-                function findHistoryAbcTextarea() {
-                    var el = document.getElementById('history-abc');
-                    if (el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT')) return el;
-                    if (el) {
-                        var tab = el.querySelector('textarea, input[type="text"]');
-                        if (tab) return tab;
-                    }
-                    return document.querySelector('#history-abc textarea, #history-abc input[type="text"]');
-                }
-
-                var abcTextarea = findHistoryAbcTextarea();
-                if (!abcTextarea) {
-                    setTimeout(initHistoryAbcPreview, 500);
-                    return;
-                }
-
-                function renderHistoryAbc() {
-                    var current = findHistoryAbcTextarea();
+                function render() {
+                    var current = opts.findTextarea();
                     var abcText = current ? (current.value || '') : '';
                     if (abcText && abcText.trim()) {
+                        if (opts.ensureAccordion) ensureAbcAccordionOpen();
+                        hidePlaceholder();
                         try {
-                            ABCJS.renderAbc("history-abc-paper", abcText, {
-                                responsive: "resize",
+                            ABCJS.renderAbc(opts.paperId, abcText, {
+                                responsive: 'resize',
                                 scale: 0.7,
                                 staffwidth: 600
                             });
-                            ABCJS.renderAudio("history-abc-audio", abcText, {
+                            ABCJS.renderAudio(opts.audioId, abcText, {
                                 displayLoop: true,
                                 displayRestart: true,
                                 displayPlay: true,
                                 displayProgress: true
                             });
                         } catch (e) {
-                            console.log("History ABC render error:", e);
+                            console.log((opts.errorLabel || 'ABC') + ' render error:', e);
                         }
-                    } else {
-                        if (historyPaper) historyPaper.innerHTML = '';
-                        if (historyAudio) historyAudio.innerHTML = '';
+                    } else if (opts.clearWhenEmpty) {
+                        if (paper) paper.innerHTML = '';
+                        var audioEl = document.getElementById(opts.audioId);
+                        if (audioEl) audioEl.innerHTML = '';
                     }
                 }
 
-                var lastHistoryValue = abcTextarea.value;
+                var debounceTimer;
+                function debouncedRender() {
+                    clearTimeout(debounceTimer);
+                    debounceTimer = setTimeout(render, 500);
+                }
+
+                // 生成页：用户直接编辑 ABC 文本时即时（防抖）渲染
+                if (opts.liveInput) {
+                    textarea.addEventListener('input', debouncedRender);
+                }
+
+                // 轮询文本变化（覆盖程序化设值场景，如历史页/转谱页回填）
+                var lastValue = textarea.value;
                 setInterval(function() {
-                    var current = findHistoryAbcTextarea();
-                    var currentValue = current ? (current.value || '') : '';
-                    if (currentValue !== lastHistoryValue) {
-                        lastHistoryValue = currentValue;
-                        renderHistoryAbc();
+                    var current = opts.findTextarea();
+                    if (!current) return;
+                    var currentValue = current.value || '';
+                    if (currentValue !== lastValue) {
+                        lastValue = currentValue;
+                        if (opts.liveInput) {
+                            if (currentValue && currentValue.trim() && opts.ensureAccordion) ensureAbcAccordionOpen();
+                            debouncedRender();
+                        } else {
+                            render();
+                        }
                     }
                 }, 300);
 
-                renderHistoryAbc();
+                render();
+
+                if (opts.bindExports) {
+                    bindAbcExportButtons(opts.findTextarea, opts.paperId);
+                }
+            }
+
+            // 生成页 ABC 预览（支持导出 MIDI/PNG，编辑即时渲染）
+            function initAbcPreview() {
+                initAbcPreviewCore({
+                    retry: initAbcPreview,
+                    paperId: 'abc-paper',
+                    audioId: 'abc-audio',
+                    findTextarea: function() { return findAbcTextareaById('gen-abc-output'); },
+                    ensureAccordion: true,
+                    liveInput: true,
+                    bindExports: true,
+                    errorLabel: 'ABC',
+                });
+            }
+            initAbcPreview();
+
+            // 历史页 ABC 预览（空乐谱时清空容器）
+            function initHistoryAbcPreview() {
+                initAbcPreviewCore({
+                    retry: initHistoryAbcPreview,
+                    paperId: 'history-abc-paper',
+                    audioId: 'history-abc-audio',
+                    findTextarea: function() { return findAbcTextareaById('history-abc'); },
+                    requirePaper: true,
+                    clearWhenEmpty: true,
+                    errorLabel: 'History ABC',
+                });
             }
             initHistoryAbcPreview();
 
+            // 转谱页 ABC 预览（有内容时隐藏居中占位）
             function initTranscribeAbcPreview() {
-                if (typeof ABCJS === 'undefined') {
-                    setTimeout(initTranscribeAbcPreview, 500);
-                    return;
-                }
-
-                var paper = document.getElementById('transcribe-abc-paper');
-                var audio = document.getElementById('transcribe-abc-audio');
-                if (!paper) {
-                    setTimeout(initTranscribeAbcPreview, 500);
-                    return;
-                }
-
-                function findTranscribeAbcTextarea() {
-                    var textareas = document.querySelectorAll('textarea[placeholder*="转谱完成后"]');
-                    return textareas.length > 0 ? textareas[0] : null;
-                }
-
-                var abcTextarea = findTranscribeAbcTextarea();
-                if (!abcTextarea) {
-                    setTimeout(initTranscribeAbcPreview, 500);
-                    return;
-                }
-
-                function renderTranscribeAbc() {
-                    var current = findTranscribeAbcTextarea();
-                    var abcText = current ? (current.value || '') : '';
-                    if (abcText && abcText.trim()) {
-                        var container = document.getElementById('transcribe-abc-preview-container');
-                        if (container) {
-                            var placeholder = container.querySelector('div[style*="text-align:center"]');
-                            if (placeholder) placeholder.style.display = 'none';
-                        }
-                        try {
-                            ABCJS.renderAbc("transcribe-abc-paper", abcText, {
-                                responsive: "resize",
-                                scale: 0.7,
-                                staffwidth: 600
-                            });
-                            ABCJS.renderAudio("transcribe-abc-audio", abcText, {
-                                displayLoop: true,
-                                displayRestart: true,
-                                displayPlay: true,
-                                displayProgress: true
-                            });
-                        } catch (e) {
-                            console.log("Transcribe ABC render error:", e);
-                        }
-                    } else {
-                        if (paper) paper.innerHTML = '';
-                        if (audio) audio.innerHTML = '';
-                    }
-                }
-
-                var lastValue = abcTextarea.value;
-                setInterval(function() {
-                    var current = findTranscribeAbcTextarea();
-                    var currentValue = current ? (current.value || '') : '';
-                    if (currentValue !== lastValue) {
-                        lastValue = currentValue;
-                        renderTranscribeAbc();
-                    }
-                }, 300);
-
-                renderTranscribeAbc();
+                initAbcPreviewCore({
+                    retry: initTranscribeAbcPreview,
+                    paperId: 'transcribe-abc-paper',
+                    audioId: 'transcribe-abc-audio',
+                    findTextarea: function() {
+                        var tas = document.querySelectorAll('textarea[placeholder*="转谱完成后"]');
+                        return tas.length > 0 ? tas[0] : null;
+                    },
+                    requirePaper: true,
+                    clearWhenEmpty: true,
+                    hidePlaceholderId: 'transcribe-abc-preview-container',
+                    errorLabel: 'Transcribe ABC',
+                });
             }
             initTranscribeAbcPreview();
 

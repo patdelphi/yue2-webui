@@ -49,7 +49,8 @@ def test_postprocess_has_no_silent_except():
 
 def test_app_wraps_postprocess_call_in_try():
     """app.py 的 postprocess_audio 调用必须被 try/except 包裹，失败仅记日志后继续。"""
-    src = (Path(__file__).parent.parent / "app.py").read_text(encoding="utf-8-sig")
+    from _app_bundle import app_bundle  # C1 拆分后源码级断言读 app bundle
+    src = app_bundle()
     idx = src.index("postprocess_audio(")
     window = src[idx - 200:idx]
     assert "try:" in window

@@ -199,7 +199,8 @@ def test_delete_project_rejects_non_project_dir(tmp_path, monkeypatch):
 
 # ---------------------------------------------------------------- 源码断言（app / handlers）
 def test_app_uses_new_naming_and_project_ui():
-    src = (Path(__file__).resolve().parent.parent / "app.py").read_text(encoding="utf-8-sig")
+    from _app_bundle import app_bundle  # C1 拆分后源码级断言读 app bundle
+    src = app_bundle()
     # 目录命名：song_<ts>（生成/重新合成）
     assert 'base_task_id = f"song_{timestamp}"' in src
     assert 'task_id = f"song_{timestamp}"' in src

@@ -165,6 +165,7 @@ EN_TABLE: Dict[str, str] = {
     "为最终版": "as the final version",
     "主模型": "Main model",
     "任务已取消": "Task cancelled",
+    "任务超时": "Task timed out",
     "未知错误": "Unknown error",
     "保存当前参数": "Save current params",
     "保存预设名称": "Preset name",

@@ -24,6 +24,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
+from audio_probe import probe_duration
 from history import HistoryRecord, sanitize_project
 from queue_manager import TaskCancelledError
 
@@ -436,20 +437,11 @@ def _report(progress_cb: Optional[Callable], value: float, desc: str) -> None:
 
 
 def _probe_duration(path: Path) -> float:
-    """用 ffprobe 读取产物时长；不可用时返回 0.0（不视为失败）。"""
-    ffprobe = shutil.which("ffprobe")
-    if not ffprobe:
-        return 0.0
-    try:
-        proc = subprocess.run(
-            [ffprobe, "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=nw=1:nk=1", str(path)],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
-        )
-        return float((proc.stdout or "").strip())
-    except Exception:
-        logger.exception("ffprobe 时长解析失败(已忽略): %s", path)
-        return 0.0
+    """用 ffprobe 读取产物时长；不可用时返回 0.0（不视为失败）。
+
+    实现已统一到 audio_probe.probe_duration（B1）；失败经本模块 logger 记录。
+    """
+    return probe_duration(path, logger=logger)
 
 
 def render_mix(project: MixProject, out_path, cancel_event=None,

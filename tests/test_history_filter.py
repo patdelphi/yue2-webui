@@ -63,7 +63,10 @@ def test_app_history_page_uses_generation_filter():
     无过滤的全表 to_dataframe_rows() 调用（避免行号/页数与表格错位）。
     """
     app_path = Path(__file__).parent.parent / "app.py"
-    src = app_path.read_text(encoding="utf-8-sig")
+    assert app_path.exists()
+    # C1 拆分：历史组回调已移到 src/callbacks_history.py，源码级断言读 app bundle
+    from _app_bundle import app_bundle
+    src = app_bundle()
     assert 'record_types=("generation",)' in src
     # 六处数据访问都必须带过滤（与表格显示的记录集一致）
     assert src.count('record_types=("generation",)') == 6
@@ -145,7 +148,8 @@ def test_history_row_click_uses_role_row_not_tbody_tr():
     assert "setTriggerValue" not in js
     assert "history-row-trigger" not in js
     # app.py 侧同步移除失效的 trigger 组件与回调
-    app = (Path(__file__).parent.parent / "app.py").read_text(encoding="utf-8-sig")
+    from _app_bundle import app_bundle  # C1 拆分后源码级断言读 app bundle
+    app = app_bundle()
     assert "history_row_trigger" not in app
     assert "on_history_row_click" not in app
     # 原生 select 仍是唯一入口

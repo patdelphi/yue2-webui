@@ -18,6 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))  # app.py 在 webui 根目录
 
 import gradio as gr
+import pytest
 import app
 
 
@@ -98,6 +99,36 @@ def test_empty_name_rejected():
         assert "请输入预设名称" in msg or "preset name" in msg.lower(), msg
 
     _with_temp_presets(run)
+
+
+def test_wrong_param_count_rejected():
+    """C5：参数数量与 PRESET_PARAM_KEYS 不符时直接报错，不静默落盘残缺预设。"""
+    def run():
+        with pytest.raises(ValueError):
+            app.on_preset_save("Bad", *([None] * 5))
+        # 未写出任何文件
+        assert not (app.WEBUI_ROOT / "presets" / "Bad.json").exists()
+
+    _with_temp_presets(run)
+
+
+def test_preset_keys_single_source_and_order():
+    """C5：PRESET_PARAM_KEYS 为 23 项且与保存/加载顺序一致（单一来源）。
+
+    校验 save→load roundtrip 用的键序列与 PRESET_PARAM_KEYS 完全相同，
+    防止两处字段顺序各自维护而漂移。
+    """
+    keys = ["cot", "num_inference_steps", "out_format",
+            "abc_temp", "abc_top_p", "abc_top_k", "abc_rep_penalty", "abc_pen_window",
+            "abc_min_tok", "abc_max_tok",
+            "sem_temp", "sem_top_p", "sem_top_k", "sem_rep_penalty", "sem_pen_window",
+            "sem_min_tok", "sem_max_tok",
+            "cfg_scale", "batch_count", "pp_normalize", "pp_fade", "pp_trim", "pp_metadata"]
+    assert tuple(keys) == tuple(app.PRESET_PARAM_KEYS)
+    assert len(app.PRESET_PARAM_KEYS) == 23
+    # 加载无预设时返回 23 个 gr.update()，与字段数一致
+    got = app.on_preset_load("__不存在的预设__")
+    assert len(got) == len(app.PRESET_PARAM_KEYS)
 
 
 if __name__ == "__main__":

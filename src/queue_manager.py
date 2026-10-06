@@ -37,6 +37,20 @@ class TaskStatus(Enum):
     CANCELLED = "cancelled"
 
 
+# 任务级超时兜底（秒）：worker 函数挂死时由监控线程下发协作式取消信号，
+# 防止串行队列被永久占用。取值为各任务正常耗时的宽裕上限，提交时可覆盖。
+DEFAULT_MAX_RUNTIME: dict = {
+    TaskType.GENERATION: 21600.0,     # 6h（含多变体串行调用 CLI）
+    TaskType.TRANSCRIPTION: 7200.0,   # 2h
+    TaskType.SEPARATION: 7200.0,      # 2h
+    TaskType.COVER: 21600.0,          # 6h（长曲翻唱：分离 + 换嗓 + 混音）
+    TaskType.MIX: 7200.0,             # 2h（ffmpeg 合成）
+}
+
+# 超时错误哨兵：UI 层据此翻译为当前语言，避免队列层硬编码面向 UI 的中文
+TIMEOUT_ERROR = "TASK_TIMEOUT"
+
+
 @dataclass
 class Task:
     task_id: str
@@ -51,11 +65,17 @@ class Task:
     completed_at: Optional[float] = None
     position: int = 0
     cancel_event: threading.Event = field(default_factory=threading.Event)
+    # 任务级超时（秒）；None=不限制（submit 时按任务类型填 DEFAULT_MAX_RUNTIME）
+    max_runtime: Optional[float] = None
+    # 超时标记（由监控线程置位）；worker 收尾时据此把状态定为 FAILED
+    timed_out: bool = False
 
     _progress_queue: deque = field(default_factory=deque, repr=False)
     _progress_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     # 最近一次进度（push 时同步记录），供状态快照只读展示，不影响 drain 消费流
     last_progress: Optional[tuple] = field(default=None, repr=False)
+    # 任务结束信号：让超时监控线程立即退出，避免空等堆积
+    _done_event: threading.Event = field(default_factory=threading.Event, repr=False)
 
     def push_progress(self, progress_val: float, desc: str):
         with self._progress_lock:
@@ -101,6 +121,10 @@ class QueueManager:
 
             if task:
                 logger.info(f"Starting task {task.task_id} ({task.task_type.value})")
+                # 任务级超时监控：到点未结束则下发协作式取消信号（见 _watchdog）
+                if task.max_runtime and task.max_runtime > 0:
+                    threading.Thread(target=self._watchdog, args=(task,),
+                                     daemon=True, name=f"watchdog-{task.task_id}").start()
                 try:
                     result = task.func(_task=task, **task.kwargs)
                     task.result = result
@@ -117,6 +141,16 @@ class QueueManager:
                     task.error = str(e)
                     task.status = TaskStatus.FAILED
                     task.completed_at = time.time()
+                finally:
+                    # 唤醒监控线程立即退出（避免到点仍空等）
+                    task._done_event.set()
+
+                # 超时收尾：无论正常返回还是因超时被取消，统一标记为 FAILED
+                if task.timed_out:
+                    task.status = TaskStatus.FAILED
+                    task.error = TIMEOUT_ERROR
+                    task.completed_at = task.completed_at or time.time()
+                    logger.warning(f"Task {task.task_id} marked FAILED (timeout)")
 
                 with self._lock:
                     self._current_task = None
@@ -132,8 +166,27 @@ class QueueManager:
                 self._wake_event.wait(timeout=1.0)
                 self._wake_event.clear()
 
-    def submit(self, task_type: TaskType, func: Callable, cancel_event: Optional[threading.Event] = None, **kwargs) -> Task:
-        """Submit a task to the queue. Returns the Task object for polling."""
+    def _watchdog(self, task: Task):
+        """任务级超时监控（协作式）：到点仍未结束则下发取消信号并置超时标记。
+
+        依赖任务函数检查 cancel_event 优雅退出（生成/转录链路已在 CLI 层
+        backend_gguf._pump_cli 做同样的检查）；不在此层强杀线程/进程，避免
+        误伤共享的远端 worker。任务正常结束时 _done_event 会唤醒本线程即退。
+        """
+        if not task._done_event.wait(timeout=task.max_runtime):
+            task.timed_out = True
+            task.cancel_event.set()
+            logger.warning(
+                f"Task {task.task_id} exceeded max_runtime {task.max_runtime:.0f}s, "
+                f"cancel signal sent")
+
+    def submit(self, task_type: TaskType, func: Callable, cancel_event: Optional[threading.Event] = None,
+               max_runtime: Optional[float] = None, **kwargs) -> Task:
+        """Submit a task to the queue. Returns the Task object for polling.
+
+        max_runtime: 任务级超时（秒）；未指定时按任务类型取 DEFAULT_MAX_RUNTIME
+        （该类型无兜底值时表示不限制）。
+        """
         task_id = f"{task_type.value}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
         task = Task(
             task_id=task_id,
@@ -143,6 +196,7 @@ class QueueManager:
         )
         if cancel_event is not None:
             task.cancel_event = cancel_event
+        task.max_runtime = max_runtime if max_runtime is not None else DEFAULT_MAX_RUNTIME.get(task_type)
 
         with self._lock:
             task.position = len(self._queue) + 1

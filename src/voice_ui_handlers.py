@@ -18,11 +18,13 @@ import string
 import subprocess
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
+from audio_probe import probe_duration
 from history import HistoryRecord, HistoryManager, sanitize_project, delete_files_to_recycle
 from queue_manager import queue_manager, TaskCancelledError, TaskStatus, TaskType
 from voice_client import VoiceClient, VoiceResult
@@ -75,13 +77,71 @@ _STEM_LABELS = {"vocals": "人声", "accompaniment": "伴奏",
 _PREVIEW_SUFFIX = "_preview"
 _PREVIEW_BITRATE = "192k"
 
+# ---------------------------------------------------------------- 预览件后台转码
+# 分离/翻唱一次可能产出多轨大件 WAV，逐轨 ffmpeg 转码若同步执行会拖慢 worker（占住串行队列）。
+# 故产物入库时只"登记"转码任务：后台单线程顺序转码，回放路径对缺失的预览件自动退回原件，
+# 转码完成后下次回放即用上小件。用户即时试听（需立即取值）仍走同步 _make_preview。
+_preview_queue = deque()
+_preview_pending = set()          # 已排队的预览件目标路径（去重，避免重复转码）
+_preview_lock = threading.Lock()
+_preview_wake = threading.Event()
+_preview_thread: Optional[threading.Thread] = None
+
+
+def _transcode_preview(src: Path, dst: Path) -> None:
+    """ffmpeg 转码单个预览件；无 ffmpeg 或转码失败静默返回（回放退回原件）。"""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return
+    try:
+        subprocess.run([ffmpeg, "-y", "-nostdin", "-loglevel", "error", "-i", str(src),
+                        "-vn", "-c:a", "libmp3lame", "-b:a", _PREVIEW_BITRATE, str(dst)],
+                       check=True, timeout=900,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        logger.warning("生成回放预览件失败（回放退回原件）: %s %s", src.name, e)
+
+
+def _preview_loop() -> None:
+    """后台预览转码循环：顺序消费队列，单条失败不影响后续。"""
+    while True:
+        with _preview_lock:
+            item = _preview_queue.popleft() if _preview_queue else None
+        if item is None:
+            _preview_wake.wait(timeout=5.0)
+            _preview_wake.clear()
+            continue
+        src, dst = item
+        try:
+            _transcode_preview(src, Path(dst))
+        finally:
+            with _preview_lock:
+                _preview_pending.discard(dst)
+
+
+def _enqueue_preview(p: Path) -> None:
+    """把预览件转码加入后台队列（同一目标去重），并按需懒启动工作线程。"""
+    global _preview_thread
+    dst = str(p.with_name(f"{p.stem}{_PREVIEW_SUFFIX}.mp3"))
+    with _preview_lock:
+        if dst in _preview_pending:
+            return
+        _preview_pending.add(dst)
+        _preview_queue.append((p, dst))
+        if _preview_thread is None or not _preview_thread.is_alive():
+            _preview_thread = threading.Thread(target=_preview_loop, daemon=True,
+                                               name="preview-transcode")
+            _preview_thread.start()
+    _preview_wake.set()
+
 
 def _make_preview(src: str) -> str:
-    """为大件 WAV 生成网页回放用小音频 <原名>_preview.mp3，失败返回空串。
+    """同步生成大件 WAV 的回放用小音频 <原名>_preview.mp3，失败返回空串。
 
     远端经隧道回放时，32bit float WAV 单轨 60–100MB，整文件下完要几十秒才出波形；
     这里随产物预生成 MP3 小件，历史回放只取小件，合成（翻唱/混音）仍用原件。
     ffmpeg 缺失或转码失败都静默返回空串，回放自动退回原件，不影响主流程。
+    用于需要立即拿到预览路径的场景（用户点选试听）；产物入库请用 schedule_preview。
     """
     p = Path(src)
     if not p.exists():
@@ -89,18 +149,24 @@ def _make_preview(src: str) -> str:
     dst = p.with_name(f"{p.stem}{_PREVIEW_SUFFIX}.mp3")
     if dst.exists() and dst.stat().st_mtime >= p.stat().st_mtime:
         return str(dst)  # 已生成且不旧于原件：直接复用
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        return ""
-    try:
-        subprocess.run([ffmpeg, "-y", "-nostdin", "-loglevel", "error", "-i", str(p),
-                        "-vn", "-c:a", "libmp3lame", "-b:a", _PREVIEW_BITRATE, str(dst)],
-                       check=True, timeout=900,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception as e:
-        logger.warning("生成回放预览件失败（回放退回原件）: %s %s", p.name, e)
-        return ""
+    _transcode_preview(p, dst)
     return str(dst) if dst.exists() else ""
+
+
+def schedule_preview(src: str) -> str:
+    """登记回放预览件生成（非阻塞）：已有且不旧则直接返回路径，否则后台排队转码。
+
+    返回当前可用的预览路径；转码尚未完成时返回空串（回放退回原件，
+    存量记录亦可按 <原名>_preview.mp3 约定推导）。源不存在返回空串。
+    """
+    p = Path(src)
+    if not p.exists():
+        return ""
+    dst = p.with_name(f"{p.stem}{_PREVIEW_SUFFIX}.mp3")
+    if dst.exists() and dst.stat().st_mtime >= p.stat().st_mtime:
+        return str(dst)
+    _enqueue_preview(p)
+    return ""
 
 
 def _preview_sibling(p: Path) -> Optional[Path]:
@@ -126,16 +192,17 @@ def _rename_preview_sibling(old: Path, new: Path) -> None:
 
 
 def _build_stems(products: dict) -> list:
-    """把 worker 分离/翻唱产物整理为 [{label,type,path,preview}, ...]，仅收录存在的音频文件。
+    """把 worker 分离/翻唱产物整成 [{label,type,path,preview}, ...]，仅收录存在的音频文件。
 
     path=原件（合成用），preview=回放用小件（MP3，可为空串）。
+    预览件转码走后台队列（schedule_preview 非阻塞）：不拖慢 worker，转码完成后下次回放即用。
     """
     stems = []
     for key, path in (products or {}).items():
         if not path or not Path(path).exists():
             continue
         stems.append({"label": _STEM_LABELS.get(key, key), "type": key, "path": str(path),
-                      "preview": _make_preview(str(path))})
+                      "preview": schedule_preview(str(path))})
     return stems
 
 
@@ -361,6 +428,59 @@ class VoiceHandlers:
                     pass
 
     # ---------------------------------------------------------------- 队列 workers
+    def _run_stage_worker(self, _task, out_dir: Path, lang: str, tr, call):
+        """带阶段进度轮询地执行一次 worker 调用（分离/翻唱共用）。
+
+        call 为无参可调用（业务参数在闭包里捕获）。本方法负责：
+        建 out_dir/_progress.json + 轮询线程 → 执行 call() → 异常时回收本次衍生目录
+        → 收尾停止轮询并删除进度文件（不留中间状态）。返回 call() 的原始结果。
+        """
+        progress_file = out_dir / "_progress.json"
+        stop_evt = threading.Event()
+        poller = threading.Thread(target=_progress_poller,
+                                  args=(_task, progress_file, lang, tr, stop_evt),
+                                  daemon=True)
+        poller.start()
+        try:
+            return call()
+        except Exception:
+            # worker 抛异常：回收本次已建但未入历史的衍生目录，再向上抛原始错误
+            self._recycle_created_derived(out_dir)
+            raise
+        finally:
+            stop_evt.set()
+            try:
+                progress_file.unlink(missing_ok=True)  # 清理进度文件，产物文件夹不留中间状态
+            except Exception:
+                pass
+
+    def _raise_if_failed(self, result, out_dir: Path, err_msg: str, cancel_event) -> None:
+        """按 worker 结果判定取消/失败：统一回收衍生目录并抛出对应异常。
+
+        取消来源两路：主 app cancel_event（UI 取消按钮）或 worker 侧 cancelled
+        （直接 POST /api/cancel 等）——任一命中都映射为「已取消」而非「任务失败」。
+        """
+        if cancel_event is not None and cancel_event.is_set():
+            self._recycle_created_derived(out_dir)
+            raise TaskCancelledError("任务已取消")
+        if not result.ok:
+            self._recycle_created_derived(out_dir)
+            if (cancel_event is not None and cancel_event.is_set()) or result.cancelled:
+                raise TaskCancelledError("任务已取消")
+            raise RuntimeError(result.error or err_msg)
+
+    def _record_separation(self, task_id: str, source: str, out_dir: Path, products: dict,
+                           derived_from: str = "", root: str = "",
+                           project: str = "", source_md5: str = "") -> list:
+        """写 separation 历史记录（separate_worker / ensure_separation 共用），返回 stems。"""
+        duration = _probe_duration(products.get("vocals", ""))
+        stems = _build_stems(products)
+        self._record(task_id, "separation", derived_from, root,
+                     products.get("vocals", ""), out_dir,
+                     duration=duration, style=_source_label(source), stems=stems,
+                     project=project, source_md5=source_md5)
+        return stems
+
     def separate_worker(self, _task, source: str, mode: str, root_task_id: str = "",
                         denoise: bool = False, lang: str = "zh", tr=None,
                         from_upload: bool = False, project: str = "",
@@ -380,48 +500,19 @@ class VoiceHandlers:
         if from_upload:
             self.persist_upload(source, "sep_src")
         prefix = f"{project}_{ts}" if project else ts  # 产物文件名主干（worker 产物 = <prefix>_<类别>.wav）
-        # 阶段进度文件 + 轮询线程（worker 写阶段，线程转发到任务进度通道）
-        progress_file = out_dir / "_progress.json"
-        stop_evt = threading.Event()
-        poller = threading.Thread(target=_progress_poller,
-                                  args=(_task, progress_file, lang, tr, stop_evt),
-                                  daemon=True)
-        poller.start()
-        try:
-            result = self.voice_client.separate(
-                source, mode=mode, output_dir=str(out_dir), denoise=denoise,
-                prefix=prefix, progress_file=str(progress_file),
-                cancel_event=_task.cancel_event)
-        except Exception:
-            # worker 抛异常：回收本次已建但未入历史的衍生目录，再向上抛原始错误
-            self._recycle_created_derived(out_dir)
-            raise
-        finally:
-            stop_evt.set()
-            try:
-                progress_file.unlink(missing_ok=True)  # 清理进度文件，产物文件夹不留中间状态
-            except Exception:
-                pass
-        if _task.cancel_event.is_set():
-            self._recycle_created_derived(out_dir)
-            raise TaskCancelledError("任务已取消")
-        if not result.ok:
-            self._recycle_created_derived(out_dir)
-            # 取消来源两路：主 app cancel_event（UI 取消按钮）或 worker 侧 cancelled
-            # （直接 POST /api/cancel 等）——任一命中都映射为"已取消"而非"任务失败"
-            if _task.cancel_event.is_set() or result.cancelled:
-                raise TaskCancelledError("任务已取消")
-            raise RuntimeError(result.error or "音轨分离失败")
+        # 阶段进度轮询 + 异常回收 + 收尾清理（共用 helper）
+        result = self._run_stage_worker(_task, out_dir, lang, tr, lambda: self.voice_client.separate(
+            source, mode=mode, output_dir=str(out_dir), denoise=denoise,
+            prefix=prefix, progress_file=str(out_dir / "_progress.json"),
+            cancel_event=_task.cancel_event))
+        self._raise_if_failed(result, out_dir, "音轨分离失败", _task.cancel_event)
         # 换算音频时长（取 vocals 轨）；并收集各轨供历史查看/回放
         products = result.products or {}
-        duration = _probe_duration(products.get("vocals", ""))
-        stems = _build_stems(products)
         # 计算源音频 MD5（分离记录留痕，查重跳过后续翻唱的 Demucs）
         src_md5 = HistoryManager.compute_source_md5(Path(source))
-        self._record(_task.task_id, "separation", derived_from, root,
-                     products.get("vocals", ""), out_dir,
-                     duration=duration, style=_source_label(source), stems=stems,
-                     project=project, source_md5=src_md5)
+        stems = self._record_separation(_task.task_id, source, out_dir, products,
+                                       derived_from=derived_from, root=root,
+                                       project=project, source_md5=src_md5)
         return {"products": products, "stems": stems,
                 "output_dir": str(out_dir), "root_task_id": root}
 
@@ -450,42 +541,15 @@ class VoiceHandlers:
         if from_upload:
             self.persist_upload(source, "cover_src")
         prefix = f"{project}_{ts}" if project else ts  # 产物文件名主干
-        # 阶段进度文件 + 轮询线程（worker 写阶段，线程转发到任务进度通道）
-        progress_file = out_dir / "_progress.json"
-        stop_evt = threading.Event()
-        poller = threading.Thread(target=_progress_poller,
-                                  args=(_task, progress_file, lang, tr, stop_evt),
-                                  daemon=True)
-        poller.start()
-        try:
-            result = self.voice_client.convert(
-                source, ref, semi_tone=semi_tone, diffusion_steps=diffusion_steps,
-                accompaniment=accompaniment, gain_db=gain_db, output_dir=str(out_dir),
-                denoise=denoise, prefix=prefix,
-                source_vocals=source_vocals, source_acc=source_acc,
-                progress_file=str(progress_file), cancel_event=_task.cancel_event,
-                ref_mode=ref_mode, ref_acc=ref_acc,
-            )
-        except Exception:
-            # worker 抛异常：回收本次已建但未入历史的衍生目录，再向上抛原始错误
-            self._recycle_created_derived(out_dir)
-            raise
-        finally:
-            stop_evt.set()
-            try:
-                progress_file.unlink(missing_ok=True)  # 清理进度文件，产物文件夹不留中间状态
-            except Exception:
-                pass
-        if _task.cancel_event.is_set():
-            self._recycle_created_derived(out_dir)
-            raise TaskCancelledError("任务已取消")
-        if not result.ok:
-            self._recycle_created_derived(out_dir)
-            # 取消来源两路：主 app cancel_event（UI 取消按钮）或 worker 侧 cancelled
-            # （直接 POST /api/cancel 等）——任一命中都映射为"已取消"而非"任务失败"
-            if _task.cancel_event.is_set() or result.cancelled:
-                raise TaskCancelledError("任务已取消")
-            raise RuntimeError(result.error or "翻唱失败")
+        # 阶段进度轮询 + 异常回收 + 收尾清理（共用 helper）
+        result = self._run_stage_worker(_task, out_dir, lang, tr, lambda: self.voice_client.convert(
+            source, ref, semi_tone=semi_tone, diffusion_steps=diffusion_steps,
+            accompaniment=accompaniment, gain_db=gain_db, output_dir=str(out_dir),
+            denoise=denoise, prefix=prefix,
+            source_vocals=source_vocals, source_acc=source_acc,
+            progress_file=str(out_dir / "_progress.json"), cancel_event=_task.cancel_event,
+            ref_mode=ref_mode, ref_acc=ref_acc))
+        self._raise_if_failed(result, out_dir, "翻唱失败", _task.cancel_event)
         cover_path = result.products.get("cover", "")
         duration = _probe_duration(cover_path)
         stems = _build_stems(result.products)
@@ -531,20 +595,10 @@ class VoiceHandlers:
             self._recycle_created_derived(out_dir)
             raise
 
-        if not result.ok:
-            self._recycle_created_derived(out_dir)
-            # 取消来源两路：UI 取消（cancel_event）或 worker 侧 cancelled —— 命中即视为取消
-            if (cancel_event is not None and cancel_event.is_set()) or result.cancelled:
-                raise TaskCancelledError("任务已取消")
-            raise RuntimeError(result.error or "同步分离失败")
-
+        self._raise_if_failed(result, out_dir, "同步分离失败", cancel_event)
         products = result.products or {}
-        stems = _build_stems(products)
-        duration = _probe_duration(products.get("vocals", ""))
-        self._record(task_id, "separation", "", "",
-                     products.get("vocals", ""), out_dir,
-                     duration=duration, style=_source_label(source), stems=stems,
-                     project=project, source_md5=md5)
+        self._record_separation(task_id, source, out_dir, products,
+                                project=project, source_md5=md5)
         return f"sep_task:{task_id}"
 
     # ---------------------------------------------------------------- 音色库
@@ -681,18 +735,11 @@ class VoiceHandlers:
 
 
 def _probe_duration(path: str) -> float:
-    """用 ffmpeg/音速获取音频时长；失败返回 0。仅做展示用途，异常不抛出。"""
-    if not path or not Path(path).exists():
-        return 0.0
-    try:
-        out = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "csv=p=0", path],
-            capture_output=True, text=True, timeout=15,
-        )
-        return float(out.stdout.strip()) if out.stdout.strip() else 0.0
-    except Exception:
-        return 0.0
+    """获取音频时长（秒）；失败返回 0。仅做展示用途，异常不抛出。
+
+    实现已统一到 audio_probe.probe_duration（B1）。
+    """
+    return probe_duration(path)
 
 
 def _source_label(path: str) -> str:

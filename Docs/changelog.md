@@ -4,6 +4,28 @@
 
 ---
 
+## 2026-10-06 — 代码审计后续优化 C3/C4/C5（任务级超时 / 预览转码后台化 / 长参数重构）
+
+> 起因：`Docs/code-audit-2026-10-06.md` C 类可优化项，用户确认「C3+C4+C5 全做」，C3 采用协作式（监控线程置 cancel_event，不硬 kill）。
+
+- **C3 任务级超时兜底（`src/queue_manager.py` / `app.py` / `src/i18n.py` / `src/mix_web.py`）**
+  - 新增 `DEFAULT_MAX_RUNTIME`（按 `TaskType` 给宽裕上限：生成 6h、转录/分离/混音 2h）与超时哨兵 `TIMEOUT_ERROR="TASK_TIMEOUT"`；`Task` 增 `cancel_event`/`max_runtime`/`timed_out`/`_done_event` 字段；`submit()` 增可选 `max_runtime` 覆盖。
+  - `_worker_loop` 启动 daemon `_watchdog`：`task._done_event.wait(max_runtime)` 超时即置 `timed_out=True` 并 `cancel_event.set()`；worker 收尾 `finally` 置 `_done_event` 让监控线程立刻退出，避免空等堆积。因超时被取消的任务在 try/except 之后统一改写为 `FAILED` + `TIMEOUT_ERROR`（覆盖 CANCELLED）。
+  - UI 文案走国际化：`app.py` 新增 `_localize_task_error(lang, error)`（3 处 FAILED 分支统一调用），`i18n.py` 新增「任务超时」词条；`mix_web.task_status` 就地翻译哨兵（无 lang 上下文）。
+  - 测试：`tests/test_queue.py` 新增 `test_submit_assigns_default_max_runtime`、`test_task_timeout_marks_failed_and_signals_cancel`、`test_task_timeout_overrides_cancelled_status`、`test_app_localizes_timeout_error`。
+- **C4 回放预览件转码后台化（`src/voice_ui_handlers.py`）**
+  - 新增模块级单线程转码队列（`deque` + `_preview_pending` 去重 + Lock + 懒启动 daemon 线程）；`_transcode_preview`/`_preview_loop`/`_enqueue_preview`；`schedule_preview(src)` 非阻塞登记（已有且不旧直接返回路径，否则入队返回空串）。
+  - `_build_stems` 改用 `schedule_preview`：产物入库不再被逐轨 ffmpeg 拖慢 worker；回放对缺失预览件自动退回原件（存量记录按 `<原名>_preview.mp3` 推导）。用户点选即时试听的 `_make_preview` 保留同步语义。
+  - 测试：`tests/test_voice_handlers.py` 更新 `test_build_stems_carries_preview_key`（monkeypatch 目标改 `schedule_preview`），新增 `test_schedule_preview_nonblocking_and_dedup`。
+- **C5 长参数签名重构（`app.py`）**
+  - 新增模块级常量 `PRESET_PARAM_KEYS`（23 键，单一来源）；`on_preset_save(name, *values)` 改为 `dict(zip(PRESET_PARAM_KEYS, values))`，并对参数数量不符直接 `raise ValueError`（不静默落盘残缺预设）；`on_preset_load` 复用同一常量保证顺序一致（位置调用与 23 字段语义完全兼容）。
+  - 新增 `@dataclass GenerationOutcome`（12 字段 + `to_gradio()`），`_generate_worker` 两处返回改为该结构，`on_generate` 侧 `return (*outcome.to_gradio(), seed)`（Gradio outputs 数量与顺序不变）。
+  - 测试：`tests/test_preset.py` 新增 `test_wrong_param_count_rejected`、`test_preset_keys_single_source_and_order`；`tests/test_generate_defense.py` `_run_worker` 回传返回值并新增 `test_worker_returns_named_outcome_with_12_field_order`。
+- **验证**：`py_compile` 通过；相关用例 `pytest tests/test_preset.py tests/test_generate_defense.py tests/test_queue.py tests/test_voice_handlers.py` **51 passed**；全量 `pytest tests/ --ignore=tests/test_i18n.py -q` **227 passed**（2 条既有 deprecation 警告，与本次无关）。
+- **未执行**：未 git commit / push；真实浏览器端到端未复测（C3/C4/C5 均为后端行为，单测已覆盖；C4 后台转码需在真实分离/翻唱任务中观察 `_preview.mp3` 生成）。
+
+---
+
 ## 2026-10-04 — 同类问题排查与修复：切 Tab 时「下拉已选中、试听却空着」（4 处）
 
 > 起因：用户「请检查其他模块是否有类似问题」（对标刚修好的「翻唱任务历史默认不回填播放器」）。
@@ -1116,3 +1138,18 @@ o-store`、`sources` 列出 4 组分离素材、`peaks` 400 桶/时长 171.6s、
 - **B8**：删除根目录 pip 误装产物 `=1.47`。
 - **测试**：新增 `test_backend_watchdog.py`/`test_postprocess.py`/`test_generate_defense.py`；扩展 `test_history_filter.py`（SQL 分页/计数/legacy 空类型/prune 时机）、`test_voice_handlers.py`（cancel 透传、去重先比 size）、`test_mix_web.py`（per-key 单次解码）、`test_queue.py`/`test_history_recycle.py`。
 - **验证**：全量 `pytest tests/ --ignore=tests/test_i18n.py -q` **219 passed**。
+## 2026-10-06 — 代码审计后续优化 B1/B2/B3/C1/C6（去重与结构拆分）
+
+- **B1**（新增 `src/audio_probe.py`）：抽取统一 `probe_duration(path, *, logger=None)` 复用 ffprobe 探测时长，原 3 处重复实现改为调用；新增 `tests/test_audio_probe.py`。
+- **B2**（`src/voice_ui_handlers.py`）：分离/翻唱三段管线的共享逻辑合并，减少重复分支。
+- **B3**（`static/js/app.js`）：三套 ABC 预览初始化合并为 `initAbcPreviewCore(opts)` + 生成/历史/转谱三个薄封装；静态资源版本号 `app.js?v=17 → v=18`。
+- **C6**（`static/multitrack/`）：`index.html` 内联 CSS/JS 拆为外链 `multitrack.css?v=1` / `multitrack.js?v=1`。
+- **C1**（拆分 `app.py`：3699 → 842 行）：
+  - Phase 1：新增 `src/app_utils.py`（`BUILTIN_PRESETS` / `PRESET_PARAM_KEYS` / `FORMAT_LABELS` / `COMMENT_PREFIXES` / `strip_comment_lines`）。
+  - Phase 3：新增 `src/callbacks_generate.py`(780) / `callbacks_transcribe.py` / `callbacks_history.py` / `callbacks_voice.py`(759) / `callbacks_settings.py`；统一采用 `@dataclass XxxDeps` 依赖注入，app.py 保留 `_xxx_deps()`（调用时读取当前全局，猴子补丁仍生效）与签名一致的薄封装。
+  - Phase 2：新增 `src/ui_tabs.py`(1511)，搬入 `_TITLE_ROW_CSS` / `_LOCALE_SYNC_JS` / `build_ui`；`build_ui(app_module)` 调用时把 app 命名空间注入本模块 globals（排除 `build_ui` 自身）实现零改名搬迁；`apply_lang` 额外回写 `_app_module._CUR_LANG`，保证 UI 与后端语言一致。
+  - 测试：新增 `tests/_app_bundle.py::app_bundle()`（拼接 app.py + ui_tabs.py + callbacks_*.py），源码级断言统一改读 bundle；被搬迁函数内全局名加 `d.` 前缀，断言改为去前缀等价匹配。
+- **改动文件**：app.py；src/app_utils.py、src/audio_probe.py、src/ui_tabs.py、src/callbacks_generate.py、src/callbacks_transcribe.py、src/callbacks_history.py、src/callbacks_voice.py、src/callbacks_settings.py、src/i18n.py、src/mix_render.py、src/mix_web.py、src/queue_manager.py、src/voice_client.py、src/voice_ui_handlers.py；static/js/app.js、static/multitrack/index.html（+ multitrack.css / multitrack.js）；tests/ 多个；Docs/todo.md、Docs/changelog.md、chat_history.md。
+- **验证**：`py_compile` 全通过；UI 构建冒烟 `blocks=468`；symtable 静态检查 6 个搬迁模块均无缺失全局名；全量 `pytest tests/ --ignore=tests/test_i18n.py -q` → **236 passed**。
+- **前端回归（9898）**：7 Tab 全部渲染；`app.js?v=18` / `wavesurfer` / 多轨 iframe 资源均 200；控制台无新增错误（仅既有 `manifest.json` 404）；语言切换 zh↔en 双向生效（Tab 标签 + `lang-signal` + 服务端 `_CUR_LANG`）；多轨编辑器外链 `multitrack.css?v=1` / `multitrack.js?v=1` 正常加载；三处 ABC 预览容器（generate / history / transcribe）均在 DOM。
+- **未执行**：未 git commit / push（等用户明确批准）；浏览器未覆盖真实生成/分离/翻唱任务与预设保存写盘。
