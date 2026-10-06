@@ -823,3 +823,17 @@ ode --check static/js/app.js` OK；全量 `pytest tests/ --ignore=tests/test_i18
 - **改动文件**：voice-tools/worker.py、tests/test_voice_loudness.py、Docs/changelog.md、chat_history.md。
 - **验证**：`py_compile` 通过；`tests/test_voice_loudness.py` 15 passed；全量 `pytest tests/ --ignore=tests/test_i18n.py -q` → **241 passed**；真实素材 A/B：开头 -13.56 → **-64.03dB**、整体 LUFS -13.95 → -14.28、60s 音乐段 -14.17 → -15.21dB。
 - **未执行**：未在 9898 上重跑翻唱（需 worker 加载新代码）；未 git commit / push（等确认）；未跑 tests/test_i18n.py。
+
+## 2026-10-06 — 修复翻唱人声「只有左声道」（单声道升混写法错误）
+
+- **用户诉求**：先 commit 上一处修复（已提交 `6be1e1e`）；另反馈翻唱的人声只有左声道有声音。
+- **诊断**：`cover_20261006_175049` 的 `converted_vocals.wav` 实测为**单声道**（`channels=1`），而混音链用 `pan=stereo|c0=c0|c1=c1` 升混——ffmpeg 的 pan 对越界输入通道取静音，`c1` 取不到 → 右声道全程 `-inf`。实测真实换嗓干声过旧链：左 -15.44dB / 右 `-inf`。`git diff` 确认该 pan 写法是既有代码，与上一处「静态增益」改动无关。
+- **执行**：
+  - 新增常量 `worker._STEREO_UP = "aformat=channel_layouts=stereo"`（mono 等功率升混、立体声原样通过；实测 mono 升混后每声道 -3.01dB、**整体 LUFS 不变**）。
+  - 替换 3 处旧 `pan=stereo|c0=c0|c1=c1`：人声 a0 两个分支 + 伴奏 a1。
+  - `_lufs(path, pre_filter="")` 增可选前置滤镜；`src_lufs`/`conv_lufs`/`acc_lufs`/`ref_lufs` 四处测量统一带 `_STEREO_UP`，保证「测量口径 == 渲染口径」，不依赖升混系数的隐含假设。
+  - 测试：`tests/test_voice_loudness.py` 新增 `test_stereo_up_duplicates_mono_into_both_channels`（两声道等电平 + 旧 pan 右声道静音对照）、`test_lufs_pre_filter_matches_upmix`、`test_convert_upsamples_mono_without_broken_pan`（源码断言）；`_gen_vocal_like` 增 `channels` 参数。
+- **改动文件**：voice-tools/worker.py、tests/test_voice_loudness.py、Docs/changelog.md、chat_history.md。
+- **顺带清理**（同一轮翻唱全链路 review）：① 删除 `_convert` 中已过期的 loudnorm 描述注释（与现「整体 LUFS 静态增益 + 限幅器」实现相反）；② 去掉 `_separate(...)` 中无效的 `denoise_strength=` 实参。
+- **验证**：`py_compile` 通过；`tests/test_voice_loudness.py` **18 passed**；全量 `pytest tests/ --ignore=tests/test_i18n.py -q` → **244 passed**；真实素材复现完整混音链——隔离人声链右声道 `-inf` → 新链左右均 `-18.30dB`；完整成品左右差 3.85dB → **0.03dB**，开头 0.5s 仍为 -63.7/-63.9dB，成品 LUFS -14.28 → -14.23。
+- **收尾**：已 git commit 并重启 9898 服务（worker 懒加载新代码），需刷新浏览器页面验证听感；未跑 tests/test_i18n.py。

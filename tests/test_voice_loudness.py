@@ -9,6 +9,8 @@
 5. 文件不存在：三者均返回 None，不抛异常
 6. _match_gain_db：整体 LUFS 差算静态增益，钳 ±18dB，任一测量缺失返回 None
 7. 混音人声链不再用 loudnorm 动态归一：静音开头不得被抬噪（回归 2026-10-06 开头宽带噪声）
+8. _STEREO_UP 升混：单声道升混后左右声道等电平（回归 2026-10-06「翻唱人声只有左声道」）
+9. _lufs 带 pre_filter 测量：与升混后的立体声文件响度一致（等功率升混，LUFS 不变）
 """
 
 import math
@@ -150,23 +152,38 @@ def _head_rms_db(path, seconds=0.5):
     return -120.0 if vals[-1] == "-inf" else float(vals[-1])
 
 
-def _gen_vocal_like(path):
+def _channel_rms_db(path):
+    """取分声道 RMS 电平 (ch1, ch2)；-inf 归一到 -120。
+
+    astats 的「RMS level dB」按声道顺序输出，随后还有一条 Overall，故前 2 条即左右声道。
+    """
+    proc = subprocess.run(
+        [FFMPEG, "-hide_banner", "-nostats", "-i", str(path),
+         "-af", "astats=metadata=1:reset=0", "-f", "null", "-"],
+        capture_output=True, text=True)
+    vals = [-120.0 if v == "-inf" else float(v)
+            for v in re.findall(r"RMS level dB:\s*(-?[\d.]+|-inf)", proc.stderr)]
+    return (vals[0], vals[1]) if len(vals) >= 2 else (None, None)
+
+
+def _gen_vocal_like(path, channels=2):
     """造"换嗓干声"式信号：前 3.5s 近静音噪声底(≈-64dB) + 后 2s 正弦(≈-18dB)。
 
+    channels=1 用于模拟 Seed-VC 的真实输出（单声道）。
     对应真实场景：Seed-VC 换嗓输出开头是一段纯噪声底，动态归一（loudnorm）
     会把它抬成与音乐等响的宽带噪声。
     """
     sr, amp_noise, amp_tone = 48000, 6.0e-4, 0.126
     random.seed(0)
+    pack = ((lambda v: struct.pack("<hh", v, v)) if channels == 2
+            else (lambda v: struct.pack("<h", v)))
     buf = bytearray()
     for _ in range(int(3.5 * sr)):
-        v = int(random.uniform(-1.0, 1.0) * amp_noise * 32767)
-        buf += struct.pack("<hh", v, v)
+        buf += pack(int(random.uniform(-1.0, 1.0) * amp_noise * 32767))
     for i in range(int(2.0 * sr)):
-        v = int(amp_tone * math.sin(2 * math.pi * 440 * i / sr) * 32767)
-        buf += struct.pack("<hh", v, v)
+        buf += pack(int(amp_tone * math.sin(2 * math.pi * 440 * i / sr) * 32767))
     with wave.open(str(path), "wb") as w:
-        w.setnchannels(2)
+        w.setnchannels(channels)
         w.setsampwidth(2)
         w.setframerate(sr)
         w.writeframes(bytes(buf))
@@ -181,7 +198,8 @@ def _apply_chain(src, dst, af):
     return str(dst)
 
 
-PAN = "aresample=48000,pan=stereo|c0=c0|c1=c1"
+# 与产线一致的单声道→立体声升混（不再用会让右声道静音的 pan=stereo|c0=c0|c1=c1）
+PAN = f"aresample=48000,{worker._STEREO_UP}"
 
 
 def test_static_gain_keeps_silent_head_quiet(tmp_path):
@@ -217,3 +235,48 @@ def test_convert_uses_static_gain_not_dynamic_loudnorm():
         encoding="utf-8")
     assert "alimiter=limit=0.841:level=false[a0]" in src  # 静态增益 + 链尾限幅器
     assert "loudnorm=I=" not in src                       # 人声链不再做动态响度归一
+
+
+def test_stereo_up_duplicates_mono_into_both_channels(tmp_path):
+    """回归：单声道升混后左右声道都必须有声（2026-10-06「翻唱人声只有左声道」）。
+
+    真实链路：Seed-VC 换嗓干声是单声道，混音前需升混成立体声。
+    旧写法 pan=stereo|c0=c0|c1=c1 单声道输入下 c1 越界取静音 → 右声道 -inf。
+    """
+    mono = _gen_sine(str(tmp_path / "mono.wav"), -6.0, seconds=1.0)
+    up = _apply_chain(mono, tmp_path / "up.wav", f"aresample=48000,{worker._STEREO_UP}")
+    lv, rv = _channel_rms_db(up)
+    assert lv is not None and rv is not None
+    assert abs(lv - rv) < 0.1   # 等功率升混 → 两声道等电平
+    assert rv > -60.0           # 右声道有声（旧写法此处为 -inf）
+
+    # 对照：旧写法右声道全静音
+    old = _apply_chain(mono, tmp_path / "old.wav", "aresample=48000,pan=stereo|c0=c0|c1=c1")
+    _, r_old = _channel_rms_db(old)
+    assert r_old <= -119.0
+
+
+def test_lufs_pre_filter_matches_upmix(tmp_path):
+    """_lufs 带 _STEREO_UP 测量单声道时，须与升混后的立体声文件响度一致。
+
+    aformat 的 mono→stereo 是等功率升混（每声道 -3.01dB），整体 LUFS 不变。
+    测量口径带上同一滤镜，才能保证「测什么 == 渲染什么」，不依赖升混系数的隐含假设。
+    """
+    mono = _gen_vocal_like(tmp_path / "mono.wav", channels=1)
+    up = _apply_chain(mono, tmp_path / "up.wav", PAN)
+    lufs_mono = worker._lufs(mono)
+    lufs_metered = worker._lufs(mono, worker._STEREO_UP)
+    lufs_up_file = worker._lufs(up)
+    assert lufs_mono is not None and lufs_metered is not None and lufs_up_file is not None
+    assert abs(lufs_metered - lufs_up_file) < 0.2   # 测量口径 == 渲染口径
+    assert abs(lufs_metered - lufs_mono) < 0.2      # 等功率升混不改变整体 LUFS
+
+
+def test_convert_upsamples_mono_without_broken_pan():
+    """源码断言：混音链用 _STEREO_UP 升混，且不再出现会把右声道变静音的旧 pan 写法。"""
+    src = (Path(__file__).resolve().parent.parent / "voice-tools" / "worker.py").read_text(
+        encoding="utf-8")
+    assert "pan=stereo|c0=c0|c1=c1" not in src or "不能写 pan=stereo|c0=c0|c1=c1" in src
+    assert '_STEREO_UP = "aformat=channel_layouts=stereo"' in src
+    assert "{_STEREO_UP}" in src                 # 渲染链实际引用了升混滤镜
+    assert "_lufs(converted_vocals, _STEREO_UP)" in src  # 测量口径与渲染口径一致

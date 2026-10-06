@@ -42,6 +42,12 @@ FALLBACK_MODELS = {
 SEP_STEM_2 = ("vocals", "no_vocals")
 SEP_STEM_4 = ("vocals", "drums", "bass", "other")
 
+# 单声道→立体声的通用升混滤镜：mono 等功率升混（每声道 -3.01dB，整体 LUFS 不变），
+# 立体声原样通过。不能写 pan=stereo|c0=c0|c1=c1 —— 单声道输入下 c1 越界取静音，
+# 右声道全程无声（Seed-VC 换嗓干声为单声道，2026-10-06 实测复现「人声只有左声道」）。
+# 凡是用 LUFS 做电平对齐/比较的地方，测量时都要带上同一滤镜，保证口径一致。
+_STEREO_UP = "aformat=channel_layouts=stereo"
+
 # 空闲自动卸载阈值（秒）
 IDLE_UNLOAD_SECONDS = 300
 
@@ -436,19 +442,23 @@ def _peak_db(path: str):
     return float(m.group(1)) if m else None
 
 
-def _lufs(path: str):
+def _lufs(path: str, pre_filter: str = ""):
     """用 ffmpeg loudnorm 测整段积分响度 LUFS（BS.1770 口径，含响度门限）。
 
     原理：loudnorm 以 print_format=json 跑一遍空输出，从 stderr 末尾的 JSON 块
     解析 input_i（积分响度）。失败/静音(-inf)/无法解析时返回 None。
+    pre_filter 非空时先套一层滤镜再测量（如 _STEREO_UP 把单声道升混成立体声），
+    保证「测量的口径」与「实际渲染链的口径」完全一致，
+    不依赖升混系数的隐含假设（aformat 的 mono→stereo 为等功率升混，整体 LUFS 不变）。
     """
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return None
+    filt = f"{pre_filter},loudnorm=print_format=json" if pre_filter else "loudnorm=print_format=json"
     try:
         proc = subprocess.run(
             [ffmpeg, "-i", path,
-             "-af", "loudnorm=print_format=json",
+             "-af", filt,
              "-f", "null", "-"],
             capture_output=True, text=True,
         )
@@ -525,8 +535,9 @@ def _convert(seed_dir: str, source: str, ref: str, semi_tone: int,
         _log(f"复用已有分离结果（跳过 Demucs）: 人声={Path(source_vocals).name} "
              f"伴奏={Path(accompaniment).name}")
     else:
-        sep_products = _separate(source, "2", str(out_root),
-                                 denoise_strength=denoise_strength, prefix=prefix,
+        # 不传 denoise：现场分离只负责拆出人声/伴奏，降噪统一在换嗓后对干声执行（见下方降噪步骤），
+        # 故 denoise_strength 在此调用点无意义，不传以免误读
+        sep_products = _separate(source, "2", str(out_root), prefix=prefix,
                                  progress_file=progress_file)
         source_vocals = sep_products["vocals"]
         src_acc = sep_products["accompaniment"]
@@ -615,9 +626,9 @@ def _convert(seed_dir: str, source: str, ref: str, semi_tone: int,
 
     # 2) 用伴奏混音 -> 48kHz 立体声 24-bit FLAC（+ 可选伴奏增益），平铺为 <pfx>cover.flac
     #    换嗓人声先做响度匹配：Seed-VC 换嗓输出电平常显著低于原声干声（实测可差 14dB+），
-    #    不匹配会被伴奏完全盖住。优先 loudnorm 响度归一（LUFS 对齐原声干声 + 真峰值 TP 防削波）：
-    #    静态增益受峰值余量限制拉不满平均电平（换嗓人声峰值高、平均低，实测收窄后人声偏弱），
-    #    动态归一可在峰值不超限的前提下把响度拉到位；LUFS 测量失败时回退 RMS+峰值钳制静态增益。
+    #    不匹配会被伴奏完全盖住。做法是【整体 LUFS 差算恒定增益 + 末尾限幅器兜底真峰值】，
+    #    不用 loudnorm 动态归一（会抬静音段噪声底，见下方详细说明）；
+    #    LUFS 测量失败时回退 RMS 差增益并按换嗓峰值收窄，防削波。
     _check_cancelled()
     _write_progress(progress_file, "mixing")
     cover_flac = out_root / f"{pfx}cover.flac"
@@ -626,15 +637,17 @@ def _convert(seed_dir: str, source: str, ref: str, semi_tone: int,
     acc_gain_db = 0.0
     if accompaniment and src_acc and \
             Path(accompaniment).resolve() != Path(src_acc).resolve():
-        acc_lufs = _lufs(accompaniment)
-        ref_lufs = _lufs(src_acc)
+        acc_lufs = _lufs(accompaniment, _STEREO_UP)
+        ref_lufs = _lufs(src_acc, _STEREO_UP)
         if acc_lufs is not None and ref_lufs is not None:
             acc_gain_db = max(-18.0, min(18.0, ref_lufs - acc_lufs))
             _log(f"自定义伴奏响度对齐: {acc_gain_db:+.1f}dB"
                  f"（素材 {acc_lufs:.1f} -> 源 {ref_lufs:.1f} LUFS）")
-    src_lufs = _lufs(source_vocals)
+    # 响度测量一律带 _STEREO_UP：渲染链先把 mono 升混成立体声再计增益，
+    # 测量也须在同一口径下进行（等功率升混，整体 LUFS 不变）。
+    src_lufs = _lufs(source_vocals, _STEREO_UP)
     # 换嗓干声自身的整体响度，用于算静态匹配增益（与 src_lufs 之差）
-    conv_lufs = _lufs(converted_vocals)
+    conv_lufs = _lufs(converted_vocals, _STEREO_UP)
     match_db = _match_gain_db(src_lufs, conv_lufs)
     # P2 高频细节补偿（hf_enhance>0 时启用，默认 0 完全保持原链路行为）：
     # P1 实测换嗓 over-smoothing —— 谱滚降 6800~7900Hz（源 8950）、谱平坦度 0.10（源 0.197），
@@ -652,9 +665,9 @@ def _convert(seed_dir: str, source: str, ref: str, semi_tone: int,
         # 放大约 +50dB 顶到 -13dB，成品开头出现与音乐等响的宽带噪声（2026-10-06 实测复现）。
         # 静态增益对静音段只是乘常数（静音仍是静音）；LUFS 对线性增益不变，
         # 故平均响度仍精确对齐目标。限幅器 0.841 = -1.5dBFS，仅作峰值兜底。
-        # 注意 pan 在前：换嗓输出为单声道，先复制成立体声再计增益，
-        # 与原声干声（立体声）的 LUFS 声道求和口径一致。
-        a0_chain = (f"[0:a]aresample=48000,pan=stereo|c0=c0|c1=c1{exciter},"
+        # 注意升混在前：换嗓输出为单声道，先升混成立体声再计增益，
+        # 与原声干声（立体声）的 LUFS 声道求和口径一致（测量侧同样带 _STEREO_UP）。
+        a0_chain = (f"[0:a]aresample=48000,{_STEREO_UP}{exciter},"
                     f"volume={match_db:+.2f}dB,alimiter=limit=0.841:level=false[a0]")
     else:
         match_db = 0.0
@@ -676,14 +689,14 @@ def _convert(seed_dir: str, source: str, ref: str, semi_tone: int,
                  f" -> 增益 {match_db:+.1f}dB")
         else:
             _log("人声响度匹配: RMS 测量不可用，跳过（增益 0dB）")
-        a0_chain = (f"[0:a]aresample=48000,pan=stereo|c0=c0|c1=c1{exciter},"
+        a0_chain = (f"[0:a]aresample=48000,{_STEREO_UP}{exciter},"
                     f"volume={match_db:+.1f}dB,alimiter=limit=0.98:level=false[a0]")
     # amix 关闭默认归一（normalize=0）：默认 normalize=1 会把两路各衰减 -6dB，
     # 实测翻唱成品仅 -20.1 LUFS，比源曲（-14.0 LUFS）低 6.1 LU（听感明显发虚单薄）。
     # 关闭后为直接求和：换嗓人声已中标到原声干声 LUFS、伴奏即源曲伴奏，
     # 求和电平自然回到源曲量级；末尾 alimiter 仅作兜底，防止瞬时越界削波
     amix_filter = (
-        f"[1:a]aresample=48000,pan=stereo|c0=c0|c1=c1,"
+        f"[1:a]aresample=48000,{_STEREO_UP},"
         f"volume={gain_db + acc_gain_db:+.1f}dB[a1];"
         f"{a0_chain};"
         "[a0][a1]amix=inputs=2:duration=longest:dropout_transition=0.05:normalize=0,"

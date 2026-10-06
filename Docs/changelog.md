@@ -4,6 +4,22 @@
 
 ---
 
+## 2026-10-06 — 修复翻唱人声「只有左声道」（单声道→立体声升混写法错误）
+
+> 起因：用户实测翻唱成品人声只在左声道出声。
+
+- **现象**：`cover_20261006_175049` 人声只在左声道；隔离混音链实测右声道 RMS = `-inf`（完全静音），完整成品左 -15.14dB / 右 -18.99dB（差 3.85dB）。
+- **根因**：`voice-tools/worker.py` 混音链用 `pan=stereo|c0=c0|c1=c1` 升混。ffmpeg 的 pan 对越界输入通道取静音，而 Seed-VC 换嗓干声实测就是**单声道**（`channels=1`），故 `c1`（右声道）恒为静音。**属既有缺陷，与「静态增益」改动无关**（`git diff` 确认 pan 一行原本就存在）。
+- **修复**：新增常量 `_STEREO_UP = "aformat=channel_layouts=stereo"`（mono 等功率升混、立体声原样通过），替换混音链 3 处旧 `pan` 写法（人声 a0 两个分支 + 伴奏 a1）。
+- **口径一致性**：新写法为等功率升混（每声道 -3.01dB，**整体 LUFS 不变**）；`_lufs()` 增可选 `pre_filter` 参数，响度测量一律带 `_STEREO_UP`，保证「测量口径 == 渲染口径」，不依赖升混系数的隐含假设。
+- **改动文件**：`voice-tools/worker.py`、`tests/test_voice_loudness.py`、`Docs/changelog.md`、`chat_history.md`。
+- **顺带清理**（同一轮翻唱全链路 review 发现）：① 删除 `_convert` 中已过期的 loudnorm 描述注释（与现「整体 LUFS 静态增益 + 限幅器」实现相反，会误导维护）；② 去掉 `_separate(...)` 调用中无效的 `denoise_strength=` 实参（该调用点未启降噪，参数无意义）。
+- **验证**（真实素材：`cover_20261006_175049` 换嗓干声 + `separations_20261006_171905` 伴奏，复现 `_convert` 完整混音链）：
+  - 隔离人声链：右声道 `-inf` → 新链左/右均 `-18.30dB`（对称）。
+  - 完整成品：左右差 3.85dB → **0.03dB**；开头 0.5s 仍为 -63.7 / -63.9dB（无宽带噪声回潮）；成品 LUFS -14.28 → -14.23（基本不变）。
+  - `tests/test_voice_loudness.py` 15 → **18 passed**（新增：单声道升混两声道等电平 + 旧 pan 右声道静音对照、`_lufs` 带 pre_filter 与升混文件一致、源码断言旧 pan 已清除）；全量 `pytest tests/ --ignore=tests/test_i18n.py` → **244 passed**。
+- **未执行**：未在 UI 上重跑翻唱（worker 需重启加载新代码，重启后需刷新浏览器页面验证听感）；未 git push。
+
 ## 2026-10-06 — 代码审计后续优化 C3/C4/C5（任务级超时 / 预览转码后台化 / 长参数重构）
 
 > 起因：`Docs/code-audit-2026-10-06.md` C 类可优化项，用户确认「C3+C4+C5 全做」，C3 采用协作式（监控线程置 cancel_event，不硬 kill）。
